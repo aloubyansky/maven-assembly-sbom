@@ -151,6 +151,31 @@ The main `application` component's PURL includes the archive type derived from t
 
 Each component includes CycloneDX `evidence` with `occurrence` entries recording where it appears in the archive. Library components include an `identity` with technique `manifest-analysis` indicating they were identified through Maven artifact metadata.
 
+## Comparison with cyclonedx-maven-plugin
+
+The [cyclonedx-maven-plugin](https://github.com/CycloneDX/cyclonedx-maven-plugin) is the official CycloneDX tool for Maven projects. It generates SBOMs by reading the Maven dependency tree. This project takes a different approach — it analyzes the actual contents of an assembly archive. The two tools serve complementary purposes.
+
+| | Assembly CycloneDX | cyclonedx-maven-plugin |
+|---|---|---|
+| **What it describes** | A distribution archive (ZIP, TAR, etc.) produced by the Maven Assembly Plugin | A Maven module and its resolved dependencies |
+| **How it identifies components** | Computes content hashes of every file in the archive and matches them against known Maven artifacts | Reads the Maven dependency tree (`compile`, `runtime`, `provided`, etc. scopes) |
+| **Scope accuracy** | Only includes what is physically present in the archive — no more, no less | Includes all resolved dependencies for configured scopes, even if they are excluded from the final distribution |
+| **Unpacked archives** | Detects unpacked WARs/JARs by matching internal entry hashes; identifies nested JARs within them | No archive content analysis — operates on declared dependencies only |
+| **Non-artifact files** | Tracks config files, scripts, and other non-Maven content as `file` components | Not applicable — only tracks Maven dependencies |
+| **Dependency graph** | Reflects the subset of the Maven dependency tree actually present in the archive | Reflects the full Maven dependency tree for configured scopes |
+| **BOM placement** | Embedded inside the archive, written externally alongside it, or both | Attached as a separate Maven artifact with a `cyclonedx` classifier |
+| **Deduplication** | Same artifact at multiple archive paths → single component with multiple `evidence/occurrence` entries | Not applicable (no archive paths) |
+| **Multi-module support** | One BOM per assembly | Per-module BOMs, aggregate BOMs across the reactor, and package-specific BOMs (`war`/`ear`) |
+| **Integration point** | `ContainerDescriptorHandler` — runs automatically during `mvn package` as part of the assembly plugin | Standalone plugin goals (`makeBom`, `makeAggregateBom`, `makePackageBom`) |
+
+### When to use which
+
+**Use this project** when you ship a distribution archive assembled by the Maven Assembly Plugin and need the SBOM to reflect exactly what is inside that archive — including unpacked content, nested JARs, and non-artifact files.
+
+**Use cyclonedx-maven-plugin** when you need a dependency-level SBOM for a Maven module (e.g., a library JAR published to a repository), want aggregate BOMs across a multi-module reactor, or need scope-level control over which dependencies appear in the BOM.
+
+**Use both** when you publish library artifacts with dependency SBOMs _and_ ship distribution archives that need content-accurate SBOMs.
+
 ## Requirements
 
 - Java 17+
