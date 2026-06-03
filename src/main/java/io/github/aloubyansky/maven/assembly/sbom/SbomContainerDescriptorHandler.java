@@ -701,13 +701,31 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
 
     /**
      * Converts a Maven model dependency to an Aether {@link Dependency}.
+     *
+     * <p>
+     * For types with handler-provided classifiers (e.g. {@code test-jar},
+     * {@code java-source}), the Maven type is mapped to the corresponding
+     * Aether extension and classifier. For example, a POM dependency with
+     * {@code <type>test-jar</type>} and no explicit classifier becomes
+     * {@code extension="jar", classifier="tests"} in Aether.
+     * </p>
      */
     private static Dependency toAetherDependency(org.apache.maven.model.Dependency dep) {
+        String type = dep.getType() != null ? dep.getType() : "jar";
+        String classifier = dep.getClassifier();
+        String extension = type;
+        if (classifier == null || classifier.isEmpty()) {
+            String handlerClassifier = ArtifactCoords.handlerClassifier(type);
+            if (handlerClassifier != null) {
+                extension = "jar";
+                classifier = handlerClassifier;
+            }
+        }
         return new Dependency(
                 new org.eclipse.aether.artifact.DefaultArtifact(
                         dep.getGroupId(), dep.getArtifactId(),
-                        dep.getClassifier(),
-                        dep.getType() != null ? dep.getType() : "jar",
+                        classifier,
+                        extension,
                         dep.getVersion()),
                 dep.getScope());
     }
