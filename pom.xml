@@ -48,7 +48,7 @@
         <format.skip>false</format.skip>
         <maven-javadoc-plugin.version>3.11.2</maven-javadoc-plugin.version>
         <maven-release-plugin.version>3.3.1</maven-release-plugin.version>
-        <maven-source-plugin.version>3.3.1</maven-source-plugin.version>
+        <maven-source-plugin.version>3.4.0</maven-source-plugin.version>
     </properties>
 
     <dependencies>
