@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import org.apache.maven.artifact.DefaultArtifact;
 import org.apache.maven.artifact.handler.DefaultArtifactHandler;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 class ArtifactCoordsTest {
 
@@ -16,8 +18,8 @@ class ArtifactCoordsTest {
 
     @Test
     void toStringWithClassifier() {
-        ArtifactCoords id = new ArtifactCoords("org.example", "foo", "1.0", "jar", "sources");
-        assertEquals("org.example:foo:1.0:sources", id.toString());
+        ArtifactCoords id = new ArtifactCoords("org.example", "foo", "1.0", "jar", "linux-x86_64");
+        assertEquals("org.example:foo:1.0:linux-x86_64", id.toString());
     }
 
     @Test
@@ -43,7 +45,7 @@ class ArtifactCoordsTest {
 
     @Test
     void toGavOmitsClassifier() {
-        ArtifactCoords id = new ArtifactCoords("org.example", "foo", "1.0", "jar", "sources");
+        ArtifactCoords id = new ArtifactCoords("org.example", "foo", "1.0", "jar", "linux-x86_64");
         assertEquals("org.example:foo:1.0", id.toGav());
     }
 
@@ -69,11 +71,11 @@ class ArtifactCoordsTest {
     @Test
     void fromMavenArtifactWithClassifier() {
         DefaultArtifact artifact = new DefaultArtifact(
-                "org.example", "bar", "2.0", "compile", "jar", "tests",
+                "org.example", "bar", "2.0", "compile", "jar", "linux-x86_64",
                 new DefaultArtifactHandler("jar"));
         ArtifactCoords id = ArtifactCoords.of(artifact);
-        assertEquals("tests", id.classifier());
-        assertEquals("org.example:bar:2.0:tests", id.toString());
+        assertEquals("linux-x86_64", id.classifier());
+        assertEquals("org.example:bar:2.0:linux-x86_64", id.toString());
     }
 
     @Test
@@ -84,13 +86,14 @@ class ArtifactCoordsTest {
         assertEquals("org.example", id.groupId());
         assertEquals("baz", id.artifactId());
         assertEquals("3.0", id.version());
-        assertEquals("javadoc", id.classifier());
+        assertEquals("javadoc", id.type());
+        assertNull(id.classifier());
     }
 
     @Test
     void equalityByFields() {
-        ArtifactCoords a = new ArtifactCoords("org.example", "foo", "1.0", "jar", "sources");
-        ArtifactCoords b = new ArtifactCoords("org.example", "foo", "1.0", "jar", "sources");
+        ArtifactCoords a = new ArtifactCoords("org.example", "foo", "1.0", "jar", "linux-x86_64");
+        ArtifactCoords b = new ArtifactCoords("org.example", "foo", "1.0", "jar", "linux-x86_64");
         assertEquals(a, b);
         assertEquals(a.hashCode(), b.hashCode());
     }
@@ -98,7 +101,7 @@ class ArtifactCoordsTest {
     @Test
     void differentClassifierNotEqual() {
         ArtifactCoords a = ArtifactCoords.of("org.example", "foo", "1.0");
-        ArtifactCoords b = new ArtifactCoords("org.example", "foo", "1.0", "jar", "sources");
+        ArtifactCoords b = new ArtifactCoords("org.example", "foo", "1.0", "jar", "linux-x86_64");
         assertNotEquals(a, b);
     }
 
@@ -125,5 +128,77 @@ class ArtifactCoordsTest {
     void nullVersionThrows() {
         assertThrows(NullPointerException.class,
                 () -> new ArtifactCoords("org.example", "foo", null, null, null));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "test-jar,  tests",
+            "ejb-client, client",
+            "java-source, sources",
+            "javadoc,   javadoc"
+    })
+    void handlerClassifierTypesNormalizedFromMaven(String mavenType, String handlerClassifier) {
+        DefaultArtifact artifact = new DefaultArtifact(
+                "org.example", "bar", "2.0", "compile", mavenType, handlerClassifier,
+                new DefaultArtifactHandler(mavenType));
+        ArtifactCoords id = ArtifactCoords.of(artifact);
+        assertEquals(mavenType, id.type());
+        assertNull(id.classifier());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "test-jar,  tests",
+            "ejb-client, client",
+            "java-source, sources",
+            "javadoc,   javadoc"
+    })
+    void handlerClassifierTypesNormalizedFromAether(String mavenType, String handlerClassifier) {
+        // Aether represents these as extension="jar" + the handler classifier
+        org.eclipse.aether.artifact.DefaultArtifact artifact = new org.eclipse.aether.artifact.DefaultArtifact(
+                "org.example", "bar", handlerClassifier, "jar", "2.0");
+        ArtifactCoords id = ArtifactCoords.of(artifact);
+        assertEquals(mavenType, id.type());
+        assertNull(id.classifier());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "test-jar,  tests",
+            "ejb-client, client",
+            "java-source, sources",
+            "javadoc,   javadoc"
+    })
+    void handlerClassifierTypesMavenEqualsAether(String mavenType, String handlerClassifier) {
+        DefaultArtifact mavenArtifact = new DefaultArtifact(
+                "org.example", "bar", "2.0", "compile", mavenType, handlerClassifier,
+                new DefaultArtifactHandler(mavenType));
+        ArtifactCoords fromMaven = ArtifactCoords.of(mavenArtifact);
+
+        org.eclipse.aether.artifact.DefaultArtifact aetherArtifact = new org.eclipse.aether.artifact.DefaultArtifact(
+                "org.example", "bar", handlerClassifier, "jar", "2.0");
+        ArtifactCoords fromAether = ArtifactCoords.of(aetherArtifact);
+
+        assertEquals(fromMaven, fromAether);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "test-jar,  tests",
+            "ejb-client, client",
+            "java-source, sources",
+            "javadoc,   javadoc"
+    })
+    void handlerClassifierTypesNormalizedFromConstructor(String mavenType, String handlerClassifier) {
+        // direct constructor with extension "jar" + handler classifier
+        ArtifactCoords fromExtension = new ArtifactCoords(
+                "org.example", "bar", "2.0", "jar", handlerClassifier);
+        // direct constructor with Maven type + handler classifier
+        ArtifactCoords fromType = new ArtifactCoords(
+                "org.example", "bar", "2.0", mavenType, handlerClassifier);
+
+        assertEquals(fromExtension, fromType);
+        assertEquals(mavenType, fromExtension.type());
+        assertNull(fromExtension.classifier());
     }
 }

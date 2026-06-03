@@ -60,13 +60,65 @@ class BomBuilderTest {
     void mavenArtifactWithClassifier() {
         BomBuilder builder = new BomBuilder("com.example", "app", "1.0", "dist");
         builder.addMavenArtifact(
-                new ArtifactCoords("org.foo", "bar", "3.0", "jar", "sources"),
+                new ArtifactCoords("org.foo", "bar", "3.0", "jar", "linux-x86_64"),
                 null, null, null);
         Bom bom = builder.build();
 
         Component comp = findByName(bom, "bar");
         assertNotNull(comp);
-        assertEquals("pkg:maven/org.foo/bar@3.0?type=jar&classifier=sources", comp.getPurl());
+        assertEquals("pkg:maven/org.foo/bar@3.0?type=jar&classifier=linux-x86_64", comp.getPurl());
+    }
+
+    @Test
+    void testJarPurlOmitsHandlerProvidedClassifier() {
+        BomBuilder builder = new BomBuilder("com.example", "app", "1.0", "dist");
+        builder.addMavenArtifact(
+                new ArtifactCoords("org.foo", "bar", "3.0", "test-jar", "tests"),
+                null, null, null);
+        Bom bom = builder.build();
+
+        Component comp = findByName(bom, "bar");
+        assertNotNull(comp);
+        assertEquals("pkg:maven/org.foo/bar@3.0?type=test-jar", comp.getPurl());
+    }
+
+    @Test
+    void ejbClientPurlOmitsHandlerProvidedClassifier() {
+        BomBuilder builder = new BomBuilder("com.example", "app", "1.0", "dist");
+        builder.addMavenArtifact(
+                new ArtifactCoords("org.foo", "bar", "3.0", "ejb-client", "client"),
+                null, null, null);
+        Bom bom = builder.build();
+
+        Component comp = findByName(bom, "bar");
+        assertNotNull(comp);
+        assertEquals("pkg:maven/org.foo/bar@3.0?type=ejb-client", comp.getPurl());
+    }
+
+    @Test
+    void javaSourcePurlOmitsHandlerProvidedClassifier() {
+        BomBuilder builder = new BomBuilder("com.example", "app", "1.0", "dist");
+        builder.addMavenArtifact(
+                new ArtifactCoords("org.foo", "bar", "3.0", "java-source", "sources"),
+                null, null, null);
+        Bom bom = builder.build();
+
+        Component comp = findByName(bom, "bar");
+        assertNotNull(comp);
+        assertEquals("pkg:maven/org.foo/bar@3.0?type=java-source", comp.getPurl());
+    }
+
+    @Test
+    void javadocPurlOmitsHandlerProvidedClassifier() {
+        BomBuilder builder = new BomBuilder("com.example", "app", "1.0", "dist");
+        builder.addMavenArtifact(
+                new ArtifactCoords("org.foo", "bar", "3.0", "javadoc", "javadoc"),
+                null, null, null);
+        Bom bom = builder.build();
+
+        Component comp = findByName(bom, "bar");
+        assertNotNull(comp);
+        assertEquals("pkg:maven/org.foo/bar@3.0?type=javadoc", comp.getPurl());
     }
 
     @Test

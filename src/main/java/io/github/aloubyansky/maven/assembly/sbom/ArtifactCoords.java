@@ -1,5 +1,6 @@
 package io.github.aloubyansky.maven.assembly.sbom;
 
+import java.util.Map;
 import java.util.Objects;
 
 import org.apache.maven.artifact.Artifact;
@@ -8,6 +9,14 @@ import org.apache.maven.project.MavenProject;
 /**
  * Immutable Maven artifact coordinates used as a deduplication key
  * across the SBOM generation pipeline.
+ *
+ * <p>
+ * Coordinates use the logical Maven identity: the type field stores
+ * the Maven packaging type (e.g. {@code "test-jar"}, not the file
+ * extension), and the classifier is only set when explicitly declared
+ * in the POM. Handler-provided classifiers (e.g. {@code "tests"} for
+ * {@code test-jar}) are stripped because they are implicit in the type.
+ * </p>
  *
  * <p>
  * The record normalizes empty classifiers to {@code null} so that
@@ -23,13 +32,33 @@ import org.apache.maven.project.MavenProject;
  * @param groupId the Maven groupId
  * @param artifactId the Maven artifactId
  * @param version the artifact version
- * @param type the packaging type (e.g. "jar", "war"), or {@code null}
+ * @param type the packaging type (e.g. "jar", "war", "test-jar"), or {@code null}
  * @param classifier the Maven classifier, or {@code null} if none
  */
 record ArtifactCoords(String groupId, String artifactId, String version,
         String type, String classifier) {
 
     private static final String SEPARATOR = ":";
+
+    /**
+     * Maven types whose artifact handler provides an implicit classifier.
+     * Key: type, value: handler-provided classifier.
+     */
+    private static final Map<String, String> HANDLER_CLASSIFIERS = Map.of(
+            "test-jar", "tests",
+            "ejb-client", "client",
+            "java-source", "sources",
+            "javadoc", "javadoc");
+
+    /**
+     * Reverse of {@link #HANDLER_CLASSIFIERS}: Aether extension "jar" +
+     * classifier → Maven type.
+     */
+    private static final Map<String, String> CLASSIFIER_TO_TYPE = Map.of(
+            "tests", "test-jar",
+            "client", "ejb-client",
+            "sources", "java-source",
+            "javadoc", "javadoc");
 
     ArtifactCoords {
         Objects.requireNonNull(groupId, "groupId");
@@ -39,6 +68,17 @@ record ArtifactCoords(String groupId, String artifactId, String version,
             type = "jar";
         }
         if (classifier != null && classifier.isEmpty()) {
+            classifier = null;
+        }
+        // map Aether extension+classifier to Maven type and strip the
+        // handler-provided classifier (e.g. jar+tests → test-jar, null)
+        if ("jar".equals(type) && classifier != null) {
+            String mapped = CLASSIFIER_TO_TYPE.get(classifier);
+            if (mapped != null) {
+                type = mapped;
+                classifier = null;
+            }
+        } else if (classifier != null && classifier.equals(HANDLER_CLASSIFIERS.get(type))) {
             classifier = null;
         }
     }
@@ -72,6 +112,14 @@ record ArtifactCoords(String groupId, String artifactId, String version,
     static ArtifactCoords of(MavenProject p) {
         return new ArtifactCoords(p.getGroupId(), p.getArtifactId(), p.getVersion(),
                 p.getPackaging(), null);
+    }
+
+    /**
+     * Returns the handler-provided classifier for a Maven type, or
+     * {@code null} if the type does not have an implicit classifier.
+     */
+    static String handlerClassifier(String type) {
+        return HANDLER_CLASSIFIERS.get(type);
     }
 
     /**
