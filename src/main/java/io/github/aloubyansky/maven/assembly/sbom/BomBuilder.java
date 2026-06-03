@@ -44,6 +44,15 @@ import org.cyclonedx.model.metadata.ToolInformation;
  */
 public class BomBuilder {
 
+    private static final Comparator<Component> COMPONENT_ORDER;
+    static {
+        Comparator<String> nullSafe = Comparator.nullsFirst(Comparator.naturalOrder());
+        COMPONENT_ORDER = Comparator
+                .comparing(Component::getGroup, nullSafe)
+                .thenComparing(Component::getName)
+                .thenComparing(Component::getVersion, nullSafe);
+    }
+
     private final String projectGroupId;
     private final String projectArtifactId;
     private final String projectVersion;
@@ -302,18 +311,13 @@ public class BomBuilder {
         if (nestedComponentsByParent.isEmpty()) {
             return;
         }
-        Comparator<String> nullSafe = Comparator.nullsFirst(Comparator.naturalOrder());
-        Comparator<Component> byCoordinates = Comparator
-                .comparing(Component::getGroup, nullSafe)
-                .thenComparing(Component::getName)
-                .thenComparing(Component::getVersion, nullSafe);
         for (Map.Entry<ArtifactCoords, List<Component>> entry : nestedComponentsByParent.entrySet()) {
             Component parent = componentsById.get(entry.getKey());
             if (parent == null) {
                 continue;
             }
             List<Component> nested = entry.getValue();
-            nested.sort(byCoordinates);
+            nested.sort(COMPONENT_ORDER);
             parent.setComponents(nested);
         }
     }
@@ -377,11 +381,7 @@ public class BomBuilder {
      */
     private List<Component> buildSortedComponentList() {
         List<Component> allComponents = new ArrayList<>(components);
-        Comparator<String> nullSafe = Comparator.nullsFirst(Comparator.naturalOrder());
-        allComponents.sort(Comparator
-                .comparing(Component::getGroup, nullSafe)
-                .thenComparing(Component::getName)
-                .thenComparing(Component::getVersion, nullSafe));
+        allComponents.sort(COMPONENT_ORDER);
         return allComponents;
     }
 
