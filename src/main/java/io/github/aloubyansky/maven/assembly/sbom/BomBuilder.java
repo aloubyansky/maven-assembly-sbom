@@ -642,14 +642,14 @@ public class BomBuilder {
      * a bare {@code pkg:maven/g/a@v} without type or classifier.
      */
     private String buildMainPurl() {
-        String base = "pkg:maven/" + projectGroupId + "/" + projectArtifactId
-                + "@" + projectVersion;
+        String base = "pkg:maven/" + purlEncode(projectGroupId) + "/"
+                + purlEncode(projectArtifactId) + "@" + purlEncode(projectVersion);
         if (archiveType == null) {
             return base;
         }
-        String purl = base + "?type=" + archiveType;
+        String purl = base + "?type=" + purlEncode(archiveType);
         if (classifier != null && !classifier.isEmpty()) {
-            purl += "&classifier=" + classifier;
+            purl += "&classifier=" + purlEncode(classifier);
         }
         return purl;
     }
@@ -659,10 +659,11 @@ public class BomBuilder {
      */
     private static String buildMavenPurl(String groupId, String artifactId,
             String version, String type, String classifier) {
-        String purl = "pkg:maven/" + groupId + "/" + artifactId + "@" + version
-                + "?type=" + (type != null ? type : "jar");
+        String purl = "pkg:maven/" + purlEncode(groupId) + "/" + purlEncode(artifactId)
+                + "@" + purlEncode(version)
+                + "?type=" + purlEncode(type != null ? type : "jar");
         if (classifier != null && !classifier.isEmpty()) {
-            purl += "&classifier=" + classifier;
+            purl += "&classifier=" + purlEncode(classifier);
         }
         return purl;
     }
@@ -671,11 +672,52 @@ public class BomBuilder {
      * Builds a Package URL for a generic (non-Maven) file.
      */
     private String buildGenericPurl(String fileName, String hash) {
-        String purl = "pkg:generic/" + fileName;
+        String purl = "pkg:generic/" + purlEncode(fileName);
         if (hash != null) {
-            purl += "?checksum=" + hashAlgorithmName + ":" + hash;
+            purl += "?checksum=" + purlEncode(hashAlgorithmName) + ":" + purlEncode(hash);
         }
         return purl;
+    }
+
+    private static final char[] HEX_DIGITS = "0123456789ABCDEF".toCharArray();
+
+    /**
+     * Percent-encodes a PURL component per RFC 3986. Only unreserved
+     * characters (A-Z a-z 0-9 - . _ ~) are left unencoded.
+     */
+    private static String purlEncode(String value) {
+        if (value == null || value.isEmpty()) {
+            return value;
+        }
+        int i = 0;
+        while (i < value.length()) {
+            char c = value.charAt(i);
+            if (!isUnreserved(c)) {
+                break;
+            }
+            i++;
+        }
+        if (i == value.length()) {
+            return value;
+        }
+        StringBuilder sb = new StringBuilder(value.length() + 2);
+        sb.append(value, 0, i);
+        for (byte b : value.substring(i).getBytes(StandardCharsets.UTF_8)) {
+            if (isUnreserved(b)) {
+                sb.append((char) b);
+            } else {
+                int unsigned = b & 0xFF;
+                sb.append('%');
+                sb.append(HEX_DIGITS[unsigned >> 4]);
+                sb.append(HEX_DIGITS[unsigned & 0x0F]);
+            }
+        }
+        return sb.toString();
+    }
+
+    private static boolean isUnreserved(int c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~';
     }
 
     /**

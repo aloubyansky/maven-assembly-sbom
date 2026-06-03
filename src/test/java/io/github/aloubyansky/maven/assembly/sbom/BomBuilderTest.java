@@ -70,6 +70,20 @@ class BomBuilderTest {
     }
 
     @Test
+    void purlEncodesSpecialCharactersInClassifier() {
+        BomBuilder builder = new BomBuilder("com.example", "app", "1.0", "dist");
+        builder.addMavenArtifact(
+                new ArtifactCoords("org.foo", "bar", "3.0", "jar", "linux+debug"),
+                null, null, null);
+        Bom bom = builder.build();
+
+        Component comp = findByName(bom, "bar");
+        assertNotNull(comp);
+        assertEquals("pkg:maven/org.foo/bar@3.0?type=jar&classifier=linux%2Bdebug",
+                comp.getPurl());
+    }
+
+    @Test
     void testJarPurlOmitsHandlerProvidedClassifier() {
         BomBuilder builder = new BomBuilder("com.example", "app", "1.0", "dist");
         builder.addMavenArtifact(
