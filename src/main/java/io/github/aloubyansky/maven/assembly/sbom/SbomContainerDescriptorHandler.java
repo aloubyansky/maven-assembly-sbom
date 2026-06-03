@@ -214,6 +214,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
      */
     private void populateToolMetadata(BomBuilder builder) {
         Properties toolProps = SbomUtils.loadToolProperties();
+        builder.setToolProperties(toolProps);
         String toolGroupId = toolProps.getProperty("groupId");
         String toolArtifactCoords = toolProps.getProperty("artifactId");
         String toolVersion = toolProps.getProperty("version");

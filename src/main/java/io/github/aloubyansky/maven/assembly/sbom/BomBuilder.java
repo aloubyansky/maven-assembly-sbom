@@ -68,6 +68,7 @@ public class BomBuilder {
     private final Set<String> directChildren = new HashSet<>();
     private final Map<ArtifactCoords, Set<ArtifactCoords>> explicitDeps = new HashMap<>();
     private LicenseChoice projectLicenses;
+    private Properties toolProperties;
     private LicenseChoice toolLicenses;
     private String toolHash;
     private String archiveType;
@@ -227,6 +228,14 @@ public class BomBuilder {
     }
 
     /**
+     * Sets the tool's Maven properties (groupId, artifactId, version)
+     * loaded from pom.properties on the classpath.
+     */
+    public void setToolProperties(Properties toolProperties) {
+        this.toolProperties = toolProperties;
+    }
+
+    /**
      * Sets the license information for the SBOM generator tool component.
      *
      * @param licenses the tool's license information, or {@code null}
@@ -354,7 +363,7 @@ public class BomBuilder {
      * Creates the tool identity for the BOM metadata.
      */
     private ToolInformation createToolInfo() {
-        Properties props = SbomUtils.loadToolProperties();
+        Properties props = toolProperties != null ? toolProperties : SbomUtils.loadToolProperties();
         Component tool = new Component();
         tool.setType(Component.Type.APPLICATION);
         tool.setGroup(props.getProperty("groupId",
