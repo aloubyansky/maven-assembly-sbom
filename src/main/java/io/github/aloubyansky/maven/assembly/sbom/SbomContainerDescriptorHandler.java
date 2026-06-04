@@ -605,7 +605,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
      * The Plexus Archiver API provides no public post-write hook.
      * This method accesses the internal {@code closeables} list via
      * reflection as a best-effort mechanism. If the field is missing
-     * or inaccessible, a debug message is logged and the BOM is
+     * or inaccessible, a warning is logged and the BOM is
      * produced without the archive hash.
      * </p>
      */
@@ -614,7 +614,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
         try {
             java.lang.reflect.Field field = findField(archiver.getClass(), "closeables");
             if (field == null) {
-                log.info("Could not find closeables field on archiver, "
+                log.warn("Could not find closeables field on archiver, "
                         + "archive hash will not be added to the external BOM");
                 return;
             }
@@ -624,7 +624,8 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
             Hash.Algorithm algorithm = bomHashAlgorithm;
             closeables.add(() -> updateBomWithArchiveHash(archiver, bom, bomPath, digest, algorithm));
         } catch (Exception e) {
-            log.debug("Could not register archive hash callback", e);
+            log.warn("Could not register archive hash callback, "
+                    + "archive hash will not be added to the external BOM", e);
         }
     }
 
