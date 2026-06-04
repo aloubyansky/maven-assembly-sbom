@@ -201,11 +201,16 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                 : "assembly";
         classifier = assemblyConfig.classifier;
         try {
+            bomHashAlgorithm = Hash.Algorithm.fromSpec(hashAlgorithm);
+        } catch (IllegalArgumentException e) {
+            throw new ArchiverException("Hash algorithm '" + hashAlgorithm
+                    + "' is not supported by the CycloneDX specification", e);
+        }
+        try {
             messageDigest = MessageDigest.getInstance(hashAlgorithm);
         } catch (NoSuchAlgorithmException e) {
             throw new ArchiverException("Unsupported hash algorithm: " + hashAlgorithm, e);
         }
-        bomHashAlgorithm = Hash.Algorithm.fromSpec(hashAlgorithm);
     }
 
     /**
