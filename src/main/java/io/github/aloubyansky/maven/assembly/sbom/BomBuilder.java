@@ -65,6 +65,8 @@ public class BomBuilder {
     private final Map<ArtifactCoords, String> bomRefById = new HashMap<>();
     private final Map<ArtifactCoords, Component> componentsById = new HashMap<>();
     private final Map<ArtifactCoords, List<Component>> nestedComponentsByParent = new HashMap<>();
+    private final Map<String, Component> fileComponentsByPath = new HashMap<>();
+    private final Map<String, List<Component>> nestedComponentsByFile = new HashMap<>();
     private final Set<String> directChildren = new HashSet<>();
     private final Map<ArtifactCoords, Set<ArtifactCoords>> explicitDeps = new HashMap<>();
     private LicenseChoice projectLicenses;
@@ -132,8 +134,8 @@ public class BomBuilder {
      */
     public void addMavenArtifact(ArtifactCoords coords, String archivePath,
             String hash, LicenseChoice licenses) {
-        Component comp = registerMavenComponent(coords, archivePath, hash, licenses);
-        if (comp != null) {
+        if (registerOrMergeMavenComponent(coords, archivePath, hash, licenses)) {
+            Component comp = componentsById.get(coords);
             directChildren.add(comp.getBomRef());
             components.add(comp);
         }
@@ -151,10 +153,10 @@ public class BomBuilder {
      * </p>
      *
      * <p>
-     * Duplicate handling is the same as {@link #addMavenArtifact}: if
-     * an artifact with identical coordinates already exists (at any nesting
-     * level), the {@code archivePath} is appended as an additional
-     * {@link Occurrence}.
+     * If an artifact with identical coordinates already exists (at any
+     * nesting level), the {@code archivePath} is appended as an additional
+     * {@link Occurrence} and the existing component is added to the
+     * parent's containment list.
      * </p>
      *
      * @param parentId the artifact identity of the containing component
@@ -167,7 +169,8 @@ public class BomBuilder {
     public void addNestedMavenArtifact(ArtifactCoords parentId, ArtifactCoords coords,
             String archivePath, String hash,
             LicenseChoice licenses) {
-        Component comp = registerMavenComponent(coords, archivePath, hash, licenses);
+        registerOrMergeMavenComponent(coords, archivePath, hash, licenses);
+        Component comp = componentsById.get(coords);
         if (comp != null) {
             nestedComponentsByParent.computeIfAbsent(parentId, k -> new ArrayList<>())
                     .add(comp);
@@ -175,17 +178,18 @@ public class BomBuilder {
     }
 
     /**
-     * Creates and registers a Maven component, or merges with an existing
-     * one if the coordinates are already known. Returns the new component,
-     * or {@code null} if a duplicate was merged.
+     * Ensures a Maven component is registered for the given coordinates.
+     * If the component already exists, merges the occurrence and licenses.
+     *
+     * @return {@code true} if a new component was created
      */
-    private Component registerMavenComponent(ArtifactCoords coords, String archivePath,
+    private boolean registerOrMergeMavenComponent(ArtifactCoords coords, String archivePath,
             String hash, LicenseChoice licenses) {
         Component existing = componentsById.get(coords);
         if (existing != null) {
             appendOccurrence(existing, archivePath);
             applyLicensesIfAbsent(existing, licenses);
-            return null;
+            return false;
         }
 
         Component comp = createMavenComponent(coords);
@@ -199,7 +203,7 @@ public class BomBuilder {
 
         bomRefById.put(coords, comp.getBomRef());
         componentsById.put(coords, comp);
-        return comp;
+        return true;
     }
 
     /**
@@ -216,6 +220,26 @@ public class BomBuilder {
         }
         directChildren.add(comp.getBomRef());
         components.add(comp);
+        fileComponentsByPath.put(archivePath, comp);
+    }
+
+    /**
+     * Registers a Maven artifact as a nested sub-component of a FILE
+     * component (e.g. an artifact discovered via pom.properties inside
+     * a shaded JAR that could not be positively identified as the owner).
+     *
+     * @param filePath the archive path of the parent FILE component
+     * @param coords the Maven artifact coordinates
+     * @param licenses the resolved license information, or {@code null}
+     */
+    public void addNestedArtifactUnderFile(String filePath, ArtifactCoords coords,
+            LicenseChoice licenses) {
+        registerOrMergeMavenComponent(coords, filePath, null, licenses);
+        Component comp = componentsById.get(coords);
+        if (comp != null) {
+            nestedComponentsByFile.computeIfAbsent(filePath, k -> new ArrayList<>())
+                    .add(comp);
+        }
     }
 
     /**
@@ -317,17 +341,25 @@ public class BomBuilder {
      * sorted by group/name/version for deterministic output.
      */
     private void attachNestedComponents() {
-        if (nestedComponentsByParent.isEmpty()) {
-            return;
-        }
+        Map<Component, List<Component>> merged = new HashMap<>();
         for (Map.Entry<ArtifactCoords, List<Component>> entry : nestedComponentsByParent.entrySet()) {
             Component parent = componentsById.get(entry.getKey());
-            if (parent == null) {
-                continue;
+            if (parent != null) {
+                merged.computeIfAbsent(parent, k -> new ArrayList<>())
+                        .addAll(entry.getValue());
             }
+        }
+        for (Map.Entry<String, List<Component>> entry : nestedComponentsByFile.entrySet()) {
+            Component parent = fileComponentsByPath.get(entry.getKey());
+            if (parent != null) {
+                merged.computeIfAbsent(parent, k -> new ArrayList<>())
+                        .addAll(entry.getValue());
+            }
+        }
+        for (Map.Entry<Component, List<Component>> entry : merged.entrySet()) {
             List<Component> nested = entry.getValue();
             nested.sort(COMPONENT_ORDER);
-            parent.setComponents(nested);
+            entry.getKey().setComponents(nested);
         }
     }
 
@@ -437,7 +469,7 @@ public class BomBuilder {
     private Component createFileComponent(String archivePath, String hash) {
         Component comp = new Component();
         comp.setType(Component.Type.FILE);
-        String fileName = extractFileName(archivePath);
+        String fileName = SbomUtils.extractFileName(archivePath);
         comp.setName(fileName);
         comp.setBomRef("file:" + archivePath);
         comp.setPurl(buildGenericPurl(fileName, hash));
@@ -727,12 +759,4 @@ public class BomBuilder {
                 || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~';
     }
 
-    /**
-     * Extracts the filename portion from a path.
-     */
-    private static String extractFileName(String path) {
-        return path.contains("/")
-                ? path.substring(path.lastIndexOf('/') + 1)
-                : path;
-    }
 }
