@@ -9,6 +9,7 @@ import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.List;
 import java.util.Set;
 import java.util.jar.JarEntry;
@@ -27,6 +28,7 @@ import org.codehaus.plexus.archiver.zip.ZipArchiver;
 import org.codehaus.plexus.components.io.fileselectors.FileInfo;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
+import org.cyclonedx.model.Hash;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.collection.CollectResult;
@@ -692,7 +694,176 @@ class SbomContainerDescriptorHandlerTest {
         assertEquals("MIT", file.getLicenseChoice().getLicenses().get(0).getId());
     }
 
-    // --- helpers ---
+    @Test
+    void externalSbomMatchedFileNotLostFromBom() throws Exception {
+        when(project.getArtifacts()).thenReturn(Set.of());
+        lenient().when(project.getBasedir()).thenReturn(tempDir.toFile());
+
+        Path npmFile = createTestFile("widget.js", "npm-pkg-data");
+        String hash = SbomUtils.computeHash(
+                MessageDigest.getInstance("SHA-256"), npmFile);
+
+        Bom externalBom = new Bom();
+        Component extComp = new Component();
+        extComp.setType(Component.Type.LIBRARY);
+        extComp.setGroup("@acme");
+        extComp.setName("widget");
+        extComp.setVersion("3.2.1");
+        extComp.addHash(new Hash("SHA-256", hash));
+        externalBom.addComponent(extComp);
+
+        Path bomFile = tempDir.resolve("npm-sbom.cdx.json");
+        BomWriter.writeJson(externalBom, bomFile, true);
+        handler.setMergeBoms(bomFile.toString());
+
+        ZipArchiver archiver = buildArchiver(
+                "base/node_modules/@acme/widget/index.js", npmFile);
+        handler.finalizeArchiveCreation(archiver);
+
+        Bom bom = readBomFromArchiver(archiver);
+        assertNotNull(bom);
+
+        // Step 1: external BOM must have been loaded and merged
+        assertTrue(allComponentsRecursive(bom).stream()
+                .anyMatch(c -> "widget".equals(c.getName())
+                        && "@acme".equals(c.getGroup())),
+                "precondition: external BOM components should be merged into output");
+
+        // Step 2: hash matching must have removed the file from unmatched
+        assertNull(findComponent(bom, Component.Type.FILE, "index.js"),
+                "file whose hash matches external SBOM component"
+                        + " should not appear as unmatched FILE");
+
+        // Step 3: the file's archive path must still be traceable
+        String expectedPath = "node_modules/@acme/widget/index.js";
+        boolean pathTraceable = allComponentsRecursive(bom).stream()
+                .anyMatch(c -> c.getEvidence() != null
+                        && c.getEvidence().getOccurrences() != null
+                        && c.getEvidence().getOccurrences().stream()
+                                .anyMatch(o -> expectedPath.equals(
+                                        o.getLocation())));
+        assertTrue(pathTraceable,
+                "file matched by external SBOM must have its archive path"
+                        + " recorded as an occurrence on the matched component");
+    }
+
+    private static List<Component> allComponentsRecursive(Bom bom) {
+        List<Component> result = new java.util.ArrayList<>();
+        if (bom.getComponents() != null) {
+            collectComponents(bom.getComponents(), result);
+        }
+        if (bom.getMetadata() != null && bom.getMetadata().getComponent() != null
+                && bom.getMetadata().getComponent().getComponents() != null) {
+            collectComponents(bom.getMetadata().getComponent().getComponents(), result);
+        }
+        return result;
+    }
+
+    private static void collectComponents(List<Component> components,
+            List<Component> result) {
+        for (Component c : components) {
+            result.add(c);
+            if (c.getComponents() != null) {
+                collectComponents(c.getComponents(), result);
+            }
+        }
+    }
+
+    @Test
+    void ignoredEmbeddedSbomPreservedAsUnmatchedFile() throws Exception {
+        handler.setEmbeddedSbomHandling("ignore");
+        handler.setOutput("external");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        Path sbomFile = createTestFile("bom.cdx.json",
+                "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.6\","
+                        + "\"components\":[]}");
+
+        Path archivePath = tempDir.resolve("ignore-test.zip");
+        ZipArchiver archiver = new ZipArchiver();
+        archiver.setDestFile(archivePath.toFile());
+        archiver.addFile(sbomFile.toFile(), "base/META-INF/sbom/bom.cdx.json");
+        handler.finalizeArchiveCreation(archiver);
+        archiver.createArchive();
+
+        Path bomFile = tempDir.resolve("ignore-test.zip.cdx.json");
+        assertTrue(Files.exists(bomFile), "external BOM should be written");
+        String json = Files.readString(bomFile);
+        org.cyclonedx.parsers.JsonParser parser = new org.cyclonedx.parsers.JsonParser();
+        Bom bom = parser.parse(json.getBytes(StandardCharsets.UTF_8));
+
+        Component file = findComponent(bom, Component.Type.FILE, "bom.cdx.json");
+        assertNotNull(file,
+                "SBOM file should remain as unmatched FILE component"
+                        + " when embeddedSbomHandling=ignore");
+        assertEquals("META-INF/sbom/bom.cdx.json",
+                file.getEvidence().getOccurrences().get(0).getLocation());
+    }
+
+    @Test
+    void embeddedSbomFromArtifactNotInArchiveIsIgnored() throws Exception {
+        Path includedJar = createTestJar("lib-1.0.jar", "included-content");
+        Artifact includedArtifact = createArtifact("org.example", "lib", "1.0",
+                "jar", includedJar.toFile());
+
+        Path testJar = createJarWithEmbeddedSbom("test-utils-1.0.jar",
+                "test-sbom-data", "org.test", "test-helper", "1.0");
+        Artifact testArtifact = createArtifact("org.example", "test-utils",
+                "1.0", "jar", "test", testJar.toFile());
+
+        Path excludedCompileJar = createJarWithEmbeddedSbom(
+                "optional-lib-2.0.jar", "optional-data",
+                "org.optional", "optional-dep", "2.0");
+        Artifact excludedCompileArtifact = createArtifact("org.example",
+                "optional-lib", "2.0", "jar", excludedCompileJar.toFile());
+
+        when(project.getArtifacts()).thenReturn(
+                Set.of(includedArtifact, testArtifact, excludedCompileArtifact));
+
+        ZipArchiver archiver = buildArchiver(
+                "base/lib/lib-1.0.jar", includedJar);
+        handler.finalizeArchiveCreation(archiver);
+
+        Bom bom = readBomFromArchiver(archiver);
+        assertNotNull(bom);
+
+        List<String> leakedNames = allComponentsRecursive(bom).stream()
+                .map(Component::getName)
+                .filter(n -> "test-helper".equals(n) || "optional-dep".equals(n))
+                .toList();
+        assertTrue(leakedNames.isEmpty(),
+                "SBOMs from dependencies not in the archive should not"
+                        + " appear in the output BOM regardless of scope,"
+                        + " but found: " + leakedNames);
+    }
+
+    private Path createJarWithEmbeddedSbom(String jarName, String content,
+            String sbomGroup, String sbomName, String sbomVersion) throws Exception {
+        Bom embeddedBom = new Bom();
+        Component comp = new Component();
+        comp.setType(Component.Type.LIBRARY);
+        comp.setGroup(sbomGroup);
+        comp.setName(sbomName);
+        comp.setVersion(sbomVersion);
+        comp.setBomRef("pkg:maven/" + sbomGroup + "/" + sbomName + "@" + sbomVersion);
+        embeddedBom.addComponent(comp);
+
+        Path bomJson = tempDir.resolve(jarName + ".tmp.cdx.json");
+        BomWriter.writeJson(embeddedBom, bomJson, false);
+        byte[] bomBytes = Files.readAllBytes(bomJson);
+
+        Path jarPath = tempDir.resolve(jarName);
+        try (JarOutputStream jos = new JarOutputStream(
+                Files.newOutputStream(jarPath))) {
+            jos.putNextEntry(new JarEntry("data.txt"));
+            jos.write(content.getBytes(StandardCharsets.UTF_8));
+            jos.closeEntry();
+            jos.putNextEntry(new JarEntry("META-INF/sbom/bom.cdx.json"));
+            jos.write(bomBytes);
+            jos.closeEntry();
+        }
+        return jarPath;
+    }
 
     private Path createJarWithPomProperties(String name, String groupId,
             String artifactId, String version,
@@ -732,8 +903,13 @@ class SbomContainerDescriptorHandlerTest {
 
     private Artifact createArtifact(String groupId, String artifactId,
             String version, String type, File file) {
+        return createArtifact(groupId, artifactId, version, type, "compile", file);
+    }
+
+    private Artifact createArtifact(String groupId, String artifactId,
+            String version, String type, String scope, File file) {
         DefaultArtifact artifact = new DefaultArtifact(
-                groupId, artifactId, version, "compile", type, null,
+                groupId, artifactId, version, scope, type, null,
                 new DefaultArtifactHandler(type));
         artifact.setFile(file);
         return artifact;
@@ -761,6 +937,10 @@ class SbomContainerDescriptorHandlerTest {
         }
     }
 
+    /**
+     * Finds the first top-level BOM component matching the given type and name.
+     * Returns {@code null} if the BOM is {@code null}, has no components, or no match is found.
+     */
     private static Component findComponent(Bom bom, Component.Type type, String name) {
         if (bom == null || bom.getComponents() == null)
             return null;

@@ -78,6 +78,8 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     private boolean prettyPrint;
     private boolean failOnMissingLicense;
     private boolean failOnDuplicateHash = true;
+    private String embeddedSbomHandling = "merge";
+    private String mergeBoms;
 
     private MavenLicenseResolver licenseResolver;
 
@@ -113,9 +115,11 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                     effectiveModelResolver, failOnMissingLicense);
             cachedManagedDeps = null;
 
+            List<Bom> externalBomList = parseExternalBoms();
+
             List<ArchiveContent.FileEntry> entries = collectArchiveEntries(archiver);
             String baseDirPrefix = detectBaseDirPrefix(entries);
-            ArchiveContent content = analyzeEntries(entries, baseDirPrefix);
+            ArchiveContent content = analyzeEntries(entries, baseDirPrefix, externalBomList);
 
             BomBuilder builder = new BomBuilder(
                     project.getGroupId(), project.getArtifactId(),
@@ -131,6 +135,8 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
             addToBom(content, builder);
 
             Bom bom = builder.build();
+            processDetectedSboms(bom, content, builder);
+            processExternalBoms(bom, externalBomList);
             if (log.isDebugEnabled()) {
                 logBomSummary(bom);
             }
@@ -179,11 +185,116 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                 : null;
     }
 
-    private ArchiveContent analyzeEntries(List<ArchiveContent.FileEntry> entries, String baseDirPrefix) {
+    private ArchiveContent analyzeEntries(List<ArchiveContent.FileEntry> entries,
+            String baseDirPrefix, List<Bom> externalBomList) {
+        boolean detectEmbeddedSboms = !"ignore".equalsIgnoreCase(embeddedSbomHandling);
         ArchiveAnalyzer analyzer = new ArchiveAnalyzer(
                 effectiveModelResolver, repoSystem,
-                project, session, messageDigest, failOnDuplicateHash);
+                project, session, messageDigest, failOnDuplicateHash,
+                externalBomList, detectEmbeddedSboms);
         return analyzer.analyze(entries, baseDirPrefix);
+    }
+
+    /**
+     * Parses external SBOM files specified via the {@code mergeBoms}
+     * configuration option.
+     *
+     * @return the parsed BOMs (never {@code null}; invalid files are skipped)
+     */
+    private List<Bom> parseExternalBoms() {
+        if (mergeBoms == null || mergeBoms.isBlank()) {
+            return List.of();
+        }
+        List<Bom> result = new ArrayList<>();
+        for (String path : mergeBoms.split(",")) {
+            path = path.trim();
+            if (path.isEmpty()) {
+                continue;
+            }
+            Path bomPath = resolvePath(path);
+            if (!Files.isRegularFile(bomPath)) {
+                log.warn("External SBOM file not found: {}", bomPath);
+                continue;
+            }
+            Bom bom = BomReader.readBom(bomPath.toFile());
+            if (bom != null) {
+                log.debug("Loaded external SBOM from {} ({} components)", bomPath,
+                        bom.getComponents() != null ? bom.getComponents().size() : 0);
+                result.add(bom);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Resolves a path relative to the project base directory if not absolute.
+     */
+    private Path resolvePath(String path) {
+        Path p = Path.of(path);
+        if (!p.isAbsolute()) {
+            p = project.getBasedir().toPath().resolve(path);
+        }
+        return p;
+    }
+
+    /**
+     * Processes CycloneDX SBOMs detected within the archive.
+     *
+     * <p>
+     * Depending on the {@code embeddedSbomHandling} configuration:
+     * </p>
+     * <ul>
+     * <li>{@code "merge"} — merges the SBOM's components as nested
+     * components under the parent artifact</li>
+     * <li>{@code "link"} — adds an external reference of type
+     * {@code bom} to the parent artifact</li>
+     * <li>{@code "ignore"} — skips processing</li>
+     * </ul>
+     */
+    private void processDetectedSboms(Bom bom, ArchiveContent content,
+            BomBuilder builder) {
+        if ("ignore".equalsIgnoreCase(embeddedSbomHandling)) {
+            return;
+        }
+        for (ArchiveContent.DetectedSbom detected : content.detectedSboms()) {
+            String parentRef = resolveParentBomRef(detected.parentArtifact(),
+                    bom, builder);
+            if ("link".equalsIgnoreCase(embeddedSbomHandling)) {
+                BomMerger.addBomReference(bom, parentRef, detected.archivePath());
+            } else {
+                BomMerger.mergeUnder(bom, parentRef, detected.parsedBom());
+            }
+        }
+    }
+
+    /**
+     * Merges external SBOMs (from the {@code mergeBoms} configuration)
+     * under the main component of the distribution BOM.
+     */
+    private void processExternalBoms(Bom bom, List<Bom> externalBomList) {
+        if (externalBomList.isEmpty()) {
+            return;
+        }
+        String mainRef = bom.getMetadata().getComponent().getBomRef();
+        for (Bom externalBom : externalBomList) {
+            BomMerger.mergeUnder(bom, mainRef, externalBom);
+        }
+    }
+
+    /**
+     * Resolves the parent artifact's bom-ref for SBOM merge/link
+     * operations. Falls back to the main component if the parent
+     * artifact is {@code null} or not found.
+     */
+    private String resolveParentBomRef(ArtifactCoords parentArtifact,
+            Bom bom, BomBuilder builder) {
+        if (parentArtifact != null) {
+            String ref = builder.bomRefOf(parentArtifact);
+            if (ref != null) {
+                return ref;
+            }
+        }
+        return bom.getMetadata().getComponent().getBomRef();
     }
 
     /**
@@ -198,6 +309,13 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
             throw new ArchiverException(
                     "Unsupported output mode: " + output
                             + ". Supported values: embedded, external, all");
+        }
+        if (!"merge".equalsIgnoreCase(embeddedSbomHandling)
+                && !"link".equalsIgnoreCase(embeddedSbomHandling)
+                && !"ignore".equalsIgnoreCase(embeddedSbomHandling)) {
+            throw new ArchiverException(
+                    "Unsupported embeddedSbomHandling: " + embeddedSbomHandling
+                            + ". Supported values: merge, link, ignore");
         }
         AssemblyConfig assemblyConfig = resolveAssemblyConfig(archiver);
         includeBaseDir = assemblyConfig.assembly == null
@@ -931,5 +1049,40 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     @SuppressWarnings("unused")
     public void setFailOnDuplicateHash(boolean failOnDuplicateHash) {
         this.failOnDuplicateHash = failOnDuplicateHash;
+    }
+
+    /**
+     * Sets how embedded CycloneDX SBOMs found in the archive are handled.
+     *
+     * <p>
+     * Supported values:
+     * </p>
+     * <ul>
+     * <li>{@code "merge"} (default) — merge the SBOM's components as
+     * nested sub-components of the containing artifact</li>
+     * <li>{@code "link"} — add an external reference of type {@code bom}
+     * to the containing artifact</li>
+     * <li>{@code "ignore"} — do not process embedded SBOMs</li>
+     * </ul>
+     */
+    @SuppressWarnings("unused")
+    public void setEmbeddedSbomHandling(String embeddedSbomHandling) {
+        this.embeddedSbomHandling = embeddedSbomHandling;
+    }
+
+    /**
+     * Sets the paths to external CycloneDX SBOM files to merge into
+     * the distribution SBOM.
+     *
+     * <p>
+     * Accepts a comma-separated list of file paths. Relative paths
+     * are resolved against the project base directory. External SBOMs
+     * are merged under the main distribution component and their
+     * component hashes participate in archive entry matching.
+     * </p>
+     */
+    @SuppressWarnings("unused")
+    public void setMergeBoms(String mergeBoms) {
+        this.mergeBoms = mergeBoms;
     }
 }
