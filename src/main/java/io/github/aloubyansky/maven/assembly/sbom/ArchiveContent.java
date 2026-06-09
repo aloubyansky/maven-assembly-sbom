@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.cyclonedx.model.Bom;
 import org.eclipse.aether.graph.Dependency;
 
 /**
@@ -68,12 +69,25 @@ class ArchiveContent {
     record FileNestedArtifact(String filePath, ArtifactCoords artifactId) {
     }
 
+    /**
+     * A CycloneDX SBOM file detected within the archive or inside a
+     * bundled JAR artifact.
+     *
+     * @param archivePath the path of the SBOM file relative to the archive root
+     * @param parsedBom the eagerly-parsed BOM content
+     * @param parentArtifact the Maven artifact whose content contains this SBOM,
+     *        or {@code null} if at the archive root or unresolved
+     */
+    record DetectedSbom(String archivePath, Bom parsedBom, ArtifactCoords parentArtifact) {
+    }
+
     private final List<MavenEntry> mavenEntries = new ArrayList<>();
     private final List<NestedMavenEntry> nestedEntries = new ArrayList<>();
     private final List<FileEntry> unmatchedFiles = new ArrayList<>();
     private final List<DependencyEdge> explicitDependencies = new ArrayList<>();
     private final Map<ArtifactCoords, List<Dependency>> nestedDepsByParent = new HashMap<>();
     private final List<FileNestedArtifact> fileNestedArtifacts = new ArrayList<>();
+    private final List<DetectedSbom> detectedSboms = new ArrayList<>();
 
     List<MavenEntry> mavenEntries() {
         return mavenEntries;
@@ -117,6 +131,14 @@ class ArchiveContent {
 
     void addFileNestedArtifact(String filePath, ArtifactCoords artifactId) {
         fileNestedArtifacts.add(new FileNestedArtifact(filePath, artifactId));
+    }
+
+    List<DetectedSbom> detectedSboms() {
+        return detectedSboms;
+    }
+
+    void addDetectedSbom(DetectedSbom sbom) {
+        detectedSboms.add(sbom);
     }
 
     void addNestedDependency(ArtifactCoords parentId, Dependency dependency) {

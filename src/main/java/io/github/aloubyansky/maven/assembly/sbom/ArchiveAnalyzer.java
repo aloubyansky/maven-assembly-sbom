@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -21,6 +22,9 @@ import org.apache.maven.artifact.Artifact;
 import org.apache.maven.execution.MavenSession;
 import org.apache.maven.model.Model;
 import org.apache.maven.project.MavenProject;
+import org.cyclonedx.model.Bom;
+import org.cyclonedx.model.Component;
+import org.cyclonedx.model.Hash;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.graph.Dependency;
 import org.eclipse.aether.resolution.ArtifactRequest;
@@ -46,6 +50,10 @@ class ArchiveAnalyzer {
     private static final Set<String> ZIP_BASED_EXTENSIONS = Set.of(
             ".jar", ".war", ".ear", ".rar", ".par");
 
+    private static final Comparator<String> JSON_FIRST_SBOM_ORDER = Comparator
+            .<String, Boolean> comparing(p -> !p.endsWith(".cdx.json"))
+            .thenComparing(Comparator.naturalOrder());
+
     private final EffectiveModelResolver effectiveModelResolver;
     private final RepositorySystem repoSystem;
     private final MavenProject project;
@@ -54,6 +62,7 @@ class ArchiveAnalyzer {
     private final MessageDigest messageDigest;
     private final boolean failOnDuplicateHash;
     private final Map<ArtifactCoords, MavenProject> reactorModuleIndex;
+    private final List<Bom> externalBoms;
     private List<Artifact> allArtifacts;
     private ArtifactHashIndex hashIndex;
 
@@ -111,6 +120,17 @@ class ArchiveAnalyzer {
             MavenSession session,
             MessageDigest messageDigest,
             boolean failOnDuplicateHash) {
+        this(effectiveModelResolver, repoSystem, project, session,
+                messageDigest, failOnDuplicateHash, List.of());
+    }
+
+    ArchiveAnalyzer(EffectiveModelResolver effectiveModelResolver,
+            RepositorySystem repoSystem,
+            MavenProject project,
+            MavenSession session,
+            MessageDigest messageDigest,
+            boolean failOnDuplicateHash,
+            List<Bom> externalBoms) {
         this.effectiveModelResolver = effectiveModelResolver;
         this.repoSystem = repoSystem;
         this.project = project;
@@ -118,6 +138,7 @@ class ArchiveAnalyzer {
         this.messageDigest = messageDigest;
         this.failOnDuplicateHash = failOnDuplicateHash;
         this.reactorModuleIndex = indexReactorModules(session.getProjects());
+        this.externalBoms = externalBoms;
     }
 
     /**
@@ -173,6 +194,13 @@ class ArchiveAnalyzer {
         if (!unmatchedByPath.isEmpty()) {
             detectMavenMetadataInUnmatchedJars(unmatchedByPath, content);
         }
+        if (!unmatchedByPath.isEmpty()) {
+            matchAgainstExternalSboms(unmatchedByPath, content);
+        }
+        if (!unmatchedByPath.isEmpty()) {
+            detectSbomsInUnmatchedFiles(unmatchedByPath, content);
+        }
+        detectSbomsInArtifactJars(content);
 
         for (ArchiveContent.FileEntry entry : unmatchedByPath.values()) {
             content.addUnmatchedFile(entry);
@@ -780,6 +808,244 @@ class ArchiveAnalyzer {
         } catch (Exception e) {
             log.debug("Failed to resolve dependency {}:{}:{}",
                     dep.getGroupId(), dep.getArtifactId(), dep.getVersion(), e);
+        }
+    }
+
+    // ---- External SBOM matching ----
+
+    /**
+     * Matches unmatched archive entries against components from external
+     * SBOMs by content hash. Entries whose hash matches an external
+     * component are recorded as {@link ArchiveContent.ExternalSbomMatch}
+     * and removed from {@code unmatchedByPath}.
+     *
+     * <p>
+     * This enables non-Maven artifacts (e.g. npm packages) to be
+     * identified when an external SBOM with matching hashes is provided.
+     * Maven-identified artifacts take precedence — this method only
+     * processes entries that were not matched by the Maven hash index.
+     * </p>
+     */
+    private void matchAgainstExternalSboms(
+            Map<String, ArchiveContent.FileEntry> unmatchedByPath,
+            ArchiveContent content) {
+        if (externalBoms.isEmpty()) {
+            return;
+        }
+        Map<String, ExternalComponentRef> externalHashIndex = buildExternalHashIndex();
+        if (externalHashIndex.isEmpty()) {
+            return;
+        }
+        var it = unmatchedByPath.entrySet().iterator();
+        while (it.hasNext()) {
+            var entry = it.next();
+            ExternalComponentRef ref = externalHashIndex.get(entry.getValue().hash());
+            if (ref != null) {
+                it.remove();
+            }
+        }
+    }
+
+    /**
+     * A component from an external SBOM paired with its source BOM.
+     */
+    private record ExternalComponentRef(Component component, Bom sourceBom) {
+    }
+
+    /**
+     * Builds a hash-to-component index from all external SBOM components.
+     *
+     * <p>
+     * Only components that declare content hashes using the configured
+     * hash algorithm are indexed. Components without hashes are skipped.
+     * </p>
+     */
+    private Map<String, ExternalComponentRef> buildExternalHashIndex() {
+        Map<String, ExternalComponentRef> index = new HashMap<>();
+        String targetAlg = messageDigest.getAlgorithm().replace("-", "")
+                .toLowerCase();
+        for (Bom bom : externalBoms) {
+            if (bom.getComponents() == null) {
+                continue;
+            }
+            indexComponentTree(bom.getComponents(), bom, targetAlg, index);
+        }
+        return index;
+    }
+
+    private static void indexComponentTree(List<Component> components, Bom bom,
+            String targetAlg, Map<String, ExternalComponentRef> index) {
+        for (Component comp : components) {
+            String hash = extractMatchingHash(comp, targetAlg);
+            if (hash != null) {
+                index.putIfAbsent(hash, new ExternalComponentRef(comp, bom));
+            }
+            if (comp.getComponents() != null) {
+                indexComponentTree(comp.getComponents(), bom, targetAlg, index);
+            }
+        }
+    }
+
+    /**
+     * Extracts a hash value from a component that matches the target
+     * algorithm. Returns {@code null} if no matching hash is found.
+     */
+    private static String extractMatchingHash(Component comp, String targetAlg) {
+        if (comp.getHashes() == null) {
+            return null;
+        }
+        for (Hash hash : comp.getHashes()) {
+            if (hash.getAlgorithm() == null || hash.getValue() == null) {
+                continue;
+            }
+            String algName = hash.getAlgorithm().replace("-", "")
+                    .toLowerCase();
+            if (targetAlg.equals(algName)) {
+                return hash.getValue().toLowerCase();
+            }
+        }
+        return null;
+    }
+
+    // ---- Embedded SBOM detection ----
+
+    /**
+     * Detects CycloneDX SBOM files among unmatched archive entries.
+     *
+     * <p>
+     * Detected SBOMs are parsed and recorded in the content. The parent
+     * artifact is determined by finding the Maven entry whose archive
+     * path is the longest prefix of the SBOM path (e.g., an SBOM at
+     * {@code web/console.war/bom.cdx.json} is associated with an
+     * artifact unpacked to {@code web/console.war/}).
+     * </p>
+     *
+     * <p>
+     * When both JSON and XML variants of the same SBOM exist (same
+     * directory and filename stem), the JSON variant is preferred and
+     * the XML duplicate is skipped.
+     * </p>
+     */
+    private static void detectSbomsInUnmatchedFiles(
+            Map<String, ArchiveContent.FileEntry> unmatchedByPath,
+            ArchiveContent content) {
+        Set<String> processedStems = new HashSet<>();
+        List<String> toRemove = new ArrayList<>();
+
+        List<String> sbomPaths = new ArrayList<>();
+        for (String path : unmatchedByPath.keySet()) {
+            if (BomReader.isSbomFile(path)) {
+                sbomPaths.add(path);
+            }
+        }
+        sbomPaths.sort(JSON_FIRST_SBOM_ORDER);
+
+        for (String path : sbomPaths) {
+            String stem = BomReader.sbomStem(path);
+            if (!processedStems.add(stem)) {
+                toRemove.add(path);
+                continue;
+            }
+            ArchiveContent.FileEntry entry = unmatchedByPath.get(path);
+            if (entry == null || entry.sourceFile() == null) {
+                continue;
+            }
+            Bom parsedBom = BomReader.readBom(entry.sourceFile());
+            if (parsedBom == null) {
+                continue;
+            }
+            ArtifactCoords parent = findParentArtifact(path, content);
+            content.addDetectedSbom(new ArchiveContent.DetectedSbom(
+                    path, parsedBom, parent));
+            toRemove.add(path);
+        }
+
+        for (String path : toRemove) {
+            unmatchedByPath.remove(path);
+        }
+    }
+
+    /**
+     * Finds the Maven artifact whose archive path is the longest prefix
+     * of the given SBOM path, indicating that the SBOM was unpacked
+     * from that artifact.
+     *
+     * @return the parent artifact coordinates, or {@code null} if no
+     *         prefix match is found
+     */
+    private static ArtifactCoords findParentArtifact(String sbomPath,
+            ArchiveContent content) {
+        ArtifactCoords bestMatch = null;
+        int bestLength = 0;
+        for (ArchiveContent.MavenEntry entry : content.mavenEntries()) {
+            String artifactPath = entry.archivePath();
+            if (artifactPath == null || !artifactPath.endsWith("/")) {
+                continue;
+            }
+            if (sbomPath.startsWith(artifactPath)
+                    && artifactPath.length() > bestLength) {
+                bestMatch = entry.artifactId();
+                bestLength = artifactPath.length();
+            }
+        }
+        return bestMatch;
+    }
+
+    /**
+     * Scans matched JAR/WAR artifacts for embedded CycloneDX SBOM files.
+     *
+     * <p>
+     * For each Maven artifact that is a ZIP-based archive, scans its
+     * entries for {@code .cdx.json} or {@code .cdx.xml} files. Detected
+     * SBOMs are parsed and recorded in the content, with the artifact
+     * as the parent.
+     * </p>
+     */
+    private void detectSbomsInArtifactJars(ArchiveContent content) {
+        Set<File> scannedFiles = new HashSet<>();
+        for (Artifact artifact : allArtifacts()) {
+            File file = artifact.getFile();
+            if (file == null || !file.isFile() || !hasZipBasedExtension(file.getName())) {
+                continue;
+            }
+            if (!scannedFiles.add(file)) {
+                continue;
+            }
+            scanJarForSboms(file, ArtifactCoords.of(artifact), content);
+        }
+    }
+
+    /**
+     * Scans a single JAR/WAR file for embedded SBOM entries.
+     */
+    private static void scanJarForSboms(File jarFile, ArtifactCoords artifactId,
+            ArchiveContent content) {
+        Set<String> processedStems = new HashSet<>();
+        try (ZipFile zf = new ZipFile(jarFile)) {
+            List<String> sbomEntryNames = new ArrayList<>();
+            Enumeration<? extends ZipEntry> entries = zf.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry ze = entries.nextElement();
+                if (!ze.isDirectory() && BomReader.isSbomFile(ze.getName())) {
+                    sbomEntryNames.add(ze.getName());
+                }
+            }
+            sbomEntryNames.sort(JSON_FIRST_SBOM_ORDER);
+            for (String entryName : sbomEntryNames) {
+                String stem = BomReader.sbomStem(entryName);
+                if (!processedStems.add(stem)) {
+                    continue;
+                }
+                try (InputStream is = zf.getInputStream(zf.getEntry(entryName))) {
+                    Bom parsedBom = BomReader.readBom(is);
+                    if (parsedBom != null) {
+                        content.addDetectedSbom(new ArchiveContent.DetectedSbom(
+                                entryName, parsedBom, artifactId));
+                    }
+                }
+            }
+        } catch (IOException e) {
+            log.debug("Could not scan {} for embedded SBOMs", jarFile, e);
         }
     }
 }
