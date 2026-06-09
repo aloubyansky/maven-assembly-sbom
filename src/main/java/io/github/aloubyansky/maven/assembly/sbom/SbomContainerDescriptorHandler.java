@@ -268,7 +268,8 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                 continue;
             }
             try (InputStream is = ae.getInputStream()) {
-                entries.add(new ArchiveContent.FileEntry(ae.getName(), SbomUtils.computeHash(messageDigest, is)));
+                entries.add(new ArchiveContent.FileEntry(ae.getName(),
+                        SbomUtils.computeHash(messageDigest, is), ae.getFile()));
             }
         }
         return entries;

@@ -518,7 +518,90 @@ class ArchiveAnalyzerTest {
                 "bundled dep should be recorded as file-nested artifact");
     }
 
-    // --- helpers ---
+    @Test
+    void nonDependencyJarWithPomPropertiesDetectedAsMaven() throws Exception {
+        Path jarFile = createJarWithPomProperties("external-lib-3.0.jar",
+                "com.external", "external-lib", "3.0", "external-content");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        String hash = SbomUtils.computeHash(digest, jarFile);
+        List<ArchiveContent.FileEntry> entries = List.of(
+                new ArchiveContent.FileEntry("lib/external-lib-3.0.jar", hash, jarFile.toFile()));
+
+        ArchiveAnalyzer analyzer = createAnalyzer();
+        ArchiveContent content = analyzer.analyze(entries, null);
+
+        assertEquals(1, content.mavenEntries().size(),
+                "non-dependency JAR with pom.properties should be detected as Maven");
+        assertEquals("com.external", content.mavenEntries().get(0).artifactId().groupId());
+        assertEquals("external-lib", content.mavenEntries().get(0).artifactId().artifactId());
+        assertEquals("3.0", content.mavenEntries().get(0).artifactId().version());
+        assertEquals("lib/external-lib-3.0.jar", content.mavenEntries().get(0).archivePath());
+        assertEquals(0, content.unmatchedFiles().size(),
+                "identified JAR should not remain as unmatched file");
+    }
+
+    @Test
+    void nonDependencyShadedJarOwnerIdentifiedWithBundledDeps() throws Exception {
+        Path shadedJar = createShadedJarWithMultiplePomProperties("nimbus-jose-jwt-10.0.jar",
+                "com.nimbusds", "nimbus-jose-jwt", "10.0",
+                "com.google.code.gson", "gson", "2.11.0",
+                "nimbus-content");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        String hash = SbomUtils.computeHash(digest, shadedJar);
+        List<ArchiveContent.FileEntry> entries = List.of(
+                new ArchiveContent.FileEntry("lib/nimbus-jose-jwt-10.0.jar", hash,
+                        shadedJar.toFile()));
+
+        ArchiveAnalyzer analyzer = createAnalyzer();
+        ArchiveContent content = analyzer.analyze(entries, null);
+
+        assertEquals(1, content.mavenEntries().size(),
+                "shaded JAR owner should be detected as Maven entry");
+        assertEquals("nimbus-jose-jwt", content.mavenEntries().get(0).artifactId().artifactId());
+        assertEquals("com.nimbusds", content.mavenEntries().get(0).artifactId().groupId());
+
+        assertEquals(1, content.nestedEntries().size(),
+                "bundled dep should be recorded as nested entry");
+        assertEquals("gson", content.nestedEntries().get(0).artifactId().artifactId());
+        assertEquals("nimbus-jose-jwt",
+                content.nestedEntries().get(0).parentId().artifactId());
+
+        assertEquals(0, content.unmatchedFiles().size());
+        assertEquals(0, content.fileNestedArtifacts().size());
+    }
+
+    @Test
+    void nonDependencyShadedJarAmbiguousOwnerFallsBackToFileNested() throws Exception {
+        Path shadedJar = createShadedJarWithMultiplePomProperties("ab-cd-1.0.jar",
+                "com.example", "ab", "1.0",
+                "com.other", "cd", "2.0",
+                "ambiguous-content");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        String hash = SbomUtils.computeHash(digest, shadedJar);
+        List<ArchiveContent.FileEntry> entries = List.of(
+                new ArchiveContent.FileEntry("lib/ab-cd-1.0.jar", hash,
+                        shadedJar.toFile()));
+
+        ArchiveAnalyzer analyzer = createAnalyzer();
+        ArchiveContent content = analyzer.analyze(entries, null);
+
+        assertEquals(0, content.mavenEntries().size(),
+                "ambiguous shaded JAR should not produce a Maven entry");
+        assertEquals(0, content.nestedEntries().size());
+        assertEquals(1, content.unmatchedFiles().size(),
+                "JAR should remain as unmatched file");
+        assertEquals(2, content.fileNestedArtifacts().size(),
+                "both artifacts should be recorded as file-nested");
+        assertTrue(content.fileNestedArtifacts().stream()
+                .anyMatch(e -> "ab".equals(e.artifactId().artifactId())));
+        assertTrue(content.fileNestedArtifacts().stream()
+                .anyMatch(e -> "cd".equals(e.artifactId().artifactId())));
+        assertTrue(content.fileNestedArtifacts().stream()
+                .allMatch(e -> "lib/ab-cd-1.0.jar".equals(e.filePath())));
+    }
 
     private ArchiveAnalyzer createAnalyzer() {
         return new ArchiveAnalyzer(

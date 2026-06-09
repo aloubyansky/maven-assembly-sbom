@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
@@ -42,6 +43,8 @@ class ArchiveAnalyzer {
 
     private static final Logger log = LoggerFactory.getLogger(ArchiveAnalyzer.class);
     public static final String JAR = "jar";
+    private static final Set<String> ZIP_BASED_EXTENSIONS = Set.of(
+            ".jar", ".war", ".ear", ".rar", ".par");
 
     private final EffectiveModelResolver effectiveModelResolver;
     private final RepositorySystem repoSystem;
@@ -167,6 +170,9 @@ class ArchiveAnalyzer {
         if (!unmatchedByPath.isEmpty()) {
             detectUnpackedArtifacts(matchedArtifacts, unmatchedByPath, content);
         }
+        if (!unmatchedByPath.isEmpty()) {
+            detectMavenMetadataInUnmatchedJars(unmatchedByPath, content);
+        }
 
         for (ArchiveContent.FileEntry entry : unmatchedByPath.values()) {
             content.addUnmatchedFile(entry);
@@ -199,7 +205,7 @@ class ArchiveAnalyzer {
                 }
             } else {
                 unmatchedByPath.put(relativePath,
-                        new ArchiveContent.FileEntry(relativePath, entry.hash()));
+                        new ArchiveContent.FileEntry(relativePath, entry.hash(), entry.sourceFile()));
             }
         }
     }
@@ -244,7 +250,108 @@ class ArchiveAnalyzer {
         return index;
     }
 
-    // ---- private helpers ----
+    /**
+     * Scans unmatched JAR entries for embedded {@code pom.properties}
+     * to identify non-dependency JARs as Maven components.
+     * Identified entries are removed from {@code unmatchedByPath}.
+     */
+    private static void detectMavenMetadataInUnmatchedJars(
+            Map<String, ArchiveContent.FileEntry> unmatchedByPath,
+            ArchiveContent content) {
+        List<ArchiveContent.FileNestedArtifact> fileNestedArtifacts = content.fileNestedArtifacts();
+        Set<String> alreadyProcessed = new HashSet<>(fileNestedArtifacts.size());
+        for (ArchiveContent.FileNestedArtifact fna : fileNestedArtifacts) {
+            alreadyProcessed.add(fna.filePath());
+        }
+        var it = unmatchedByPath.values().iterator();
+        while (it.hasNext()) {
+            ArchiveContent.FileEntry fileEntry = it.next();
+            if (fileEntry.sourceFile() == null
+                    || !fileEntry.sourceFile().isFile()
+                    || !hasZipBasedExtension(fileEntry.path())
+                    || alreadyProcessed.contains(fileEntry.path())) {
+                continue;
+            }
+            try (ZipFile zf = new ZipFile(fileEntry.sourceFile())) {
+                List<Properties> allProps = readPomPropertiesFromZip(zf);
+                if (allProps.isEmpty()) {
+                    continue;
+                }
+                boolean identified = allProps.size() == 1
+                        ? registerFromStandaloneProps(allProps.get(0), fileEntry, content) != null
+                        : registerStandaloneShadedJar(allProps, fileEntry, content);
+                if (identified) {
+                    it.remove();
+                }
+            } catch (IOException e) {
+                log.debug("Could not read {} for Maven metadata", fileEntry.sourceFile(), e);
+            }
+        }
+    }
+
+    /**
+     * Registers a standalone JAR as a Maven entry from pom.properties.
+     *
+     * @return the registered artifact coordinates, or {@code null} if
+     *         required properties are missing
+     */
+    private static ArtifactCoords registerFromStandaloneProps(Properties props,
+            ArchiveContent.FileEntry fileEntry, ArchiveContent content) {
+        String gId = props.getProperty("groupId");
+        String aId = props.getProperty("artifactId");
+        String ver = props.getProperty("version");
+        if (gId == null || aId == null || ver == null) {
+            return null;
+        }
+        ArtifactCoords coords = ArtifactCoords.of(gId, aId, ver);
+        content.addMavenEntry(new ArchiveContent.MavenEntry(
+                coords, fileEntry.path(), fileEntry.hash()));
+        return coords;
+    }
+
+    /**
+     * Handles a standalone shaded JAR (multiple pom.properties, not a
+     * known project dependency). Uses filename matching to determine
+     * the owner, same logic as nested shaded JARs.
+     *
+     * @return {@code true} if the owner was identified and registered
+     */
+    private static boolean registerStandaloneShadedJar(List<Properties> allProps,
+            ArchiveContent.FileEntry fileEntry, ArchiveContent content) {
+        return resolveAndRegisterShadedOwner(allProps, fileEntry, content,
+                fileEntry.path(),
+                props -> registerFromStandaloneProps(props, fileEntry, content));
+    }
+
+    /**
+     * Shared resolve/register/fallback flow for shaded JARs with multiple
+     * pom.properties. Resolves the owner by filename, delegates registration
+     * to the caller-provided function, and falls back to file-nested
+     * recording on failure.
+     *
+     * @param registerOwner registers the owner and returns its coords, or null on failure
+     * @return {@code true} if the owner was identified and registered
+     */
+    private static boolean resolveAndRegisterShadedOwner(
+            List<Properties> allProps, ArchiveContent.FileEntry archiveEntry,
+            ArchiveContent content, String pathForFilename,
+            Function<Properties, ArtifactCoords> registerOwner) {
+        Properties owner = resolveOwnerByFilename(allProps,
+                SbomUtils.extractFileName(pathForFilename));
+        if (owner == null) {
+            log.debug("Could not determine owner of shaded JAR {},"
+                    + " nesting all under file", pathForFilename);
+            recordAllAsFileNested(archiveEntry, allProps, content);
+            return false;
+        }
+        ArtifactCoords ownerCoords = registerOwner.apply(owner);
+        if (ownerCoords == null) {
+            recordAllAsFileNested(archiveEntry, allProps, content);
+            return false;
+        }
+        registerBundledDependencies(ownerCoords, allProps, content);
+        return true;
+    }
 
     /**
      * Strips the base directory prefix from an archive path.
@@ -254,6 +361,11 @@ class ArchiveAnalyzer {
             return archivePath.substring(baseDirPrefix.length());
         }
         return archivePath;
+    }
+
+    private static boolean hasZipBasedExtension(String path) {
+        int dot = path.lastIndexOf('.');
+        return dot >= 0 && ZIP_BASED_EXTENSIONS.contains(path.substring(dot));
     }
 
     /**
@@ -363,7 +475,7 @@ class ArchiveAnalyzer {
         }
         try (ZipFile zf = new ZipFile(file)) {
             List<Properties> allProps = readPomPropertiesFromZip(zf);
-            registerBundledDependencies(allProps, ArtifactCoords.of(artifact), content);
+            registerBundledDependencies(ArtifactCoords.of(artifact), allProps, content);
         } catch (IOException e) {
             log.debug("Could not scan {} for bundled dependencies", file, e);
         }
@@ -384,14 +496,14 @@ class ArchiveAnalyzer {
             return;
         }
         List<Properties> allProps = readAllPomProperties(parentZip, zipEntryNames.get(0));
-        registerBundledDependencies(allProps, ownerCoords, content);
+        registerBundledDependencies(ownerCoords, allProps, content);
     }
 
     /**
      * Registers non-owner pom.properties entries as bundled nested components.
      */
-    private static void registerBundledDependencies(List<Properties> allProps,
-            ArtifactCoords ownerCoords, ArchiveContent content) {
+    private static void registerBundledDependencies(ArtifactCoords ownerCoords, List<Properties> allProps,
+            ArchiveContent content) {
         if (allProps.size() <= 1) {
             return;
         }
@@ -410,10 +522,44 @@ class ArchiveAnalyzer {
     }
 
     /**
+     * Matches artifactIds from pom.properties entries against a JAR
+     * filename to find the owner. Returns the single best match, or
+     * {@code null} if the result is ambiguous (zero or multiple
+     * equally-long matches).
+     */
+    private static Properties resolveOwnerByFilename(List<Properties> allProps,
+            String fileName) {
+        List<Properties> matching = new ArrayList<>();
+        for (Properties p : allProps) {
+            String aId = p.getProperty("artifactId");
+            if (aId != null && fileName.contains(aId)) {
+                matching.add(p);
+            }
+        }
+        if (matching.size() > 1) {
+            Properties best = null;
+            int maxLen = 0;
+            boolean unique = true;
+            for (Properties p : matching) {
+                int len = p.getProperty("artifactId").length();
+                if (len > maxLen) {
+                    maxLen = len;
+                    best = p;
+                    unique = true;
+                } else if (len == maxLen) {
+                    unique = false;
+                }
+            }
+            return unique ? best : null;
+        }
+        return matching.size() == 1 ? matching.get(0) : null;
+    }
+
+    /**
      * Records all pom.properties entries as file-nested artifacts.
      */
-    private static void recordAllAsFileNested(List<Properties> allProps,
-            ArchiveContent.FileEntry archiveEntry, ArchiveContent content) {
+    private static void recordAllAsFileNested(ArchiveContent.FileEntry archiveEntry, List<Properties> allProps,
+            ArchiveContent content) {
         for (Properties p : allProps) {
             String gId = p.getProperty("groupId");
             String aId = p.getProperty("artifactId");
@@ -479,60 +625,10 @@ class ArchiveAnalyzer {
                         parentId, matchedArtifacts, content) != null;
             }
             // Shaded JAR: match the filename against artifactIds
-            String fileName = SbomUtils.extractFileName(zipEntryName);
-            List<Properties> matching = new ArrayList<>();
-            List<Properties> bundled = new ArrayList<>();
-            for (Properties p : allProps) {
-                String aId = p.getProperty("artifactId");
-                if (aId != null && fileName.contains(aId)) {
-                    matching.add(p);
-                } else {
-                    bundled.add(p);
-                }
-            }
-            // When multiple artifactIds match (e.g. "log4j" and "log4j-api"
-            // both match "log4j-api-2.0.jar"), keep only the longest match
-            // provided it is uniquely the longest; otherwise it's ambiguous
-            if (matching.size() > 1) {
-                int maxLen = 0;
-                int maxCount = 0;
-                for (Properties p : matching) {
-                    String aId = p.getProperty("artifactId");
-                    int len = aId == null ? 0 : aId.length();
-                    if (len > maxLen) {
-                        maxLen = len;
-                        maxCount = 1;
-                    } else if (len == maxLen) {
-                        maxCount++;
-                    }
-                }
-                if (maxCount == 1) {
-                    List<Properties> narrowed = new ArrayList<>(1);
-                    for (Properties p : matching) {
-                        String aId = p.getProperty("artifactId");
-                        if (aId != null && aId.length() == maxLen) {
-                            narrowed.add(p);
-                        } else {
-                            bundled.add(p);
-                        }
-                    }
-                    matching = narrowed;
-                }
-            }
-            if (matching.size() != 1) {
-                log.debug("Found {} artifactId matches for filename {} in shaded JAR {},"
-                        + " nesting all under file", matching.size(), fileName, zipEntryName);
-                recordAllAsFileNested(allProps, archiveEntry, content);
-                return false;
-            }
-            ArtifactCoords ownerCoords = tryRegisterFromProps(matching.get(0), archiveEntry,
-                    parentId, matchedArtifacts, content);
-            if (ownerCoords == null) {
-                recordAllAsFileNested(allProps, archiveEntry, content);
-                return false;
-            }
-            registerBundledDependencies(allProps, ownerCoords, content);
-            return true;
+            return resolveAndRegisterShadedOwner(allProps, archiveEntry, content,
+                    zipEntryName,
+                    props -> tryRegisterFromProps(props, archiveEntry,
+                            parentId, matchedArtifacts, content));
         }
         return false;
     }
