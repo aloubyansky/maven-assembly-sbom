@@ -1,5 +1,6 @@
 package io.github.aloubyansky.maven.assembly.sbom;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -38,9 +39,13 @@ class ArchiveContent {
     }
 
     /**
-     * An archive file entry pairing its path with its content hash.
+     * An archive file entry pairing its path with its content hash
+     * and an optional reference to the source file on disk.
      */
-    record FileEntry(String path, String hash) {
+    record FileEntry(String path, String hash, File sourceFile) {
+        FileEntry(String path, String hash) {
+            this(path, hash, null);
+        }
     }
 
     /**
