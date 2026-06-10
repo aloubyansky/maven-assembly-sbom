@@ -1017,8 +1017,13 @@ class ArchiveAnalyzer {
      * </p>
      */
     private void detectSbomsInArtifactJars(ArchiveContent content) {
+        Set<ArtifactCoords> knownCoords = content.collectKnownArtifactCoords();
         Set<File> scannedFiles = new HashSet<>();
         for (Artifact artifact : allArtifacts()) {
+            ArtifactCoords coords = ArtifactCoords.of(artifact);
+            if (!knownCoords.contains(coords)) {
+                continue;
+            }
             File file = artifact.getFile();
             if (file == null || !file.isFile() || !hasZipBasedExtension(file.getName())) {
                 continue;
@@ -1026,7 +1031,7 @@ class ArchiveAnalyzer {
             if (!scannedFiles.add(file)) {
                 continue;
             }
-            scanJarForSboms(file, ArtifactCoords.of(artifact), content);
+            scanJarForSboms(file, coords, content);
         }
     }
 

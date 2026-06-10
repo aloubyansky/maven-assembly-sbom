@@ -769,6 +769,71 @@ class SbomContainerDescriptorHandlerTest {
         }
     }
 
+    @Test
+    void embeddedSbomFromArtifactNotInArchiveIsIgnored() throws Exception {
+        Path includedJar = createTestJar("lib-1.0.jar", "included-content");
+        Artifact includedArtifact = createArtifact("org.example", "lib", "1.0",
+                "jar", includedJar.toFile());
+
+        Path testJar = createJarWithEmbeddedSbom("test-utils-1.0.jar",
+                "test-sbom-data", "org.test", "test-helper", "1.0");
+        Artifact testArtifact = createArtifact("org.example", "test-utils",
+                "1.0", "jar", "test", testJar.toFile());
+
+        Path excludedCompileJar = createJarWithEmbeddedSbom(
+                "optional-lib-2.0.jar", "optional-data",
+                "org.optional", "optional-dep", "2.0");
+        Artifact excludedCompileArtifact = createArtifact("org.example",
+                "optional-lib", "2.0", "jar", excludedCompileJar.toFile());
+
+        when(project.getArtifacts()).thenReturn(
+                Set.of(includedArtifact, testArtifact, excludedCompileArtifact));
+
+        ZipArchiver archiver = buildArchiver(
+                "base/lib/lib-1.0.jar", includedJar);
+        handler.finalizeArchiveCreation(archiver);
+
+        Bom bom = readBomFromArchiver(archiver);
+        assertNotNull(bom);
+
+        List<String> leakedNames = allComponentsRecursive(bom).stream()
+                .map(Component::getName)
+                .filter(n -> "test-helper".equals(n) || "optional-dep".equals(n))
+                .toList();
+        assertTrue(leakedNames.isEmpty(),
+                "SBOMs from dependencies not in the archive should not"
+                        + " appear in the output BOM regardless of scope,"
+                        + " but found: " + leakedNames);
+    }
+
+    private Path createJarWithEmbeddedSbom(String jarName, String content,
+            String sbomGroup, String sbomName, String sbomVersion) throws Exception {
+        Bom embeddedBom = new Bom();
+        Component comp = new Component();
+        comp.setType(Component.Type.LIBRARY);
+        comp.setGroup(sbomGroup);
+        comp.setName(sbomName);
+        comp.setVersion(sbomVersion);
+        comp.setBomRef("pkg:maven/" + sbomGroup + "/" + sbomName + "@" + sbomVersion);
+        embeddedBom.addComponent(comp);
+
+        Path bomJson = tempDir.resolve(jarName + ".tmp.cdx.json");
+        BomWriter.writeJson(embeddedBom, bomJson, false);
+        byte[] bomBytes = Files.readAllBytes(bomJson);
+
+        Path jarPath = tempDir.resolve(jarName);
+        try (JarOutputStream jos = new JarOutputStream(
+                Files.newOutputStream(jarPath))) {
+            jos.putNextEntry(new JarEntry("data.txt"));
+            jos.write(content.getBytes(StandardCharsets.UTF_8));
+            jos.closeEntry();
+            jos.putNextEntry(new JarEntry("META-INF/sbom/bom.cdx.json"));
+            jos.write(bomBytes);
+            jos.closeEntry();
+        }
+        return jarPath;
+    }
+
     private Path createJarWithPomProperties(String name, String groupId,
             String artifactId, String version,
             String content) throws Exception {
@@ -807,8 +872,13 @@ class SbomContainerDescriptorHandlerTest {
 
     private Artifact createArtifact(String groupId, String artifactId,
             String version, String type, File file) {
+        return createArtifact(groupId, artifactId, version, type, "compile", file);
+    }
+
+    private Artifact createArtifact(String groupId, String artifactId,
+            String version, String type, String scope, File file) {
         DefaultArtifact artifact = new DefaultArtifact(
-                groupId, artifactId, version, "compile", type, null,
+                groupId, artifactId, version, scope, type, null,
                 new DefaultArtifactHandler(type));
         artifact.setFile(file);
         return artifact;

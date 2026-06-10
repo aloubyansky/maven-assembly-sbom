@@ -151,7 +151,7 @@ class ArchiveContent {
      * entries, for use in dependency graph filtering.
      */
     Set<ArtifactCoords> collectKnownArtifactCoords() {
-        Set<ArtifactCoords> ids = new HashSet<>();
+        Set<ArtifactCoords> ids = new HashSet<>(mavenEntries.size() + nestedEntries.size() + fileNestedArtifacts.size());
         for (MavenEntry e : mavenEntries) {
             ids.add(e.artifactId());
         }
