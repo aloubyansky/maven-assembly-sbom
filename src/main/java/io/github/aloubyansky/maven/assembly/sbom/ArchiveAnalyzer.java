@@ -24,7 +24,9 @@ import org.apache.maven.model.Model;
 import org.apache.maven.project.MavenProject;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
+import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.Hash;
+import org.cyclonedx.model.component.evidence.Occurrence;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.graph.Dependency;
 import org.eclipse.aether.resolution.ArtifactRequest;
@@ -815,9 +817,10 @@ class ArchiveAnalyzer {
 
     /**
      * Matches unmatched archive entries against components from external
-     * SBOMs by content hash. Entries whose hash matches an external
-     * component are recorded as {@link ArchiveContent.ExternalSbomMatch}
-     * and removed from {@code unmatchedByPath}.
+     * SBOMs by content hash. Matched entries are removed from
+     * {@code unmatchedByPath} and their archive path is recorded as
+     * an {@link Occurrence} on the external component so the file
+     * remains traceable in the final BOM.
      *
      * <p>
      * This enables non-Maven artifacts (e.g. npm packages) to be
@@ -841,9 +844,21 @@ class ArchiveAnalyzer {
             var entry = it.next();
             ExternalComponentRef ref = externalHashIndex.get(entry.getValue().hash());
             if (ref != null) {
+                addOccurrence(ref.component(), entry.getKey());
                 it.remove();
             }
         }
+    }
+
+    private static void addOccurrence(Component component, String archivePath) {
+        Evidence evidence = component.getEvidence();
+        if (evidence == null) {
+            evidence = new Evidence();
+            component.setEvidence(evidence);
+        }
+        Occurrence occ = new Occurrence();
+        occ.setLocation(archivePath);
+        evidence.addOccurrence(occ);
     }
 
     /**

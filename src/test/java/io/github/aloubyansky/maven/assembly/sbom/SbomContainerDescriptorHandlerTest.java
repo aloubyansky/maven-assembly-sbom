@@ -9,6 +9,7 @@ import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.List;
 import java.util.Set;
 import java.util.jar.JarEntry;
@@ -27,6 +28,7 @@ import org.codehaus.plexus.archiver.zip.ZipArchiver;
 import org.codehaus.plexus.components.io.fileselectors.FileInfo;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
+import org.cyclonedx.model.Hash;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.collection.CollectResult;
@@ -692,7 +694,80 @@ class SbomContainerDescriptorHandlerTest {
         assertEquals("MIT", file.getLicenseChoice().getLicenses().get(0).getId());
     }
 
-    // --- helpers ---
+    @Test
+    void externalSbomMatchedFileNotLostFromBom() throws Exception {
+        when(project.getArtifacts()).thenReturn(Set.of());
+        lenient().when(project.getBasedir()).thenReturn(tempDir.toFile());
+
+        Path npmFile = createTestFile("widget.js", "npm-pkg-data");
+        String hash = SbomUtils.computeHash(
+                MessageDigest.getInstance("SHA-256"), npmFile);
+
+        Bom externalBom = new Bom();
+        Component extComp = new Component();
+        extComp.setType(Component.Type.LIBRARY);
+        extComp.setGroup("@acme");
+        extComp.setName("widget");
+        extComp.setVersion("3.2.1");
+        extComp.addHash(new Hash("SHA-256", hash));
+        externalBom.addComponent(extComp);
+
+        Path bomFile = tempDir.resolve("npm-sbom.cdx.json");
+        BomWriter.writeJson(externalBom, bomFile, true);
+        handler.setMergeBoms(bomFile.toString());
+
+        ZipArchiver archiver = buildArchiver(
+                "base/node_modules/@acme/widget/index.js", npmFile);
+        handler.finalizeArchiveCreation(archiver);
+
+        Bom bom = readBomFromArchiver(archiver);
+        assertNotNull(bom);
+
+        // Step 1: external BOM must have been loaded and merged
+        assertTrue(allComponentsRecursive(bom).stream()
+                .anyMatch(c -> "widget".equals(c.getName())
+                        && "@acme".equals(c.getGroup())),
+                "precondition: external BOM components should be merged into output");
+
+        // Step 2: hash matching must have removed the file from unmatched
+        assertNull(findComponent(bom, Component.Type.FILE, "index.js"),
+                "file whose hash matches external SBOM component"
+                        + " should not appear as unmatched FILE");
+
+        // Step 3: the file's archive path must still be traceable
+        String expectedPath = "node_modules/@acme/widget/index.js";
+        boolean pathTraceable = allComponentsRecursive(bom).stream()
+                .anyMatch(c -> c.getEvidence() != null
+                        && c.getEvidence().getOccurrences() != null
+                        && c.getEvidence().getOccurrences().stream()
+                                .anyMatch(o -> expectedPath.equals(
+                                        o.getLocation())));
+        assertTrue(pathTraceable,
+                "file matched by external SBOM must have its archive path"
+                        + " recorded as an occurrence on the matched component");
+    }
+
+    private static List<Component> allComponentsRecursive(Bom bom) {
+        List<Component> result = new java.util.ArrayList<>();
+        if (bom.getComponents() != null) {
+            collectComponents(bom.getComponents(), result);
+        }
+        if (bom.getMetadata() != null && bom.getMetadata().getComponent() != null
+                && bom.getMetadata().getComponent().getComponents() != null) {
+            collectComponents(bom.getMetadata().getComponent().getComponents(), result);
+        }
+        return result;
+    }
+
+    private static void collectComponents(List<Component> components,
+            List<Component> result) {
+        for (Component c : components) {
+            result.add(c);
+            if (c.getComponents() != null) {
+                collectComponents(c.getComponents(), result);
+            }
+        }
+    }
 
     private Path createJarWithPomProperties(String name, String groupId,
             String artifactId, String version,
@@ -761,6 +836,10 @@ class SbomContainerDescriptorHandlerTest {
         }
     }
 
+    /**
+     * Finds the first top-level BOM component matching the given type and name.
+     * Returns {@code null} if the BOM is {@code null}, has no components, or no match is found.
+     */
     private static Component findComponent(Bom bom, Component.Type type, String name) {
         if (bom == null || bom.getComponents() == null)
             return null;
