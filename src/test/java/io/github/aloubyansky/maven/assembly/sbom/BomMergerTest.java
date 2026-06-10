@@ -184,7 +184,38 @@ class BomMergerTest {
         assertEquals("nested", found.getName());
     }
 
-    // ---- helpers ----
+    @Test
+    void duplicateDependencyRefsNotImported() {
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0",
+                createLibrary("org.a", "war-a", "1.0", "pkg:maven/org.a/war-a@1.0"),
+                createLibrary("org.b", "war-b", "1.0", "pkg:maven/org.b/war-b@1.0"));
+        target.addDependency(new Dependency("pkg:maven/com.example/app@1.0"));
+
+        Dependency sharedDep = new Dependency("pkg:npm/lodash@4.17.21");
+        Dependency reactDep = new Dependency("pkg:npm/react@18.3.1");
+        reactDep.addDependency(new Dependency("pkg:npm/lodash@4.17.21"));
+
+        Bom sourceA = buildSourceBom(
+                createLibrary(null, "react", "18.3.1", "pkg:npm/react@18.3.1"),
+                createLibrary(null, "lodash", "4.17.21", "pkg:npm/lodash@4.17.21"));
+        sourceA.addDependency(reactDep);
+        sourceA.addDependency(sharedDep);
+
+        Bom sourceB = buildSourceBom(
+                createLibrary(null, "lodash", "4.17.21", "pkg:npm/lodash@4.17.21"));
+        sourceB.addDependency(new Dependency("pkg:npm/lodash@4.17.21"));
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war-a@1.0", sourceA);
+        BomMerger.mergeUnder(target, "pkg:maven/org.b/war-b@1.0", sourceB);
+
+        long lodashCount = target.getDependencies().stream()
+                .filter(d -> "pkg:npm/lodash@4.17.21".equals(d.getRef()))
+                .count();
+        assertEquals(1, lodashCount,
+                "shared dependency ref should appear only once");
+        assertEquals(3, target.getDependencies().size(),
+                "target should have original + react + lodash (no duplicate)");
+    }
 
     private static Bom buildTargetBom(String mainBomRef, Component... components) {
         Bom bom = new Bom();

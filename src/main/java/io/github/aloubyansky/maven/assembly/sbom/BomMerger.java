@@ -2,7 +2,9 @@ package io.github.aloubyansky.maven.assembly.sbom;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
@@ -109,14 +111,23 @@ final class BomMerger {
     }
 
     /**
-     * Imports dependency entries into the target BOM's dependency section.
+     * Imports dependency entries into the target BOM's dependency section,
+     * skipping entries whose ref already exists in the target.
      */
     private static void importDependencies(Bom targetBom, List<Dependency> dependencies) {
         if (dependencies == null) {
             return;
         }
+        Set<String> existingRefs = new HashSet<>();
+        if (targetBom.getDependencies() != null) {
+            for (Dependency d : targetBom.getDependencies()) {
+                existingRefs.add(d.getRef());
+            }
+        }
         for (Dependency dep : dependencies) {
-            targetBom.addDependency(dep);
+            if (existingRefs.add(dep.getRef())) {
+                targetBom.addDependency(dep);
+            }
         }
     }
 
