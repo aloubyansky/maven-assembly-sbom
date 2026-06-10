@@ -187,10 +187,11 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
 
     private ArchiveContent analyzeEntries(List<ArchiveContent.FileEntry> entries,
             String baseDirPrefix, List<Bom> externalBomList) {
+        boolean detectEmbeddedSboms = !"ignore".equalsIgnoreCase(embeddedSbomHandling);
         ArchiveAnalyzer analyzer = new ArchiveAnalyzer(
                 effectiveModelResolver, repoSystem,
                 project, session, messageDigest, failOnDuplicateHash,
-                externalBomList);
+                externalBomList, detectEmbeddedSboms);
         return analyzer.analyze(entries, baseDirPrefix);
     }
 

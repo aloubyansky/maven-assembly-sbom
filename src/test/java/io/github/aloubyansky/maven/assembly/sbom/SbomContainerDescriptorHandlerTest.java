@@ -770,6 +770,37 @@ class SbomContainerDescriptorHandlerTest {
     }
 
     @Test
+    void ignoredEmbeddedSbomPreservedAsUnmatchedFile() throws Exception {
+        handler.setEmbeddedSbomHandling("ignore");
+        handler.setOutput("external");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        Path sbomFile = createTestFile("bom.cdx.json",
+                "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.6\","
+                        + "\"components\":[]}");
+
+        Path archivePath = tempDir.resolve("ignore-test.zip");
+        ZipArchiver archiver = new ZipArchiver();
+        archiver.setDestFile(archivePath.toFile());
+        archiver.addFile(sbomFile.toFile(), "base/META-INF/sbom/bom.cdx.json");
+        handler.finalizeArchiveCreation(archiver);
+        archiver.createArchive();
+
+        Path bomFile = tempDir.resolve("ignore-test.zip.cdx.json");
+        assertTrue(Files.exists(bomFile), "external BOM should be written");
+        String json = Files.readString(bomFile);
+        org.cyclonedx.parsers.JsonParser parser = new org.cyclonedx.parsers.JsonParser();
+        Bom bom = parser.parse(json.getBytes(StandardCharsets.UTF_8));
+
+        Component file = findComponent(bom, Component.Type.FILE, "bom.cdx.json");
+        assertNotNull(file,
+                "SBOM file should remain as unmatched FILE component"
+                        + " when embeddedSbomHandling=ignore");
+        assertEquals("META-INF/sbom/bom.cdx.json",
+                file.getEvidence().getOccurrences().get(0).getLocation());
+    }
+
+    @Test
     void embeddedSbomFromArtifactNotInArchiveIsIgnored() throws Exception {
         Path includedJar = createTestJar("lib-1.0.jar", "included-content");
         Artifact includedArtifact = createArtifact("org.example", "lib", "1.0",

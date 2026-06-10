@@ -65,6 +65,7 @@ class ArchiveAnalyzer {
     private final boolean failOnDuplicateHash;
     private final Map<ArtifactCoords, MavenProject> reactorModuleIndex;
     private final List<Bom> externalBoms;
+    private final boolean detectEmbeddedSboms;
     private List<Artifact> allArtifacts;
     private ArtifactHashIndex hashIndex;
 
@@ -123,7 +124,7 @@ class ArchiveAnalyzer {
             MessageDigest messageDigest,
             boolean failOnDuplicateHash) {
         this(effectiveModelResolver, repoSystem, project, session,
-                messageDigest, failOnDuplicateHash, List.of());
+                messageDigest, failOnDuplicateHash, List.of(), true);
     }
 
     ArchiveAnalyzer(EffectiveModelResolver effectiveModelResolver,
@@ -133,6 +134,18 @@ class ArchiveAnalyzer {
             MessageDigest messageDigest,
             boolean failOnDuplicateHash,
             List<Bom> externalBoms) {
+        this(effectiveModelResolver, repoSystem, project, session,
+                messageDigest, failOnDuplicateHash, externalBoms, true);
+    }
+
+    ArchiveAnalyzer(EffectiveModelResolver effectiveModelResolver,
+            RepositorySystem repoSystem,
+            MavenProject project,
+            MavenSession session,
+            MessageDigest messageDigest,
+            boolean failOnDuplicateHash,
+            List<Bom> externalBoms,
+            boolean detectEmbeddedSboms) {
         this.effectiveModelResolver = effectiveModelResolver;
         this.repoSystem = repoSystem;
         this.project = project;
@@ -141,6 +154,7 @@ class ArchiveAnalyzer {
         this.failOnDuplicateHash = failOnDuplicateHash;
         this.reactorModuleIndex = indexReactorModules(session.getProjects());
         this.externalBoms = externalBoms;
+        this.detectEmbeddedSboms = detectEmbeddedSboms;
     }
 
     /**
@@ -199,10 +213,12 @@ class ArchiveAnalyzer {
         if (!unmatchedByPath.isEmpty()) {
             matchAgainstExternalSboms(unmatchedByPath, content);
         }
-        if (!unmatchedByPath.isEmpty()) {
-            detectSbomsInUnmatchedFiles(unmatchedByPath, content);
+        if (detectEmbeddedSboms) {
+            if (!unmatchedByPath.isEmpty()) {
+                detectSbomsInUnmatchedFiles(unmatchedByPath, content);
+            }
+            detectSbomsInArtifactJars(content);
         }
-        detectSbomsInArtifactJars(content);
 
         for (ArchiveContent.FileEntry entry : unmatchedByPath.values()) {
             content.addUnmatchedFile(entry);
