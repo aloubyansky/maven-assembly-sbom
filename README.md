@@ -76,6 +76,8 @@ Options are set inside the `<containerDescriptorHandler>` block in the assembly 
 | `failOnMissingLicense` | `false` | When `true`, the build fails if any library component has no license information in its POM |
 | `hashAlgorithm` | `SHA-256` | The hash algorithm used for content hashes. Must be supported by both `java.security.MessageDigest` and the [CycloneDX specification](https://cyclonedx.org/docs/1.6/json/#hash-alg) (MD5, SHA-1, SHA-256, SHA-384, SHA-512, SHA3-256, SHA3-384, SHA3-512, BLAKE2b-256, BLAKE2b-384, BLAKE2b-512, BLAKE3) |
 | `failOnDuplicateHash` | `true` | When `true`, the build fails if two distinct artifacts have identical content hashes. Set to `false` to log a warning instead |
+| `embeddedSbomHandling` | `merge` | How to handle CycloneDX SBOM files (`.cdx.json`, `.cdx.xml`) found inside the archive: `merge` (import components as nested sub-components of the containing artifact), `link` (add an external reference of type `bom` to the containing artifact), or `ignore` |
+| `mergeBoms` | _(none)_ | Comma-separated list of file paths to external CycloneDX SBOMs to merge into the distribution SBOM. Relative paths are resolved against the project base directory. External SBOM component hashes also participate in archive entry matching |
 
 The generator reads `includeBaseDirectory` from the assembly descriptor. When it is `true`, the base directory prefix is stripped from file paths in the BOM.
 
@@ -137,6 +139,55 @@ The BOM includes a CycloneDX dependency graph reflecting the Maven dependency tr
 
 - **Direct vs. transitive** — the graph preserves the Maven dependency hierarchy. Transitive dependencies are connected through their parent, not listed as direct dependencies of the main component.
 - **Unpacked artifact dependencies** — nested JARs identified within unpacked archives are connected to their parent artifact via dependency edges.
+
+### SBOM Merging
+
+Distribution archives often bundle artifacts from non-Maven ecosystems — most commonly JavaScript libraries inside WARs or JARs. The generator can detect and integrate CycloneDX SBOMs from those ecosystems, turning otherwise unidentified files into properly typed LIBRARY components with Package URLs, licenses, and dependency relationships.
+
+#### Auto-detection
+
+CycloneDX SBOM files (`.cdx.json` or `.cdx.xml`) are automatically detected in two places:
+
+1. **Archive entries** — when an artifact is unpacked into the distribution (e.g., a WAR with `<unpack>true</unpack>`), any SBOM file among the unpacked content is detected. The parent is determined by the directory structure.
+2. **Inside bundled JARs/WARs** — matched artifacts that are ZIP-based archives are scanned for embedded SBOM files.
+
+When both JSON and XML variants of the same SBOM exist (same filename stem in the same directory), the JSON variant is preferred and the XML duplicate is skipped.
+
+#### Handling modes
+
+The `embeddedSbomHandling` option controls what happens with detected SBOMs:
+
+- **`merge`** (default) — the SBOM's components are imported as nested sub-components of the containing artifact. Dependency entries are imported into the distribution BOM's dependency section. No cross-ecosystem dependency edges are created — nesting already captures the containment relationship.
+- **`link`** — an `externalReference` of type `bom` is added to the containing artifact, pointing to the SBOM file's location within the archive. The SBOM file remains in the archive.
+- **`ignore`** — embedded SBOMs are not processed.
+
+#### External SBOMs
+
+The `mergeBoms` option accepts a comma-separated list of file paths to CycloneDX SBOMs generated outside the Maven build (e.g., by `cdxgen`, `@cyclonedx/cyclonedx-npm`, or pnpm). These SBOMs are:
+
+1. **Used for archive entry matching** — component hashes from external SBOMs are checked against unmatched archive entries. If a match is found, the entry is identified from the external SBOM rather than appearing as an unidentified FILE component.
+2. **Merged under the main component** — all external SBOM components are nested under the distribution's main component.
+
+Example configuration:
+
+```xml
+<containerDescriptorHandler>
+    <handlerName>sbom</handlerName>
+    <configuration>
+        <output>external</output>
+        <mergeBoms>target/js-sbom.cdx.json</mergeBoms>
+    </configuration>
+</containerDescriptorHandler>
+```
+
+#### Generating JavaScript SBOMs
+
+| Package Manager | Tool |
+|---|---|
+| npm | [`@cyclonedx/cyclonedx-npm`](https://www.npmjs.com/package/@cyclonedx/cyclonedx-npm) |
+| Yarn | [`@cyclonedx/cyclonedx-node-yarn`](https://github.com/CycloneDX/cyclonedx-node-yarn) |
+| pnpm | [`cdxgen`](https://www.npmjs.com/package/@cyclonedx/cdxgen) |
+| Any | [`cdxgen`](https://www.npmjs.com/package/@cyclonedx/cdxgen) (multi-ecosystem) |
 
 ### Reproducible Builds
 

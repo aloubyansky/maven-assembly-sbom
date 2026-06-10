@@ -43,12 +43,12 @@ import org.cyclonedx.model.metadata.ToolInformation;
  */
 public class BomBuilder {
 
-    private static final Comparator<Component> COMPONENT_ORDER;
+    static final Comparator<Component> COMPONENT_ORDER;
     static {
         Comparator<String> nullSafe = Comparator.nullsFirst(Comparator.naturalOrder());
         COMPONENT_ORDER = Comparator
                 .comparing(Component::getGroup, nullSafe)
-                .thenComparing(Component::getName)
+                .thenComparing(Component::getName, nullSafe)
                 .thenComparing(Component::getVersion, nullSafe);
     }
 
@@ -297,6 +297,17 @@ public class BomBuilder {
      */
     public void setDependencyGraph(Map<ArtifactCoords, List<ArtifactCoords>> graph) {
         this.artifactDependencyGraph = graph;
+    }
+
+    /**
+     * Returns the bom-ref for the given artifact coordinates, or
+     * {@code null} if the artifact has not been registered.
+     *
+     * @param coords the artifact coordinates to look up
+     * @return the bom-ref string, or {@code null}
+     */
+    public String bomRefOf(ArtifactCoords coords) {
+        return bomRefById.get(coords);
     }
 
     /**
