@@ -30,7 +30,7 @@ import org.slf4j.LoggerFactory;
  * SBOM file's location within the archive.</li>
  * </ul>
  */
-final class BomMerger {
+public final class BomMerger {
 
     private static final Logger log = LoggerFactory.getLogger(BomMerger.class);
 
@@ -59,7 +59,7 @@ final class BomMerger {
      * @param parentBomRef the {@code bom-ref} of the parent component
      * @param sourceBom the external BOM whose components to import
      */
-    static void mergeUnder(Bom targetBom, String parentBomRef, Bom sourceBom) {
+    public static void mergeUnder(Bom targetBom, String parentBomRef, Bom sourceBom) {
         Component parent = findComponentByBomRef(targetBom, parentBomRef);
         if (parent == null) {
             log.warn("Cannot merge SBOM: parent component with bom-ref '{}' not found",
@@ -67,6 +67,24 @@ final class BomMerger {
             return;
         }
         nestComponents(parent, sourceBom.getComponents());
+        importDependencies(targetBom, sourceBom.getDependencies());
+    }
+
+    /**
+     * Merges the source BOM's components into the target BOM's
+     * top-level component list, and imports its dependency entries.
+     *
+     * @param targetBom the BOM to merge into
+     * @param sourceBom the external BOM whose components to import
+     */
+    public static void mergeFlat(Bom targetBom, Bom sourceBom) {
+        if (sourceBom.getComponents() != null) {
+            List<Component> sorted = new ArrayList<>(sourceBom.getComponents());
+            sorted.sort(COMPONENT_ORDER);
+            for (Component comp : sorted) {
+                targetBom.addComponent(comp);
+            }
+        }
         importDependencies(targetBom, sourceBom.getDependencies());
     }
 
@@ -83,7 +101,7 @@ final class BomMerger {
      * @param parentBomRef the {@code bom-ref} of the parent component
      * @param bomPath the archive-internal path to the SBOM file
      */
-    static void addBomReference(Bom targetBom, String parentBomRef, String bomPath) {
+    public static void addBomReference(Bom targetBom, String parentBomRef, String bomPath) {
         Component parent = findComponentByBomRef(targetBom, parentBomRef);
         if (parent == null) {
             log.warn("Cannot add BOM reference: parent component with bom-ref '{}' not found",
@@ -143,7 +161,7 @@ final class BomMerger {
      * @param bomRef the {@code bom-ref} to match
      * @return the matching component, or {@code null} if not found
      */
-    static Component findComponentByBomRef(Bom bom, String bomRef) {
+    public static Component findComponentByBomRef(Bom bom, String bomRef) {
         if (bomRef == null) {
             return null;
         }

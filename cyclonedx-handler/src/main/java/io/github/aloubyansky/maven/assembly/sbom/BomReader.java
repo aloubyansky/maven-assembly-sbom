@@ -19,7 +19,7 @@ import org.slf4j.LoggerFactory;
  * determines whether the JSON or XML parser is used.
  * </p>
  */
-final class BomReader {
+public final class BomReader {
 
     private static final Logger log = LoggerFactory.getLogger(BomReader.class);
 
@@ -32,7 +32,7 @@ final class BomReader {
      * @param file the BOM file (JSON or XML)
      * @return the parsed BOM, or {@code null} if parsing fails
      */
-    static Bom readBom(File file) {
+    public static Bom readBom(File file) {
         try {
             Parser parser = BomParserFactory.createParser(file);
             return parser.parse(file);
@@ -54,7 +54,7 @@ final class BomReader {
      * @return the parsed BOM, or {@code null} if parsing fails
      * @throws IOException if the stream cannot be read
      */
-    static Bom readBom(InputStream inputStream) throws IOException {
+    public static Bom readBom(InputStream inputStream) throws IOException {
         byte[] bytes = inputStream.readAllBytes();
         try {
             Parser parser = BomParserFactory.createParser(bytes);
