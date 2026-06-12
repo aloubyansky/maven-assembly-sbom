@@ -2,14 +2,20 @@ package io.github.aloubyansky.maven.assembly.sbom;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Dependency;
+import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.ExternalReference;
+import org.cyclonedx.model.Hash;
+import org.cyclonedx.model.component.evidence.Occurrence;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -66,7 +72,7 @@ public final class BomMerger {
                     parentBomRef);
             return;
         }
-        nestComponents(parent, sourceBom.getComponents());
+        nestComponents(targetBom, parent, sourceBom.getComponents());
         importDependencies(targetBom, sourceBom.getDependencies());
     }
 
@@ -82,6 +88,7 @@ public final class BomMerger {
             List<Component> sorted = new ArrayList<>(sourceBom.getComponents());
             sorted.sort(COMPONENT_ORDER);
             for (Component comp : sorted) {
+                normalizePurls(comp);
                 targetBom.addComponent(comp);
             }
         }
@@ -115,17 +122,221 @@ public final class BomMerger {
     }
 
     /**
-     * Sorts and appends components to the parent's nested component list.
+     * Merges source components into the parent's nested component list,
+     * deduplicating against existing nested components and migrating
+     * occurrences from top-level components when appropriate.
+     *
+     * <p>
+     * For each source component, three cases are handled:
+     * </p>
+     * <ol>
+     * <li>A nested component with the same PURL already exists under the
+     * parent (e.g. from archive analysis) — the source's hashes, licenses,
+     * and sub-components are merged into the existing component.</li>
+     * <li>A top-level component with the same PURL exists and has occurrences
+     * under the parent's path prefix — those occurrences are migrated to the
+     * source component, which is then added as nested.</li>
+     * <li>Otherwise — the source component is added as a new nested
+     * component.</li>
+     * </ol>
      */
-    private static void nestComponents(Component parent, List<Component> components) {
+    private static void nestComponents(Bom targetBom, Component parent,
+            List<Component> components) {
         if (components == null || components.isEmpty()) {
             return;
         }
+
+        Map<String, Component> existingNestedByPurl = indexByPurl(parent.getComponents());
+        String parentPathPrefix = getParentPathPrefix(parent);
+        Map<String, Component> topLevelByPurl = parentPathPrefix != null
+                ? indexByPurl(targetBom.getComponents())
+                : Map.of();
+
         List<Component> sorted = new ArrayList<>(components);
         sorted.sort(COMPONENT_ORDER);
+
         for (Component comp : sorted) {
+            normalizePurls(comp);
+            String purl = comp.getPurl();
+
+            if (purl != null) {
+                Component existingNested = existingNestedByPurl.get(purl);
+                if (existingNested != null) {
+                    mergeComponentData(existingNested, comp);
+                    continue;
+                }
+            }
+
+            if (purl != null) {
+                Component topLevel = topLevelByPurl.get(purl);
+                if (topLevel != null && topLevel != parent) {
+                    migrateOccurrences(topLevel, comp, parentPathPrefix);
+                    if (!hasOccurrences(topLevel)) {
+                        targetBom.getComponents().remove(topLevel);
+                    }
+                } else if (parentPathPrefix != null) {
+                    // component from the embedded SBOM has no corresponding
+                    // archive entry — its file was removed during assembly
+                    log.debug("Skipping component {} from embedded SBOM:"
+                            + " not found in archive under {}", purl, parentPathPrefix);
+                    continue;
+                }
+            }
+
             parent.addComponent(comp);
         }
+    }
+
+    private static String getParentPathPrefix(Component parent) {
+        Evidence evidence = parent.getEvidence();
+        if (evidence == null || evidence.getOccurrences() == null) {
+            return null;
+        }
+        for (Occurrence occ : evidence.getOccurrences()) {
+            String location = occ.getLocation();
+            if (location != null && location.endsWith("/")) {
+                return location;
+            }
+        }
+        return null;
+    }
+
+    private static Map<String, Component> indexByPurl(List<Component> components) {
+        if (components == null || components.isEmpty()) {
+            return new HashMap<>();
+        }
+        Map<String, Component> index = new HashMap<>(components.size());
+        for (Component comp : components) {
+            if (comp.getPurl() != null) {
+                index.put(normalizeMavenPurl(comp.getPurl()), comp);
+            }
+        }
+        return index;
+    }
+
+    /**
+     * Normalizes a component's PURL and bom-ref in place by stripping
+     * the redundant {@code ?type=jar} qualifier (jar is the PURL-spec
+     * default for Maven). Recurses into sub-components.
+     */
+    private static void normalizePurls(Component comp) {
+        String purl = comp.getPurl();
+        if (purl != null) {
+            String normalized = normalizeMavenPurl(purl);
+            if (normalized != purl) {
+                comp.setPurl(normalized);
+                if (purl.equals(comp.getBomRef())) {
+                    comp.setBomRef(normalized);
+                }
+            }
+        }
+        if (comp.getComponents() != null) {
+            for (Component child : comp.getComponents()) {
+                normalizePurls(child);
+            }
+        }
+    }
+
+    /**
+     * Strips the redundant {@code type=jar} qualifier from a Maven PURL
+     * since {@code jar} is the default type per the PURL spec. Handles
+     * the qualifier in any position ({@code ?type=jar}, {@code ?type=jar&…},
+     * or {@code …&type=jar}). Non-Maven PURLs and PURLs with a non-jar
+     * type are returned unchanged.
+     */
+    static String normalizeMavenPurl(String purl) {
+        if (purl == null || !purl.startsWith("pkg:maven/")) {
+            return purl;
+        }
+        // ?type=jar as first (or only) qualifier
+        int idx = purl.indexOf("?type=jar");
+        if (idx >= 0) {
+            int end = idx + "?type=jar".length();
+            if (end == purl.length()) {
+                return purl.substring(0, idx);
+            }
+            if (purl.charAt(end) == '&') {
+                return purl.substring(0, idx) + '?' + purl.substring(end + 1);
+            }
+        }
+        // &type=jar as non-first qualifier
+        idx = purl.indexOf("&type=jar");
+        if (idx >= 0) {
+            int end = idx + "&type=jar".length();
+            if (end == purl.length()) {
+                return purl.substring(0, idx);
+            }
+            if (purl.charAt(end) == '&') {
+                return purl.substring(0, idx) + purl.substring(end);
+            }
+        }
+        return purl;
+    }
+
+    private static void mergeComponentData(Component target, Component source) {
+        mergeHashes(target, source);
+        if (target.getLicenses() == null && source.getLicenses() != null) {
+            target.setLicenses(source.getLicenses());
+        }
+        if (source.getComponents() != null) {
+            Set<String> existingPurls = new HashSet<>();
+            if (target.getComponents() != null) {
+                for (Component c : target.getComponents()) {
+                    if (c.getPurl() != null) {
+                        existingPurls.add(normalizeMavenPurl(c.getPurl()));
+                    }
+                }
+            }
+            for (Component nested : source.getComponents()) {
+                String np = normalizeMavenPurl(nested.getPurl());
+                if (np == null || existingPurls.add(np)) {
+                    target.addComponent(nested);
+                }
+            }
+        }
+    }
+
+    private static void mergeHashes(Component target, Component source) {
+        if (source.getHashes() == null || source.getHashes().isEmpty()) {
+            return;
+        }
+        Set<String> existingAlgorithms = new HashSet<>();
+        if (target.getHashes() != null) {
+            for (Hash h : target.getHashes()) {
+                existingAlgorithms.add(h.getAlgorithm());
+            }
+        }
+        for (Hash h : source.getHashes()) {
+            if (existingAlgorithms.add(h.getAlgorithm())) {
+                target.addHash(h);
+            }
+        }
+    }
+
+    private static void migrateOccurrences(Component topLevel, Component nested,
+            String pathPrefix) {
+        Evidence topEvidence = topLevel.getEvidence();
+        if (topEvidence == null || topEvidence.getOccurrences() == null) {
+            return;
+        }
+        Iterator<Occurrence> it = topEvidence.getOccurrences().iterator();
+        while (it.hasNext()) {
+            Occurrence occ = it.next();
+            if (occ.getLocation() != null
+                    && occ.getLocation().startsWith(pathPrefix)) {
+                it.remove();
+                if (nested.getEvidence() == null) {
+                    nested.setEvidence(new Evidence());
+                }
+                nested.getEvidence().addOccurrence(occ);
+            }
+        }
+    }
+
+    private static boolean hasOccurrences(Component component) {
+        Evidence evidence = component.getEvidence();
+        return evidence != null && evidence.getOccurrences() != null
+                && !evidence.getOccurrences().isEmpty();
     }
 
     /**
@@ -139,14 +350,25 @@ public final class BomMerger {
         Set<String> existingRefs = new HashSet<>();
         if (targetBom.getDependencies() != null) {
             for (Dependency d : targetBom.getDependencies()) {
-                existingRefs.add(d.getRef());
+                existingRefs.add(normalizeMavenPurl(d.getRef()));
             }
         }
         for (Dependency dep : dependencies) {
-            if (existingRefs.add(dep.getRef())) {
-                targetBom.addDependency(dep);
+            Dependency normalized = normalizeDependency(dep);
+            if (existingRefs.add(normalized.getRef())) {
+                targetBom.addDependency(normalized);
             }
         }
+    }
+
+    private static Dependency normalizeDependency(Dependency dep) {
+        Dependency result = new Dependency(normalizeMavenPurl(dep.getRef()));
+        if (dep.getDependencies() != null) {
+            for (Dependency child : dep.getDependencies()) {
+                result.addDependency(normalizeDependency(child));
+            }
+        }
+        return result;
     }
 
     /**
@@ -165,13 +387,14 @@ public final class BomMerger {
         if (bomRef == null) {
             return null;
         }
+        String normalized = normalizeMavenPurl(bomRef);
         if (bom.getMetadata() != null && bom.getMetadata().getComponent() != null) {
             Component main = bom.getMetadata().getComponent();
-            if (bomRef.equals(main.getBomRef())) {
+            if (normalized.equals(normalizeMavenPurl(main.getBomRef()))) {
                 return main;
             }
         }
-        return searchComponentTree(bom.getComponents(), bomRef);
+        return searchComponentTree(bom.getComponents(), normalized);
     }
 
     /**
@@ -183,7 +406,7 @@ public final class BomMerger {
             return null;
         }
         for (Component comp : components) {
-            if (bomRef.equals(comp.getBomRef())) {
+            if (bomRef.equals(normalizeMavenPurl(comp.getBomRef()))) {
                 return comp;
             }
             Component nested = searchComponentTree(comp.getComponents(), bomRef);

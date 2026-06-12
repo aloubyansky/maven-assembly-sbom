@@ -46,7 +46,7 @@ class BomBuilderTest {
         assertEquals(Component.Type.LIBRARY, comp.getType());
         assertEquals("org.apache", comp.getGroup());
         assertEquals("2.15.1", comp.getVersion());
-        assertEquals("pkg:maven/org.apache/commons-io@2.15.1?type=jar", comp.getPurl());
+        assertEquals("pkg:maven/org.apache/commons-io@2.15.1", comp.getPurl());
         assertEquals(1, comp.getHashes().size());
         assertEquals("abc123", comp.getHashes().get(0).getValue());
 
@@ -66,7 +66,7 @@ class BomBuilderTest {
 
         Component comp = findByName(bom, "bar");
         assertNotNull(comp);
-        assertEquals("pkg:maven/org.foo/bar@3.0?type=jar&classifier=linux-x86_64", comp.getPurl());
+        assertEquals("pkg:maven/org.foo/bar@3.0?classifier=linux-x86_64", comp.getPurl());
     }
 
     @Test
@@ -79,7 +79,7 @@ class BomBuilderTest {
 
         Component comp = findByName(bom, "bar");
         assertNotNull(comp);
-        assertEquals("pkg:maven/org.foo/bar@3.0?type=jar&classifier=linux%2Bdebug",
+        assertEquals("pkg:maven/org.foo/bar@3.0?classifier=linux%2Bdebug",
                 comp.getPurl());
     }
 
@@ -194,8 +194,8 @@ class BomBuilderTest {
         Bom bom = builder.build();
 
         String mainRef = bom.getMetadata().getComponent().getBomRef();
-        String refA = "pkg:maven/org.a/lib-a@1.0?type=jar";
-        String refB = "pkg:maven/org.b/lib-b@2.0?type=jar";
+        String refA = "pkg:maven/org.a/lib-a@1.0";
+        String refB = "pkg:maven/org.b/lib-b@2.0";
 
         Dependency mainDep = findDependency(bom, mainRef);
         assertNotNull(mainDep);
@@ -302,7 +302,7 @@ class BomBuilderTest {
         Dependency warDep = findDependency(bom, warRef);
         assertNotNull(warDep, "WAR should have a dependency entry");
         assertTrue(warDep.getDependencies().stream()
-                .anyMatch(d -> d.getRef().equals("pkg:maven/org.b/nested-lib@2.0?type=jar")),
+                .anyMatch(d -> d.getRef().equals("pkg:maven/org.b/nested-lib@2.0")),
                 "WAR should depend on nested-lib");
 
         String mainRef = bom.getMetadata().getComponent().getBomRef();
@@ -310,7 +310,7 @@ class BomBuilderTest {
         List<String> mainChildren = mainDep.getDependencies().stream()
                 .map(Dependency::getRef).toList();
         assertTrue(mainChildren.contains(warRef), "main should list WAR as direct");
-        assertFalse(mainChildren.contains("pkg:maven/org.b/nested-lib@2.0?type=jar"),
+        assertFalse(mainChildren.contains("pkg:maven/org.b/nested-lib@2.0"),
                 "nested-lib should NOT be a direct child of main");
     }
 
@@ -348,14 +348,14 @@ class BomBuilderTest {
                 "jcip-annotations should NOT appear as top-level component");
 
         // The shaded JAR should NOT list nested components as dependencies
-        String shadedRef = "pkg:maven/com.nimbusds/nimbus-jose-jwt@10.0?type=jar";
+        String shadedRef = "pkg:maven/com.nimbusds/nimbus-jose-jwt@10.0";
         Dependency shadedDep = findDependency(bom, shadedRef);
         if (shadedDep != null && shadedDep.getDependencies() != null) {
             List<String> depRefs = shadedDep.getDependencies().stream()
                     .map(Dependency::getRef).toList();
-            assertFalse(depRefs.contains("pkg:maven/com.google.code.gson/gson@2.11.0?type=jar"),
+            assertFalse(depRefs.contains("pkg:maven/com.google.code.gson/gson@2.11.0"),
                     "gson should NOT appear as a dependency of the shaded JAR");
-            assertFalse(depRefs.contains("pkg:maven/net.jcip/jcip-annotations@1.0?type=jar"),
+            assertFalse(depRefs.contains("pkg:maven/net.jcip/jcip-annotations@1.0"),
                     "jcip-annotations should NOT appear as a dependency of the shaded JAR");
         }
     }
@@ -384,9 +384,9 @@ class BomBuilderTest {
 
         Bom bom = builder.build();
 
-        String shadedRef = "pkg:maven/com.nimbusds/nimbus-jose-jwt@10.0?type=jar";
-        String gsonRef = "pkg:maven/com.google.code.gson/gson@2.11.0?type=jar";
-        String otherRef = "pkg:maven/org.example/other-lib@3.0?type=jar";
+        String shadedRef = "pkg:maven/com.nimbusds/nimbus-jose-jwt@10.0";
+        String gsonRef = "pkg:maven/com.google.code.gson/gson@2.11.0";
+        String otherRef = "pkg:maven/org.example/other-lib@3.0";
 
         // gson is nested under the shaded JAR
         Component shadedComp = findByName(bom, "nimbus-jose-jwt");

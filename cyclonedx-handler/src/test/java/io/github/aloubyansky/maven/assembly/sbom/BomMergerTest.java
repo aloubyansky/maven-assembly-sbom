@@ -7,8 +7,12 @@ import java.util.List;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Dependency;
+import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.ExternalReference;
+import org.cyclonedx.model.Hash;
+import org.cyclonedx.model.LicenseChoice;
 import org.cyclonedx.model.Metadata;
+import org.cyclonedx.model.component.evidence.Occurrence;
 import org.junit.jupiter.api.Test;
 
 class BomMergerTest {
@@ -215,6 +219,348 @@ class BomMergerTest {
                 "shared dependency ref should appear only once");
         assertEquals(3, target.getDependencies().size(),
                 "target should have original + react + lodash (no duplicate)");
+    }
+
+    @Test
+    void mergeDeduplicatesNestedComponentAndMergesHashes() {
+        Component nimbus = createLibrary("com.nimbusds", "nimbus-jose-jwt", "10.6",
+                "pkg:maven/com.nimbusds/nimbus-jose-jwt@10.6");
+        nimbus.addHash(new Hash(Hash.Algorithm.SHA_256, "abc123"));
+        nimbus.setEvidence(evidenceWithOccurrence(
+                "web/console.war/WEB-INF/lib/nimbus-jose-jwt-10.6.jar"));
+
+        Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
+        war.addComponent(nimbus);
+        war.setEvidence(evidenceWithOccurrence("web/console.war/"));
+
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war);
+
+        Component nimbusFromSbom = createLibrary("com.nimbusds", "nimbus-jose-jwt", "10.6",
+                "pkg:maven/com.nimbusds/nimbus-jose-jwt@10.6?type=jar");
+        nimbusFromSbom.addHash(new Hash("MD5", "md5hash"));
+        nimbusFromSbom.addHash(new Hash("SHA-1", "sha1hash"));
+        nimbusFromSbom.addHash(new Hash(Hash.Algorithm.SHA_256, "abc123"));
+
+        Bom source = buildSourceBom(nimbusFromSbom);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", source);
+
+        assertEquals(1, war.getComponents().size(),
+                "duplicate should be merged, not added");
+        Component merged = war.getComponents().get(0);
+        assertEquals("nimbus-jose-jwt", merged.getName());
+        assertEquals(3, merged.getHashes().size(),
+                "hashes from SBOM should be merged into existing");
+        assertNotNull(merged.getEvidence());
+        assertEquals(1, merged.getEvidence().getOccurrences().size());
+        assertEquals("web/console.war/WEB-INF/lib/nimbus-jose-jwt-10.6.jar",
+                merged.getEvidence().getOccurrences().get(0).getLocation());
+    }
+
+    @Test
+    void mergeMigratesOccurrencesFromTopLevelToNested() {
+        Component jspecify = createLibrary("org.jspecify", "jspecify", "1.0.0",
+                "pkg:maven/org.jspecify/jspecify@1.0.0");
+        Evidence jspecEvidence = new Evidence();
+        jspecEvidence.addOccurrence(occurrence("lib/jspecify-1.0.0.jar"));
+        jspecEvidence.addOccurrence(occurrence(
+                "web/console.war/WEB-INF/lib/jspecify-1.0.0.jar"));
+        jspecify.setEvidence(jspecEvidence);
+
+        Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
+        war.setEvidence(evidenceWithOccurrence("web/console.war/"));
+
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war, jspecify);
+
+        Component jspecFromSbom = createLibrary("org.jspecify", "jspecify", "1.0.0",
+                "pkg:maven/org.jspecify/jspecify@1.0.0?type=jar");
+        Bom source = buildSourceBom(jspecFromSbom);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", source);
+
+        assertEquals(1, jspecify.getEvidence().getOccurrences().size());
+        assertEquals("lib/jspecify-1.0.0.jar",
+                jspecify.getEvidence().getOccurrences().get(0).getLocation());
+        assertTrue(target.getComponents().contains(jspecify),
+                "jspecify should remain at top-level");
+
+        assertNotNull(war.getComponents());
+        assertEquals(1, war.getComponents().size());
+        Component nestedJspec = war.getComponents().get(0);
+        assertEquals("jspecify", nestedJspec.getName());
+        assertNotNull(nestedJspec.getEvidence());
+        assertEquals(1, nestedJspec.getEvidence().getOccurrences().size());
+        assertEquals("web/console.war/WEB-INF/lib/jspecify-1.0.0.jar",
+                nestedJspec.getEvidence().getOccurrences().get(0).getLocation());
+    }
+
+    @Test
+    void mergeKeepsTopLevelAfterOccurrenceMigration() {
+        Component shared = createLibrary("org.x", "shared-lib", "1.0",
+                "pkg:maven/org.x/shared-lib@1.0");
+        Evidence evidence = new Evidence();
+        evidence.addOccurrence(occurrence("lib/shared-lib-1.0.jar"));
+        evidence.addOccurrence(occurrence(
+                "web/console.war/WEB-INF/lib/shared-lib-1.0.jar"));
+        shared.setEvidence(evidence);
+
+        Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
+        war.setEvidence(evidenceWithOccurrence("web/console.war/"));
+
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war, shared);
+        assertEquals(2, target.getComponents().size());
+
+        Component sharedFromSbom = createLibrary("org.x", "shared-lib", "1.0",
+                "pkg:maven/org.x/shared-lib@1.0?type=jar");
+        Bom source = buildSourceBom(sharedFromSbom);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", source);
+
+        assertEquals(2, target.getComponents().size(),
+                "top-level should be preserved (it exists at lib/ too)");
+        assertEquals(1, shared.getEvidence().getOccurrences().size());
+        assertEquals("lib/shared-lib-1.0.jar",
+                shared.getEvidence().getOccurrences().get(0).getLocation());
+
+        assertNotNull(war.getComponents());
+        assertEquals(1, war.getComponents().size());
+        assertEquals("web/console.war/WEB-INF/lib/shared-lib-1.0.jar",
+                war.getComponents().get(0).getEvidence()
+                        .getOccurrences().get(0).getLocation());
+    }
+
+    @Test
+    void mergeRemovesTopLevelWhenAllOccurrencesMigrated() {
+        Component warOnly = createLibrary("org.x", "war-only-lib", "1.0",
+                "pkg:maven/org.x/war-only-lib@1.0");
+        warOnly.setEvidence(evidenceWithOccurrence(
+                "web/console.war/WEB-INF/lib/war-only-lib-1.0.jar"));
+
+        Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
+        war.setEvidence(evidenceWithOccurrence("web/console.war/"));
+
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war, warOnly);
+        assertEquals(2, target.getComponents().size());
+
+        Component warOnlyFromSbom = createLibrary("org.x", "war-only-lib", "1.0",
+                "pkg:maven/org.x/war-only-lib@1.0?type=jar");
+        Bom source = buildSourceBom(warOnlyFromSbom);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", source);
+
+        assertEquals(1, target.getComponents().size(),
+                "war-only-lib should be removed from top-level");
+        assertEquals("war", target.getComponents().get(0).getName());
+
+        assertNotNull(war.getComponents());
+        assertEquals(1, war.getComponents().size());
+        Component nested = war.getComponents().get(0);
+        assertEquals("war-only-lib", nested.getName());
+        assertNotNull(nested.getEvidence());
+        assertEquals("web/console.war/WEB-INF/lib/war-only-lib-1.0.jar",
+                nested.getEvidence().getOccurrences().get(0).getLocation());
+    }
+
+    @Test
+    void mergeWithoutParentPrefixAddsAllAsNested() {
+        Component parent = createLibrary("org.a", "lib", "1.0", "pkg:maven/org.a/lib@1.0");
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", parent);
+
+        Bom source = buildSourceBom(
+                createLibrary(null, "dep-a", "1.0", "pkg:npm/dep-a@1.0"),
+                createLibrary(null, "dep-b", "2.0", "pkg:npm/dep-b@2.0"));
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/lib@1.0", source);
+
+        assertNotNull(parent.getComponents());
+        assertEquals(2, parent.getComponents().size(),
+                "all source components should be added as nested");
+    }
+
+    @Test
+    void mergeDeduplicateCarriesOverLicensesFromSbom() {
+        Component nested = createLibrary("org.x", "lib", "1.0",
+                "pkg:maven/org.x/lib@1.0");
+        nested.setEvidence(evidenceWithOccurrence(
+                "web/console.war/WEB-INF/lib/lib-1.0.jar"));
+
+        Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
+        war.addComponent(nested);
+        war.setEvidence(evidenceWithOccurrence("web/console.war/"));
+
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war);
+
+        Component fromSbom = createLibrary("org.x", "lib", "1.0",
+                "pkg:maven/org.x/lib@1.0?type=jar");
+        org.cyclonedx.model.License license = new org.cyclonedx.model.License();
+        license.setId("Apache-2.0");
+        LicenseChoice lc = new LicenseChoice();
+        lc.addLicense(license);
+        fromSbom.setLicenses(lc);
+
+        Bom source = buildSourceBom(fromSbom);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", source);
+
+        assertEquals(1, war.getComponents().size());
+        assertNotNull(war.getComponents().get(0).getLicenses(),
+                "licenses from SBOM should be applied to existing nested component");
+    }
+
+    @Test
+    void mergeComponentDataDeduplicatesSubComponents() {
+        Component child = createLibrary("org.c", "child", "1.0",
+                "pkg:maven/org.c/child@1.0");
+
+        Component existing = createLibrary("org.x", "shaded", "1.0",
+                "pkg:maven/org.x/shaded@1.0");
+        existing.addComponent(child);
+        existing.setEvidence(evidenceWithOccurrence(
+                "web/console.war/WEB-INF/lib/shaded-1.0.jar"));
+
+        Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
+        war.addComponent(existing);
+        war.setEvidence(evidenceWithOccurrence("web/console.war/"));
+
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war);
+
+        // Source SBOM has same shaded jar with the same sub-component
+        Component childFromSbom = createLibrary("org.c", "child", "1.0",
+                "pkg:maven/org.c/child@1.0?type=jar");
+        Component shadedFromSbom = createLibrary("org.x", "shaded", "1.0",
+                "pkg:maven/org.x/shaded@1.0?type=jar");
+        shadedFromSbom.addComponent(childFromSbom);
+
+        Bom source = buildSourceBom(shadedFromSbom);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", source);
+
+        assertEquals(1, war.getComponents().size());
+        Component merged = war.getComponents().get(0);
+        assertEquals(1, merged.getComponents().size(),
+                "sub-component should not be duplicated");
+        assertEquals("child", merged.getComponents().get(0).getName());
+    }
+
+    @Test
+    void mergeDeduplicatesAcrossPurlTypeJarVariants() {
+        // Existing nested without ?type=jar (our convention)
+        Component existing = createLibrary("org.x", "lib", "1.0",
+                "pkg:maven/org.x/lib@1.0");
+        existing.addHash(new Hash(Hash.Algorithm.SHA_256, "abc"));
+        existing.setEvidence(evidenceWithOccurrence(
+                "web/console.war/WEB-INF/lib/lib-1.0.jar"));
+
+        Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
+        war.addComponent(existing);
+        war.setEvidence(evidenceWithOccurrence("web/console.war/"));
+
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war);
+
+        // Source SBOM includes ?type=jar (cyclonedx-maven-plugin convention)
+        Component fromExternal = createLibrary("org.x", "lib", "1.0",
+                "pkg:maven/org.x/lib@1.0?type=jar");
+        fromExternal.addHash(new Hash("MD5", "md5hash"));
+
+        Bom source = buildSourceBom(fromExternal);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", source);
+
+        assertEquals(1, war.getComponents().size(),
+                "PURLs differing only in ?type=jar should be treated as equal");
+        assertEquals(2, war.getComponents().get(0).getHashes().size());
+    }
+
+    @Test
+    void mergeSkipsComponentsRemovedDuringAssembly() {
+        // Archive analysis found one nested JAR
+        Component kept = createLibrary("org.x", "kept-lib", "1.0",
+                "pkg:maven/org.x/kept-lib@1.0");
+        kept.setEvidence(evidenceWithOccurrence(
+                "web/console.war/WEB-INF/lib/kept-lib-1.0.jar"));
+
+        Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
+        war.addComponent(kept);
+        war.setEvidence(evidenceWithOccurrence("web/console.war/"));
+
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war);
+
+        // WAR's embedded SBOM lists both kept-lib and removed-lib,
+        // but removed-lib's JAR was excluded during assembly
+        Component keptFromSbom = createLibrary("org.x", "kept-lib", "1.0",
+                "pkg:maven/org.x/kept-lib@1.0?type=jar");
+        Component removedFromSbom = createLibrary("org.x", "removed-lib", "2.0",
+                "pkg:maven/org.x/removed-lib@2.0?type=jar");
+        Bom source = buildSourceBom(keptFromSbom, removedFromSbom);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", source);
+
+        assertEquals(1, war.getComponents().size(),
+                "removed-lib should not be added as nested");
+        assertEquals("kept-lib", war.getComponents().get(0).getName());
+    }
+
+    @Test
+    void mergeDoesNotStripParentOwnOccurrence() {
+        Component war = createLibrary("org.a", "war", "1.0",
+                "pkg:maven/org.a/war@1.0?type=war");
+        war.setEvidence(evidenceWithOccurrence("web/console.war/"));
+
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war);
+
+        // Source SBOM mistakenly lists the WAR itself as a component
+        Component warAsSrc = createLibrary("org.a", "war", "1.0",
+                "pkg:maven/org.a/war@1.0?type=war");
+        Bom source = buildSourceBom(warAsSrc);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0?type=war", source);
+
+        assertNotNull(war.getEvidence());
+        assertEquals(1, war.getEvidence().getOccurrences().size(),
+                "parent's own occurrence must not be stripped");
+        assertEquals("web/console.war/",
+                war.getEvidence().getOccurrences().get(0).getLocation());
+        assertTrue(target.getComponents().contains(war),
+                "parent must not be removed from top-level");
+    }
+
+    @Test
+    void normalizeMavenPurlStripsTypeJar() {
+        // ?type=jar as only qualifier
+        assertEquals("pkg:maven/g/a@1.0",
+                BomMerger.normalizeMavenPurl("pkg:maven/g/a@1.0?type=jar"));
+        // already normalized
+        assertEquals("pkg:maven/g/a@1.0",
+                BomMerger.normalizeMavenPurl("pkg:maven/g/a@1.0"));
+        // non-jar type preserved
+        assertEquals("pkg:maven/g/a@1.0?type=war",
+                BomMerger.normalizeMavenPurl("pkg:maven/g/a@1.0?type=war"));
+        // ?type=jar as first qualifier with others
+        assertEquals("pkg:maven/g/a@1.0?classifier=linux",
+                BomMerger.normalizeMavenPurl("pkg:maven/g/a@1.0?type=jar&classifier=linux"));
+        // &type=jar as last qualifier
+        assertEquals("pkg:maven/g/a@1.0?classifier=linux",
+                BomMerger.normalizeMavenPurl("pkg:maven/g/a@1.0?classifier=linux&type=jar"));
+        // &type=jar in the middle
+        assertEquals("pkg:maven/g/a@1.0?classifier=linux&scope=compile",
+                BomMerger.normalizeMavenPurl(
+                        "pkg:maven/g/a@1.0?classifier=linux&type=jar&scope=compile"));
+        // null and non-maven
+        assertNull(BomMerger.normalizeMavenPurl(null));
+        assertEquals("pkg:npm/react@18.0",
+                BomMerger.normalizeMavenPurl("pkg:npm/react@18.0"));
+    }
+
+    private static Evidence evidenceWithOccurrence(String location) {
+        Evidence evidence = new Evidence();
+        evidence.addOccurrence(occurrence(location));
+        return evidence;
+    }
+
+    private static Occurrence occurrence(String location) {
+        Occurrence occ = new Occurrence();
+        occ.setLocation(location);
+        return occ;
     }
 
     private static Bom buildTargetBom(String mainBomRef, Component... components) {

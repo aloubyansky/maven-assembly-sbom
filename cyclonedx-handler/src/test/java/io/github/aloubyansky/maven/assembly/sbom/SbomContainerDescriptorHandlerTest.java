@@ -108,7 +108,7 @@ class SbomContainerDescriptorHandlerTest {
         Bom bom = readBomFromArchiver(archiver);
         Component lib = findComponent(bom, Component.Type.LIBRARY, "foo");
         assertNotNull(lib, "should find foo as LIBRARY");
-        assertEquals("pkg:maven/org.example/foo@1.0?type=jar", lib.getPurl());
+        assertEquals("pkg:maven/org.example/foo@1.0", lib.getPurl());
         assertEquals("lib/foo-1.0.jar",
                 lib.getEvidence().getOccurrences().get(0).getLocation());
     }
@@ -257,8 +257,8 @@ class SbomContainerDescriptorHandlerTest {
         handler.finalizeArchiveCreation(archiver);
 
         Bom bom = readBomFromArchiver(archiver);
-        String refA = "pkg:maven/org.x/a@1.0?type=jar";
-        String refB = "pkg:maven/org.x/b@1.0?type=jar";
+        String refA = "pkg:maven/org.x/a@1.0";
+        String refB = "pkg:maven/org.x/b@1.0";
         var bomDepA = bom.getDependencies().stream()
                 .filter(d -> refA.equals(d.getRef())).findFirst().orElse(null);
         assertNotNull(bomDepA);
@@ -340,7 +340,7 @@ class SbomContainerDescriptorHandlerTest {
         assertEquals(1, war.getComponents().size());
         Component nested = war.getComponents().get(0);
         assertEquals("nested-lib", nested.getName());
-        assertEquals("pkg:maven/org.nested/nested-lib@2.0?type=jar", nested.getPurl());
+        assertEquals("pkg:maven/org.nested/nested-lib@2.0", nested.getPurl());
         assertEquals("web/console.war/WEB-INF/lib/nested-lib-2.0.jar",
                 nested.getEvidence().getOccurrences().get(0).getLocation(),
                 "nested JAR occurrence should be relative to distribution root");
@@ -394,7 +394,7 @@ class SbomContainerDescriptorHandlerTest {
         assertEquals(1, war.getComponents().size());
         Component jolokia = war.getComponents().get(0);
         assertEquals("jolokia-json", jolokia.getName());
-        assertEquals("pkg:maven/org.jolokia/jolokia-json@2.4?type=jar", jolokia.getPurl());
+        assertEquals("pkg:maven/org.jolokia/jolokia-json@2.4", jolokia.getPurl());
         assertEquals("web/external/WEB-INF/lib/jolokia-json-2.4.jar",
                 jolokia.getEvidence().getOccurrences().get(0).getLocation(),
                 "nested JAR occurrence should be relative to distribution root");

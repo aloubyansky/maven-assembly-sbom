@@ -703,13 +703,23 @@ public class BomBuilder {
      */
     private static String buildMavenPurl(String groupId, String artifactId,
             String version, String type, String classifier) {
-        String purl = "pkg:maven/" + purlEncode(groupId) + "/" + purlEncode(artifactId)
-                + "@" + purlEncode(version)
-                + "?type=" + purlEncode(type != null ? type : "jar");
-        if (classifier != null && !classifier.isEmpty()) {
-            purl += "&classifier=" + purlEncode(classifier);
+        boolean defaultType = type == null || type.isEmpty() || "jar".equals(type);
+        String base = "pkg:maven/" + purlEncode(groupId) + "/" + purlEncode(artifactId)
+                + "@" + purlEncode(version);
+        if (defaultType && (classifier == null || classifier.isEmpty())) {
+            return base;
         }
-        return purl;
+        StringBuilder sb = new StringBuilder(base).append('?');
+        if (!defaultType) {
+            sb.append("type=").append(purlEncode(type));
+            if (classifier != null && !classifier.isEmpty()) {
+                sb.append('&');
+            }
+        }
+        if (classifier != null && !classifier.isEmpty()) {
+            sb.append("classifier=").append(purlEncode(classifier));
+        }
+        return sb.toString();
     }
 
     /**
