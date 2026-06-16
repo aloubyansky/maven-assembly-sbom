@@ -552,7 +552,7 @@ class BomMergerTest {
     }
 
     @Test
-    void mergeUnderPrefixesFileBomRefsForUnpackedArchive() {
+    void mergeUnderPrefixesFileBomRefsAndOccurrencesForUnpackedArchive() {
         Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
         war.setEvidence(evidenceWithOccurrence("web/console.war/"));
 
@@ -563,6 +563,7 @@ class BomMergerTest {
         fileComp.setName("app.js");
         fileComp.setBomRef("file:static/js/app.js");
         fileComp.setPurl("pkg:generic/app.js");
+        fileComp.setEvidence(evidenceWithOccurrence("static/js/app.js"));
 
         Bom source = buildSourceBom(fileComp);
 
@@ -570,9 +571,13 @@ class BomMergerTest {
 
         assertNotNull(war.getComponents());
         assertEquals(1, war.getComponents().size());
+        Component nested = war.getComponents().get(0);
         assertEquals("file:web/console.war/static/js/app.js",
-                war.getComponents().get(0).getBomRef(),
+                nested.getBomRef(),
                 "file bom-ref should be prefixed with parent path");
+        assertEquals("web/console.war/static/js/app.js",
+                nested.getEvidence().getOccurrences().get(0).getLocation(),
+                "occurrence location should be prefixed consistently with bom-ref");
     }
 
     @Test
@@ -645,6 +650,131 @@ class BomMergerTest {
     }
 
     @Test
+    void mergeFlatAddsComponentsAsTopLevel() {
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0",
+                createLibrary("org.a", "lib-a", "1.0", "pkg:maven/org.a/lib-a@1.0"));
+
+        Bom source = buildSourceBom(
+                createLibrary(null, "react", "18.3.1", "pkg:npm/react@18.3.1"),
+                createLibrary(null, "lodash", "4.17.21", "pkg:npm/lodash@4.17.21"));
+
+        BomMerger.mergeFlat(target, source);
+
+        assertEquals(3, target.getComponents().size());
+        assertTrue(target.getComponents().stream()
+                .anyMatch(c -> "react".equals(c.getName())));
+        assertTrue(target.getComponents().stream()
+                .anyMatch(c -> "lodash".equals(c.getName())));
+    }
+
+    @Test
+    void mergeFlatDeduplicatesByPurl() {
+        Component existing = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0");
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", existing);
+
+        Bom source = buildSourceBom(
+                createLibrary("org.a", "lib-a", "1.0", "pkg:maven/org.a/lib-a@1.0"),
+                createLibrary(null, "react", "18.3.1", "pkg:npm/react@18.3.1"));
+
+        BomMerger.mergeFlat(target, source);
+
+        assertEquals(2, target.getComponents().size(),
+                "duplicate PURL should be skipped");
+        long libACount = target.getComponents().stream()
+                .filter(c -> "lib-a".equals(c.getName())).count();
+        assertEquals(1, libACount, "lib-a should appear only once");
+    }
+
+    @Test
+    void mergeFlatDeduplicatesAcrossTypeJarVariant() {
+        Component existing = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0");
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", existing);
+
+        // Source uses ?type=jar (cyclonedx-maven-plugin convention)
+        Bom source = buildSourceBom(
+                createLibrary("org.a", "lib-a", "1.0",
+                        "pkg:maven/org.a/lib-a@1.0?type=jar"));
+
+        BomMerger.mergeFlat(target, source);
+
+        assertEquals(1, target.getComponents().size(),
+                "PURLs differing only in ?type=jar should be treated as equal");
+    }
+
+    @Test
+    void mergeFlatAdoptsSourceMainComponentDependencies() {
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0",
+                createLibrary("org.a", "lib-a", "1.0", "pkg:maven/org.a/lib-a@1.0"));
+        Dependency targetMainDep = new Dependency("pkg:maven/com.example/app@1.0");
+        targetMainDep.addDependency(new Dependency("pkg:maven/org.a/lib-a@1.0"));
+        target.addDependency(targetMainDep);
+
+        // Source SBOM with its own main component and dependency tree
+        Bom source = new Bom();
+        Metadata sourceMeta = new Metadata();
+        Component sourceMain = new Component();
+        sourceMain.setType(Component.Type.APPLICATION);
+        sourceMain.setName("npm-app");
+        sourceMain.setBomRef("pkg:npm/npm-app@1.0");
+        sourceMeta.setComponent(sourceMain);
+        source.setMetadata(sourceMeta);
+        source.setComponents(new java.util.ArrayList<>(List.of(
+                createLibrary(null, "react", "18.3.1", "pkg:npm/react@18.3.1"),
+                createLibrary(null, "lodash", "4.17.21", "pkg:npm/lodash@4.17.21"))));
+        Dependency sourceMainDep = new Dependency("pkg:npm/npm-app@1.0");
+        sourceMainDep.addDependency(new Dependency("pkg:npm/react@18.3.1"));
+        sourceMainDep.addDependency(new Dependency("pkg:npm/lodash@4.17.21"));
+        source.addDependency(sourceMainDep);
+
+        BomMerger.mergeFlat(target, source);
+
+        // Target main component should now depend on the source's direct deps
+        Dependency mainDep = target.getDependencies().stream()
+                .filter(d -> "pkg:maven/com.example/app@1.0".equals(d.getRef()))
+                .findFirst().orElse(null);
+        assertNotNull(mainDep);
+        assertTrue(mainDep.getDependencies().stream()
+                .anyMatch(d -> "pkg:npm/react@18.3.1".equals(d.getRef())),
+                "target main should depend on source's react");
+        assertTrue(mainDep.getDependencies().stream()
+                .anyMatch(d -> "pkg:npm/lodash@4.17.21".equals(d.getRef())),
+                "target main should depend on source's lodash");
+        assertTrue(mainDep.getDependencies().stream()
+                .anyMatch(d -> "pkg:maven/org.a/lib-a@1.0".equals(d.getRef())),
+                "target main should still depend on its original lib-a");
+    }
+
+    @Test
+    void mergeFlatSkipsAdoptionWhenSourceHasNoMainDependency() {
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0");
+        Dependency targetMainDep = new Dependency("pkg:maven/com.example/app@1.0");
+        target.addDependency(targetMainDep);
+
+        // Source SBOM with main component but no dependency entry for it
+        Bom source = new Bom();
+        Metadata sourceMeta = new Metadata();
+        Component sourceMain = new Component();
+        sourceMain.setType(Component.Type.APPLICATION);
+        sourceMain.setName("npm-app");
+        sourceMain.setBomRef("pkg:npm/npm-app@1.0");
+        sourceMeta.setComponent(sourceMain);
+        source.setMetadata(sourceMeta);
+        source.setComponents(new java.util.ArrayList<>(List.of(
+                createLibrary(null, "react", "18.3.1", "pkg:npm/react@18.3.1"))));
+
+        BomMerger.mergeFlat(target, source);
+
+        Dependency mainDep = target.getDependencies().stream()
+                .filter(d -> "pkg:maven/com.example/app@1.0".equals(d.getRef()))
+                .findFirst().orElse(null);
+        assertNotNull(mainDep);
+        assertNull(mainDep.getDependencies(),
+                "no dependencies should be adopted when source has no main dep entry");
+    }
+
+    @Test
     void normalizeMavenPurlStripsTypeJar() {
         // ?type=jar as only qualifier
         assertEquals("pkg:maven/g/a@1.0",
@@ -669,6 +799,118 @@ class BomMergerTest {
         assertNull(BomMerger.normalizeMavenPurl(null));
         assertEquals("pkg:npm/react@18.0",
                 BomMerger.normalizeMavenPurl("pkg:npm/react@18.0"));
+    }
+
+    @Test
+    void mergeUnderDropsSiblingWhenSubComponentOccurrenceMatches() {
+        // Parent already has a bare sibling (from pom.properties detection)
+        // at web/console.war/WEB-INF/lib/codec-1.0.jar.
+        // Source SBOM has a wrapper with occurrence "" whose child has
+        // occurrence WEB-INF/lib/codec-1.0.jar — same file after prefixing.
+        // The bare sibling should be dropped and the richer child kept.
+        Component sibling = createLibrary("org.x", "codec", "1.0",
+                "pkg:maven/org.x/codec@1.0");
+        sibling.addHash(new Hash(Hash.Algorithm.SHA_256, "aaa"));
+        sibling.setEvidence(evidenceWithOccurrence(
+                "web/console.war/WEB-INF/lib/codec-1.0.jar"));
+
+        Component war = createLibrary("org.a", "war", "1.0",
+                "pkg:maven/org.a/war@1.0");
+        war.addComponent(sibling);
+        war.setEvidence(evidenceWithOccurrence("web/console.war/"));
+
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war);
+
+        // Source: wrapper with "" occurrence containing a richer codec
+        Component wrapperCodec = createLibrary("org.x", "codec", "1.0",
+                "pkg:maven/org.x/codec@1.0?type=jar");
+        wrapperCodec.addHash(new Hash(Hash.Algorithm.SHA_256, "aaa"));
+        wrapperCodec.addHash(new Hash("MD5", "bbb"));
+        wrapperCodec.setDescription("A codec library");
+        wrapperCodec.setEvidence(evidenceWithOccurrence(
+                "WEB-INF/lib/codec-1.0.jar"));
+
+        Component npmComp = createLibrary(null, "react", "18.0",
+                "pkg:npm/react@18.0");
+
+        Component wrapper = createLibrary("org.a", "upstream-war", "1.0",
+                "pkg:maven/org.a/upstream-war@1.0?type=war");
+        wrapper.setEvidence(evidenceWithOccurrence(""));
+        wrapper.addComponent(wrapperCodec);
+        wrapper.addComponent(npmComp);
+
+        Bom source = buildSourceBom(wrapper);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", source);
+
+        // Bare sibling should be gone
+        assertFalse(war.getComponents().stream()
+                .anyMatch(c -> "codec".equals(c.getName())
+                        && c.getComponents() == null
+                        && c.getDescription() == null),
+                "bare sibling should be removed");
+
+        // Wrapper should still exist with npm + codec
+        Component nestedWrapper = war.getComponents().stream()
+                .filter(c -> "upstream-war".equals(c.getName()))
+                .findFirst().orElse(null);
+        assertNotNull(nestedWrapper, "wrapper should be nested under war");
+
+        // Codec should be inside the wrapper with merged data
+        Component mergedCodec = nestedWrapper.getComponents().stream()
+                .filter(c -> "codec".equals(c.getName()))
+                .findFirst().orElse(null);
+        assertNotNull(mergedCodec, "codec should remain in wrapper");
+        assertEquals("A codec library", mergedCodec.getDescription(),
+                "richer metadata should be preserved");
+        assertEquals(2, mergedCodec.getHashes().size(),
+                "hashes from both sources should be merged");
+
+        // Sibling's occurrence should be migrated to the wrapper child
+        assertTrue(mergedCodec.getEvidence().getOccurrences().stream()
+                .anyMatch(o -> "web/console.war/WEB-INF/lib/codec-1.0.jar"
+                        .equals(o.getLocation())),
+                "sibling's distribution-relative occurrence should be"
+                        + " migrated to the wrapper child");
+
+        // npm component should stay in wrapper
+        assertTrue(nestedWrapper.getComponents().stream()
+                .anyMatch(c -> "react".equals(c.getName())),
+                "npm component should remain in wrapper");
+    }
+
+    @Test
+    void mergeUnderKeepsSubComponentWhenNoSiblingOccurrenceMatch() {
+        // No sibling has a matching occurrence — sub-component stays,
+        // nothing is dropped.
+        Component war = createLibrary("org.a", "war", "1.0",
+                "pkg:maven/org.a/war@1.0");
+        war.setEvidence(evidenceWithOccurrence("web/console.war/"));
+
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war);
+
+        Component wrapperChild = createLibrary("org.x", "unique-lib", "1.0",
+                "pkg:maven/org.x/unique-lib@1.0");
+        wrapperChild.setEvidence(evidenceWithOccurrence(
+                "WEB-INF/lib/unique-lib-1.0.jar"));
+
+        Component wrapper = createLibrary("org.a", "upstream-war", "1.0",
+                "pkg:maven/org.a/upstream-war@1.0?type=war");
+        wrapper.setEvidence(evidenceWithOccurrence(""));
+        wrapper.addComponent(wrapperChild);
+
+        Bom source = buildSourceBom(wrapper);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", source);
+
+        Component nestedWrapper = war.getComponents().stream()
+                .filter(c -> "upstream-war".equals(c.getName()))
+                .findFirst().orElse(null);
+        assertNotNull(nestedWrapper);
+        assertEquals(1, nestedWrapper.getComponents().size(),
+                "child should remain when no sibling matches");
+        assertEquals("unique-lib",
+                nestedWrapper.getComponents().get(0).getName());
     }
 
     private static Evidence evidenceWithOccurrence(String location) {

@@ -707,14 +707,22 @@ public class BomBuilder {
     private String buildMainPurl() {
         String base = "pkg:maven/" + purlEncode(projectGroupId) + "/"
                 + purlEncode(projectArtifactId) + "@" + purlEncode(projectVersion);
-        if (archiveType == null) {
+        boolean defaultType = archiveType == null || archiveType.isEmpty()
+                || "jar".equals(archiveType);
+        if (defaultType && (classifier == null || classifier.isEmpty())) {
             return base;
         }
-        String purl = base + "?type=" + purlEncode(archiveType);
-        if (classifier != null && !classifier.isEmpty()) {
-            purl += "&classifier=" + purlEncode(classifier);
+        StringBuilder sb = new StringBuilder(base).append('?');
+        if (!defaultType) {
+            sb.append("type=").append(purlEncode(archiveType));
+            if (classifier != null && !classifier.isEmpty()) {
+                sb.append('&');
+            }
         }
-        return purl;
+        if (classifier != null && !classifier.isEmpty()) {
+            sb.append("classifier=").append(purlEncode(classifier));
+        }
+        return sb.toString();
     }
 
     /**

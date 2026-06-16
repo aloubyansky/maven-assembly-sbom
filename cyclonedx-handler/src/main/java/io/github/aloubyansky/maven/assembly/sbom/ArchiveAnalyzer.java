@@ -94,7 +94,7 @@ class ArchiveAnalyzer {
             for (ArchiveContent.FileEntry entry : matchedArchiveEntries) {
                 List<String> zipNames = hashToZipEntryNames.get(entry.hash());
                 if (zipNames == null) {
-                    return null;
+                    continue;
                 }
                 String entryPrefix = null;
                 for (String zipName : zipNames) {
@@ -105,7 +105,7 @@ class ArchiveAnalyzer {
                     }
                 }
                 if (entryPrefix == null) {
-                    return null;
+                    continue;
                 }
                 if (prefix == null) {
                     prefix = entryPrefix;

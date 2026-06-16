@@ -64,6 +64,7 @@ class GenerateSbomMojoTest {
         lenient().when(project.getGroupId()).thenReturn("com.example");
         lenient().when(project.getArtifactId()).thenReturn("test-app");
         lenient().when(project.getVersion()).thenReturn("1.0");
+        lenient().when(project.getPackaging()).thenReturn("jar");
         lenient().when(project.getBasedir()).thenReturn(tempDir.toFile());
         Build build = new Build();
         build.setDirectory(tempDir.resolve("target").toString());
@@ -145,10 +146,43 @@ class GenerateSbomMojoTest {
 
         Bom bom = BomReader.readBom(output);
         Component main = bom.getMetadata().getComponent();
-        assertNotNull(main.getComponents(),
-                "external SBOM components should be nested under main");
-        assertTrue(main.getComponents().stream()
-                .anyMatch(c -> "react".equals(c.getName())));
+        assertNull(main.getComponents(),
+                "external SBOM components should not be nested under main");
+        assertTrue(bom.getComponents().stream()
+                .anyMatch(c -> "react".equals(c.getName())),
+                "external SBOM components should be flat top-level peers");
+    }
+
+    @Test
+    void warPackagingIncludesTypeInPurl() throws Exception {
+        when(project.getPackaging()).thenReturn("war");
+        Files.writeString(inputDir.resolve("WEB-INF/web.xml"), "<web-app/>");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        File output = tempDir.resolve("output.cdx.json").toFile();
+        GenerateSbomMojo mojo = createMojo(output);
+        mojo.execute();
+
+        Bom bom = BomReader.readBom(output);
+        String purl = bom.getMetadata().getComponent().getPurl();
+        assertTrue(purl.contains("?type=war"),
+                "WAR packaging should produce purl with ?type=war, got: " + purl);
+    }
+
+    @Test
+    void jarPackagingOmitsTypeFromPurl() throws Exception {
+        when(project.getPackaging()).thenReturn("jar");
+        Files.writeString(inputDir.resolve("data.txt"), "hello");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        File output = tempDir.resolve("output.cdx.json").toFile();
+        GenerateSbomMojo mojo = createMojo(output);
+        mojo.execute();
+
+        Bom bom = BomReader.readBom(output);
+        String purl = bom.getMetadata().getComponent().getPurl();
+        assertFalse(purl.contains("?type="),
+                "JAR packaging should not include type qualifier, got: " + purl);
     }
 
     @Test
