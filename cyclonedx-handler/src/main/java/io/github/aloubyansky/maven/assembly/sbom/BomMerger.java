@@ -90,14 +90,71 @@ public final class BomMerger {
      */
     public static void mergeFlat(Bom targetBom, Bom sourceBom) {
         if (sourceBom.getComponents() != null) {
+            Map<String, Component> existingByPurl = indexByPurl(targetBom.getComponents());
             List<Component> sorted = new ArrayList<>(sourceBom.getComponents());
             sorted.sort(COMPONENT_ORDER);
             for (Component comp : sorted) {
                 normalizePurls(comp);
+                String purl = comp.getPurl();
+                if (purl != null && existingByPurl.containsKey(purl)) {
+                    continue;
+                }
                 targetBom.addComponent(comp);
             }
         }
+        adoptSourceMainDependencies(targetBom, sourceBom);
         importDependencies(targetBom, sourceBom.getDependencies(), null);
+    }
+
+    private static void adoptSourceMainDependencies(Bom targetBom, Bom sourceBom) {
+        if (sourceBom.getMetadata() == null
+                || sourceBom.getMetadata().getComponent() == null
+                || sourceBom.getDependencies() == null
+                || targetBom.getMetadata() == null
+                || targetBom.getMetadata().getComponent() == null) {
+            return;
+        }
+        String sourceMainRef = normalizeMavenPurl(
+                sourceBom.getMetadata().getComponent().getBomRef());
+        if (sourceMainRef == null) {
+            return;
+        }
+        Dependency sourceMainDep = null;
+        for (Dependency dep : sourceBom.getDependencies()) {
+            if (sourceMainRef.equals(normalizeMavenPurl(dep.getRef()))) {
+                sourceMainDep = dep;
+                break;
+            }
+        }
+        if (sourceMainDep == null || sourceMainDep.getDependencies() == null) {
+            return;
+        }
+        String targetMainRef = targetBom.getMetadata().getComponent().getBomRef();
+        Dependency targetMainDep = null;
+        if (targetBom.getDependencies() != null) {
+            for (Dependency dep : targetBom.getDependencies()) {
+                if (targetMainRef.equals(dep.getRef())) {
+                    targetMainDep = dep;
+                    break;
+                }
+            }
+        }
+        if (targetMainDep == null) {
+            targetMainDep = new Dependency(targetMainRef);
+            targetBom.addDependency(targetMainDep);
+        }
+        Set<String> existingChildren = new HashSet<>();
+        if (targetMainDep.getDependencies() != null) {
+            for (Dependency child : targetMainDep.getDependencies()) {
+                existingChildren.add(normalizeMavenPurl(child.getRef()));
+            }
+        }
+        for (Dependency child : sourceMainDep.getDependencies()) {
+            String normalizedRef = normalizeMavenPurl(child.getRef());
+            if (existingChildren.add(normalizedRef)) {
+                targetMainDep.addDependency(new Dependency(normalizedRef));
+            }
+        }
     }
 
     /**
@@ -183,7 +240,62 @@ public final class BomMerger {
             }
 
             parent.addComponent(comp);
+            mergeSubComponentsBySiblingOccurrence(comp, parent, parentPathPrefix);
         }
+    }
+
+    private static void mergeSubComponentsBySiblingOccurrence(
+            Component added, Component parent, String parentPathPrefix) {
+        if (added.getComponents() == null || added.getComponents().isEmpty()
+                || parent.getComponents() == null) {
+            return;
+        }
+        Map<String, Component> siblingsByOccurrence = new HashMap<>();
+        for (Component sibling : parent.getComponents()) {
+            if (sibling == added) {
+                continue;
+            }
+            String loc = firstOccurrenceLocation(sibling);
+            if (loc != null) {
+                siblingsByOccurrence.put(loc, sibling);
+            }
+        }
+        if (siblingsByOccurrence.isEmpty()) {
+            return;
+        }
+        String subPrefix = getParentPathPrefix(added);
+        String effectivePrefix = parentPathPrefix != null
+                ? parentPathPrefix + (subPrefix != null ? subPrefix : "")
+                : subPrefix;
+        for (Component child : added.getComponents()) {
+            String childLoc = firstOccurrenceLocation(child);
+            if (childLoc == null) {
+                continue;
+            }
+            String prefixedLoc = effectivePrefix != null
+                    ? effectivePrefix + childLoc
+                    : childLoc;
+            Component sibling = siblingsByOccurrence.get(prefixedLoc);
+            if (sibling != null) {
+                migrateOccurrences(sibling, child, null);
+                mergeComponentData(child, sibling);
+                parent.getComponents().remove(sibling);
+            }
+        }
+    }
+
+    private static String firstOccurrenceLocation(Component comp) {
+        Evidence evidence = comp.getEvidence();
+        if (evidence == null || evidence.getOccurrences() == null) {
+            return null;
+        }
+        for (Occurrence occ : evidence.getOccurrences()) {
+            String loc = occ.getLocation();
+            if (loc != null && !loc.isEmpty()) {
+                return loc;
+            }
+        }
+        return null;
     }
 
     private static final String FILE_BOMREF_PREFIX = "file:";
@@ -202,6 +314,26 @@ public final class BomMerger {
         if (bomRef != null && bomRef.startsWith(FILE_BOMREF_PREFIX)) {
             comp.setBomRef(FILE_BOMREF_PREFIX + parentPathPrefix
                     + bomRef.substring(FILE_BOMREF_PREFIX.length()));
+            prefixOccurrenceLocations(comp, parentPathPrefix);
+        }
+        if (comp.getComponents() != null) {
+            for (Component child : comp.getComponents()) {
+                prefixFileBomRef(child, parentPathPrefix);
+            }
+        }
+    }
+
+    private static void prefixOccurrenceLocations(Component comp,
+            String parentPathPrefix) {
+        Evidence evidence = comp.getEvidence();
+        if (evidence == null || evidence.getOccurrences() == null) {
+            return;
+        }
+        for (Occurrence occ : evidence.getOccurrences()) {
+            String location = occ.getLocation();
+            if (location != null && !location.isEmpty()) {
+                occ.setLocation(parentPathPrefix + location);
+            }
         }
     }
 
@@ -374,7 +506,7 @@ public final class BomMerger {
         }
     }
 
-    private static boolean hasOccurrences(Component component) {
+    static boolean hasOccurrences(Component component) {
         Evidence evidence = component.getEvidence();
         return evidence != null && evidence.getOccurrences() != null
                 && !evidence.getOccurrences().isEmpty();

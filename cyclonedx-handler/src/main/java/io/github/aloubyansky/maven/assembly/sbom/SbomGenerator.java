@@ -76,7 +76,7 @@ public class SbomGenerator {
      *
      * @param entries the file entries to analyze
      * @param baseDirPrefix prefix to strip from entry paths, or {@code null}
-     * @param externalBoms external SBOMs to merge under the main component
+     * @param externalBoms external SBOMs to merge as top-level components
      * @param classifier the Maven classifier, or {@code null}
      * @param archiveType the archive type for the main component PURL, or {@code null}
      * @return the assembled BOM
@@ -116,6 +116,8 @@ public class SbomGenerator {
         processExternalBoms(bom, externalBoms,
                 archivePaths, archiveHashes, normalizedAlg);
 
+        replaceFileComponentsWithLibraries(bom, normalizedAlg);
+        deduplicateBomRefs(bom);
         return bom;
     }
 
@@ -176,7 +178,11 @@ public class SbomGenerator {
                         : null;
                 Bom filtered = filterSbomByArchive(detected.parsedBom(),
                         archivePaths, archiveHashes, normalizedAlg, parentPrefix);
-                BomMerger.mergeUnder(bom, parentRef, filtered);
+                if (parent != null) {
+                    BomMerger.mergeUnder(bom, parentRef, filtered);
+                } else {
+                    BomMerger.mergeFlat(bom, filtered);
+                }
             }
         }
     }
@@ -217,9 +223,7 @@ public class SbomGenerator {
             if (matchesArchive(comp, archivePaths, archiveHashes,
                     normalizedAlg, parentPathPrefix)) {
                 filtered.add(comp);
-                if (comp.getBomRef() != null) {
-                    survivingRefs.add(comp.getBomRef());
-                }
+                collectBomRefs(comp, survivingRefs);
             } else {
                 log.debug("Filtering out component {} from SBOM:"
                         + " no matching file in archive", comp.getPurl());
@@ -258,6 +262,18 @@ public class SbomGenerator {
         return result;
     }
 
+    private static void collectBomRefs(org.cyclonedx.model.Component comp,
+            Set<String> refs) {
+        if (comp.getBomRef() != null) {
+            refs.add(comp.getBomRef());
+        }
+        if (comp.getComponents() != null) {
+            for (org.cyclonedx.model.Component child : comp.getComponents()) {
+                collectBomRefs(child, refs);
+            }
+        }
+    }
+
     /**
      * Checks whether a component from an external/embedded SBOM corresponds
      * to a file actually present in the archive. A component matches if:
@@ -275,23 +291,48 @@ public class SbomGenerator {
         if (hasMatchingOccurrence(comp, archivePaths, parentPathPrefix)) {
             return true;
         }
-        if (hasOccurrences(comp)) {
+        if (hasEmptyOccurrence(comp, parentPathPrefix)) {
+            return true;
+        }
+        if (BomMerger.hasOccurrences(comp)) {
+            if (isNpmComponent(comp)) {
+                return true;
+            }
             return false;
         }
         // no occurrences — fall back to hash check
         if (comp.getHashes() == null || comp.getHashes().isEmpty()) {
             return true;
         }
-        boolean hasComparableHash = false;
+        return hasMatchingHash(comp, archiveHashes, normalizedAlg)
+                || !hasVerifiableHash(comp, normalizedAlg);
+    }
+
+    private static boolean hasMatchingHash(org.cyclonedx.model.Component comp,
+            Set<String> archiveHashes, String normalizedAlg) {
+        if (comp.getHashes() == null) {
+            return false;
+        }
         for (org.cyclonedx.model.Hash h : comp.getHashes()) {
-            if (normalizedAlg.equals(normalizeAlgorithm(h.getAlgorithm()))) {
-                hasComparableHash = true;
-                if (archiveHashes.contains(h.getValue())) {
-                    return true;
-                }
+            if (normalizedAlg.equals(normalizeAlgorithm(h.getAlgorithm()))
+                    && archiveHashes.contains(h.getValue())) {
+                return true;
             }
         }
-        return !hasComparableHash;
+        return false;
+    }
+
+    private static boolean hasVerifiableHash(org.cyclonedx.model.Component comp,
+            String normalizedAlg) {
+        if (comp.getHashes() == null) {
+            return false;
+        }
+        for (org.cyclonedx.model.Hash h : comp.getHashes()) {
+            if (normalizedAlg.equals(normalizeAlgorithm(h.getAlgorithm()))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean hasMatchingOccurrence(org.cyclonedx.model.Component comp,
@@ -302,7 +343,7 @@ public class SbomGenerator {
         }
         for (org.cyclonedx.model.component.evidence.Occurrence occ : evidence.getOccurrences()) {
             String location = occ.getLocation();
-            if (location == null) {
+            if (location == null || location.isEmpty()) {
                 continue;
             }
             String fullPath = parentPathPrefix != null
@@ -315,10 +356,27 @@ public class SbomGenerator {
         return false;
     }
 
-    private static boolean hasOccurrences(org.cyclonedx.model.Component comp) {
+    private static boolean hasEmptyOccurrence(org.cyclonedx.model.Component comp,
+            String parentPathPrefix) {
+        if (parentPathPrefix == null
+                || comp.getType() == org.cyclonedx.model.Component.Type.FILE) {
+            return false;
+        }
         org.cyclonedx.model.Evidence evidence = comp.getEvidence();
-        return evidence != null && evidence.getOccurrences() != null
-                && !evidence.getOccurrences().isEmpty();
+        if (evidence == null || evidence.getOccurrences() == null) {
+            return false;
+        }
+        for (org.cyclonedx.model.component.evidence.Occurrence occ : evidence.getOccurrences()) {
+            if ("".equals(occ.getLocation())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isNpmComponent(org.cyclonedx.model.Component comp) {
+        String purl = comp.getPurl();
+        return purl != null && purl.startsWith("pkg:npm/");
     }
 
     private static String normalizeAlgorithm(String algorithm) {
@@ -331,11 +389,153 @@ public class SbomGenerator {
         if (externalBomList.isEmpty()) {
             return;
         }
-        String mainRef = bom.getMetadata().getComponent().getBomRef();
         for (Bom externalBom : externalBomList) {
             Bom filtered = filterSbomByArchive(externalBom,
                     archivePaths, archiveHashes, normalizedAlg, null);
-            BomMerger.mergeUnder(bom, mainRef, filtered);
+            BomMerger.mergeFlat(bom, filtered);
+        }
+    }
+
+    static void replaceFileComponentsWithLibraries(Bom bom, String normalizedAlg) {
+        if (bom.getComponents() == null) {
+            return;
+        }
+        Map<String, List<org.cyclonedx.model.Component>> filesByHash = new HashMap<>();
+        for (org.cyclonedx.model.Component comp : bom.getComponents()) {
+            if (comp.getBomRef() != null
+                    && comp.getBomRef().startsWith("file:")
+                    && comp.getHashes() != null) {
+                for (Hash h : comp.getHashes()) {
+                    if (normalizedAlg.equals(normalizeAlgorithm(h.getAlgorithm()))) {
+                        filesByHash.computeIfAbsent(h.getValue(),
+                                k -> new ArrayList<>()).add(comp);
+                    }
+                }
+            }
+        }
+        if (filesByHash.isEmpty()) {
+            return;
+        }
+        Map<String, String> fileToLibRef = new HashMap<>();
+        for (org.cyclonedx.model.Component comp : bom.getComponents()) {
+            if (comp.getType() != org.cyclonedx.model.Component.Type.LIBRARY
+                    || comp.getHashes() == null) {
+                continue;
+            }
+            for (Hash h : comp.getHashes()) {
+                if (!normalizedAlg.equals(normalizeAlgorithm(h.getAlgorithm()))) {
+                    continue;
+                }
+                List<org.cyclonedx.model.Component> fileComps = filesByHash.get(h.getValue());
+                if (fileComps != null) {
+                    for (org.cyclonedx.model.Component fileComp : fileComps) {
+                        fileToLibRef.put(fileComp.getBomRef(), comp.getBomRef());
+                    }
+                }
+            }
+        }
+        if (fileToLibRef.isEmpty()) {
+            return;
+        }
+        bom.getComponents().removeIf(
+                c -> fileToLibRef.containsKey(c.getBomRef()));
+        if (bom.getDependencies() != null) {
+            List<org.cyclonedx.model.Dependency> toRemove = new ArrayList<>();
+            for (org.cyclonedx.model.Dependency dep : bom.getDependencies()) {
+                String replacement = fileToLibRef.get(dep.getRef());
+                if (replacement != null) {
+                    toRemove.add(dep);
+                } else {
+                    replaceDependsOnRefs(dep, fileToLibRef);
+                }
+            }
+            bom.getDependencies().removeAll(toRemove);
+        }
+    }
+
+    private static void replaceDependsOnRefs(
+            org.cyclonedx.model.Dependency dep,
+            Map<String, String> refMap) {
+        if (dep.getDependencies() == null) {
+            return;
+        }
+        List<org.cyclonedx.model.Dependency> toAdd = new ArrayList<>();
+        List<org.cyclonedx.model.Dependency> toRemove = new ArrayList<>();
+        for (org.cyclonedx.model.Dependency child : dep.getDependencies()) {
+            String replacement = refMap.get(child.getRef());
+            if (replacement != null) {
+                toRemove.add(child);
+                boolean alreadyPresent = dep.getDependencies().stream()
+                        .anyMatch(d -> replacement.equals(d.getRef()));
+                if (!alreadyPresent) {
+                    toAdd.add(new org.cyclonedx.model.Dependency(replacement));
+                }
+            }
+            replaceDependsOnRefs(child, refMap);
+        }
+        dep.getDependencies().removeAll(toRemove);
+        for (org.cyclonedx.model.Dependency d : toAdd) {
+            dep.addDependency(d);
+        }
+    }
+
+    private static void deduplicateBomRefs(Bom bom) {
+        Map<String, org.cyclonedx.model.Component> seen = new HashMap<>();
+        Map<String, String> renames = new HashMap<>();
+        if (bom.getComponents() != null) {
+            deduplicateBomRefs(bom.getComponents(), seen, renames);
+        }
+        if (bom.getMetadata() != null && bom.getMetadata().getComponent() != null
+                && bom.getMetadata().getComponent().getComponents() != null) {
+            deduplicateBomRefs(
+                    bom.getMetadata().getComponent().getComponents(), seen, renames);
+        }
+        if (!renames.isEmpty() && bom.getDependencies() != null) {
+            Map<String, List<String>> originalToNew = new HashMap<>();
+            for (Map.Entry<String, String> e : renames.entrySet()) {
+                originalToNew.computeIfAbsent(e.getValue(),
+                        k -> new ArrayList<>()).add(e.getKey());
+            }
+            List<org.cyclonedx.model.Dependency> toAdd = new ArrayList<>();
+            for (org.cyclonedx.model.Dependency dep : bom.getDependencies()) {
+                List<String> newRefs = originalToNew.get(dep.getRef());
+                if (newRefs != null) {
+                    for (String newRef : newRefs) {
+                        org.cyclonedx.model.Dependency clone = new org.cyclonedx.model.Dependency(newRef);
+                        if (dep.getDependencies() != null) {
+                            for (org.cyclonedx.model.Dependency child : dep.getDependencies()) {
+                                clone.addDependency(
+                                        new org.cyclonedx.model.Dependency(
+                                                child.getRef()));
+                            }
+                        }
+                        toAdd.add(clone);
+                    }
+                }
+            }
+            bom.getDependencies().addAll(toAdd);
+        }
+    }
+
+    private static void deduplicateBomRefs(
+            List<org.cyclonedx.model.Component> components,
+            Map<String, org.cyclonedx.model.Component> seen,
+            Map<String, String> renames) {
+        for (org.cyclonedx.model.Component comp : components) {
+            String ref = comp.getBomRef();
+            if (ref != null && seen.putIfAbsent(ref, comp) != null) {
+                int suffix = 2;
+                String unique = ref + "#" + suffix;
+                while (seen.containsKey(unique)) {
+                    unique = ref + "#" + ++suffix;
+                }
+                renames.put(unique, ref);
+                comp.setBomRef(unique);
+                seen.put(unique, comp);
+            }
+            if (comp.getComponents() != null) {
+                deduplicateBomRefs(comp.getComponents(), seen, renames);
+            }
         }
     }
 

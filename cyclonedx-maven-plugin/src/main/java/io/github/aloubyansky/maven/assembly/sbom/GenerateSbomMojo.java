@@ -119,7 +119,7 @@ public class GenerateSbomMojo extends AbstractMojo {
                 messageDigest, bomHashAlgorithm,
                 failOnDuplicateHash, failOnMissingLicense, embeddedSbomHandling);
         Bom bom = generator.generate(entries, null, externalBomList,
-                null, null, null);
+                null, null, project.getPackaging());
 
         if (outputFile.getParentFile() != null) {
             outputFile.getParentFile().mkdirs();
