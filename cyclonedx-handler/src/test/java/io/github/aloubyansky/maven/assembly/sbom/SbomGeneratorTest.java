@@ -337,6 +337,28 @@ class SbomGeneratorTest {
     }
 
     @Test
+    void deduplicateTopLevelKeepsCleanRefOverNested() {
+        Bom bom = new Bom();
+        Component parentA = createLibrary("a-parent", "ref-parent-a");
+        Component nestedDup = createLibrary("dup-nested", "ref-dup");
+        parentA.setComponents(new ArrayList<>(List.of(nestedDup)));
+
+        Component topDup = createLibrary("dup-top", "ref-dup");
+        // parentA sorts before topDup alphabetically
+        bom.setComponents(new ArrayList<>(List.of(parentA, topDup)));
+
+        Dependency dep = new Dependency("ref-dup");
+        bom.addDependency(dep);
+
+        SbomGenerator.deduplicateBomRefs(bom);
+
+        assertEquals("ref-dup", topDup.getBomRef(),
+                "top-level component should keep the clean bom-ref");
+        assertEquals("ref-dup#2", nestedDup.getBomRef(),
+                "nested component should get the #2 suffix");
+    }
+
+    @Test
     void deduplicateNoComponentsIsNoop() {
         Bom bom = new Bom();
         SbomGenerator.deduplicateBomRefs(bom);
