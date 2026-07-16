@@ -49,7 +49,7 @@
         <mockito.version>5.23.0</mockito.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <sisu.version>1.0.0</sisu.version>
-        <version.formatter.plugin>2.27.0</version.formatter.plugin>
+        <version.formatter.plugin>2.29.0</version.formatter.plugin>
         <version.impsort.plugin>1.13.0</version.impsort.plugin>
         <quarkus-ide-config.version>3.36.2</quarkus-ide-config.version>
         <central-publishing-plugin.version>0.10.0</central-publishing-plugin.version>
