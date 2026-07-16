@@ -537,6 +537,8 @@ public class SbomGenerator {
                 comp.setBomRef(unique);
                 seen.put(unique, comp);
             }
+        }
+        for (Component comp : components) {
             if (comp.getComponents() != null) {
                 deduplicateBomRefs(comp.getComponents(), seen, renames);
             }
