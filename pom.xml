@@ -4,7 +4,7 @@
 
     <groupId>io.github.cyberstamp.maven.assembly.sbom</groupId>
     <artifactId>assembly-sbom-parent</artifactId>
-    <version>0.0.2-SNAPSHOT</version>
+    <version>0.0.1-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <name>Assembly SBOM Parent</name>
