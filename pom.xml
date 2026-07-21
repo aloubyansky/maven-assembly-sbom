@@ -2,14 +2,14 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>io.github.aloubyansky.maven.assembly.sbom</groupId>
+    <groupId>io.github.cyberstamp.maven.assembly.sbom</groupId>
     <artifactId>assembly-sbom-parent</artifactId>
     <version>0.0.2-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <name>Assembly SBOM Parent</name>
     <description>Parent POM for Assembly SBOM modules</description>
-    <url>https://github.com/aloubyansky/maven-assembly-sbom</url>
+    <url>https://github.com/cyberstamp/maven-assembly-sbom</url>
     <licenses>
         <license>
             <name>Apache License, Version 2.0</name>
@@ -17,9 +17,9 @@
         </license>
     </licenses>
     <scm>
-        <connection>scm:git:git://github.com/aloubyansky/maven-assembly-sbom.git</connection>
-        <developerConnection>scm:git:ssh://github.com/aloubyansky/maven-assembly-sbom.git</developerConnection>
-        <url>https://github.com/aloubyansky/maven-assembly-sbom</url>
+        <connection>scm:git:git://github.com/cyberstamp/maven-assembly-sbom.git</connection>
+        <developerConnection>scm:git:ssh://github.com/cyberstamp/maven-assembly-sbom.git</developerConnection>
+        <url>https://github.com/cyberstamp/maven-assembly-sbom</url>
       <tag>HEAD</tag>
   </scm>
     <developers>
