@@ -424,9 +424,13 @@ public class SbomGenerator {
         if (bom.getComponents() == null) {
             return;
         }
+        ComponentList comps = ComponentList.of(bom);
+        if (comps.isEmpty()) {
+            return;
+        }
         Set<String> nestedFileHashes = new HashSet<>();
         Set<String> nestedFileBomRefs = new HashSet<>();
-        for (Component comp : bom.getComponents()) {
+        for (Component comp : comps) {
             collectNestedFileHashes(comp, normalizedAlg, nestedFileHashes);
             collectNestedFileBomRefs(comp, nestedFileBomRefs);
         }
@@ -434,7 +438,7 @@ public class SbomGenerator {
             return;
         }
         Set<String> removedRefs = new HashSet<>();
-        bom.getComponents().removeIf(comp -> {
+        comps.removeIf(comp -> {
             if (comp.getType() != Component.Type.FILE || comp.getHashes() == null) {
                 return false;
             }
@@ -449,15 +453,14 @@ public class SbomGenerator {
             }
             return false;
         });
-        if (!removedRefs.isEmpty() && bom.getDependencies() != null) {
-            bom.getDependencies().removeIf(d -> removedRefs.contains(d.getRef())
+        if (!removedRefs.isEmpty()) {
+            DependencyList deps = DependencyList.of(bom);
+            deps.removeIf(d -> removedRefs.contains(d.getRef())
                     && !nestedFileBomRefs.contains(d.getRef()));
-            for (Dependency dep : bom.getDependencies()) {
-                if (dep.getDependencies() != null) {
-                    dep.getDependencies().removeIf(
-                            child -> removedRefs.contains(child.getRef())
-                                    && !nestedFileBomRefs.contains(child.getRef()));
-                }
+            for (Dependency dep : deps) {
+                DependencyList.ofChildren(dep).removeIf(
+                        child -> removedRefs.contains(child.getRef())
+                                && !nestedFileBomRefs.contains(child.getRef()));
             }
         }
     }
@@ -496,8 +499,12 @@ public class SbomGenerator {
         if (bom.getComponents() == null) {
             return;
         }
+        ComponentList comps = ComponentList.of(bom);
+        if (comps.isEmpty()) {
+            return;
+        }
         Map<String, List<Component>> filesByHash = new HashMap<>();
-        for (Component comp : bom.getComponents()) {
+        for (Component comp : comps) {
             if (comp.getBomRef() != null
                     && comp.getBomRef().startsWith("file:")
                     && comp.getHashes() != null) {
@@ -513,25 +520,25 @@ public class SbomGenerator {
             return;
         }
         Map<String, String> fileToLibRef = new HashMap<>();
-        for (Component comp : bom.getComponents()) {
+        for (Component comp : comps) {
             matchFilesByLibraryHash(comp, filesByHash, normalizedAlg, fileToLibRef);
         }
         if (fileToLibRef.isEmpty()) {
             return;
         }
-        bom.getComponents().removeIf(
-                c -> fileToLibRef.containsKey(c.getBomRef()));
-        if (bom.getDependencies() != null) {
-            List<Dependency> toRemove = new ArrayList<>();
-            for (Dependency dep : bom.getDependencies()) {
-                String replacement = fileToLibRef.get(dep.getRef());
-                if (replacement != null) {
-                    toRemove.add(dep);
-                } else {
-                    replaceDependsOnRefs(dep, fileToLibRef);
-                }
+        comps.removeIf(c -> fileToLibRef.containsKey(c.getBomRef()));
+        DependencyList deps = DependencyList.of(bom);
+        List<Dependency> toRemove = new ArrayList<>();
+        for (Dependency dep : deps) {
+            String replacement = fileToLibRef.get(dep.getRef());
+            if (replacement != null) {
+                toRemove.add(dep);
+            } else {
+                replaceDependsOnRefs(dep, fileToLibRef);
             }
-            bom.getDependencies().removeAll(toRemove);
+        }
+        for (Dependency dep : toRemove) {
+            deps.remove(dep);
         }
     }
 
@@ -562,26 +569,27 @@ public class SbomGenerator {
     private static void replaceDependsOnRefs(
             Dependency dep,
             Map<String, String> refMap) {
-        if (dep.getDependencies() == null) {
+        DependencyList children = DependencyList.ofChildren(dep);
+        if (children.isEmpty()) {
             return;
         }
         List<Dependency> toAdd = new ArrayList<>();
         List<Dependency> toRemove = new ArrayList<>();
-        for (Dependency child : dep.getDependencies()) {
+        for (Dependency child : children) {
             String replacement = refMap.get(child.getRef());
             if (replacement != null) {
                 toRemove.add(child);
-                boolean alreadyPresent = dep.getDependencies().stream()
-                        .anyMatch(d -> replacement.equals(d.getRef()));
-                if (!alreadyPresent) {
+                if (!children.containsRef(replacement)) {
                     toAdd.add(new Dependency(replacement));
                 }
             }
             replaceDependsOnRefs(child, refMap);
         }
-        dep.getDependencies().removeAll(toRemove);
-        for (Dependency d : toAdd) {
-            dep.addDependency(d);
+        for (Dependency r : toRemove) {
+            children.remove(r);
+        }
+        for (Dependency a : toAdd) {
+            children.add(a);
         }
     }
 
@@ -595,41 +603,37 @@ public class SbomGenerator {
      */
     static void removeFileComponents(Bom bom) {
         Set<String> removedRefs = new HashSet<>();
-        removeFileComponents(bom.getComponents(), removedRefs);
+        bom.setComponents(filterOutFileComponents(bom.getComponents(), removedRefs));
         if (bom.getMetadata() != null && bom.getMetadata().getComponent() != null) {
-            removeFileComponents(bom.getMetadata().getComponent().getComponents(), removedRefs);
+            bom.getMetadata().getComponent().setComponents(
+                    filterOutFileComponents(bom.getMetadata().getComponent().getComponents(), removedRefs));
         }
-        if (!removedRefs.isEmpty() && bom.getDependencies() != null) {
-            bom.getDependencies().removeIf(d -> removedRefs.contains(d.getRef()));
-            for (Dependency dep : bom.getDependencies()) {
+        if (!removedRefs.isEmpty()) {
+            DependencyList deps = DependencyList.of(bom);
+            deps.removeIf(d -> removedRefs.contains(d.getRef()));
+            for (Dependency dep : deps) {
                 removeFileRefs(dep, removedRefs);
             }
         }
     }
 
-    /**
-     * Recursively removes {@link Component.Type#FILE FILE} components from the
-     * given list and any nested component lists, collecting their bomRefs into
-     * {@code removedRefs}.
-     *
-     * @param components the component list to filter, may be {@code null}
-     * @param removedRefs collects the bomRefs of every removed component
-     */
-    private static void removeFileComponents(List<Component> components,
+    private static List<Component> filterOutFileComponents(List<Component> components,
             Set<String> removedRefs) {
         if (components == null) {
-            return;
+            return null;
         }
-        components.removeIf(comp -> {
+        List<Component> result = new ArrayList<>();
+        for (Component comp : components) {
             if (comp.getType() == Component.Type.FILE) {
                 if (comp.getBomRef() != null) {
                     removedRefs.add(comp.getBomRef());
                 }
-                return true;
+            } else {
+                comp.setComponents(filterOutFileComponents(comp.getComponents(), removedRefs));
+                result.add(comp);
             }
-            removeFileComponents(comp.getComponents(), removedRefs);
-            return false;
-        });
+        }
+        return result;
     }
 
     /**
@@ -640,11 +644,12 @@ public class SbomGenerator {
      * @param removedRefs the set of bomRefs to remove
      */
     private static void removeFileRefs(Dependency dep, Set<String> removedRefs) {
-        if (dep.getDependencies() == null) {
+        DependencyList children = DependencyList.ofChildren(dep);
+        if (children.isEmpty()) {
             return;
         }
-        dep.getDependencies().removeIf(child -> removedRefs.contains(child.getRef()));
-        for (Dependency child : dep.getDependencies()) {
+        children.removeByRefs(removedRefs);
+        for (Dependency child : children) {
             removeFileRefs(child, removedRefs);
         }
     }
