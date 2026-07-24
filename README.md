@@ -14,6 +14,29 @@ The project includes two SBOM generators:
 - **[Assembly Handler](#assembly-handler)** (`assembly-sbom-handler`) — a `ContainerDescriptorHandler` that plugs into the [Maven Assembly Plugin](https://maven.apache.org/plugins/maven-assembly-plugin/) and generates an SBOM automatically during archive creation.
 - **[Maven Plugin](#maven-plugin)** (`assembly-sbom-maven-plugin`) — a standalone Maven plugin with a `generate` goal for scanning exploded directories (e.g., an exploded WAR) and a `merge` goal for combining multiple CycloneDX SBOMs.
 
+## Contents
+
+- [Assembly Handler](#assembly-handler)
+  - [Quick Start](#quick-start)
+  - [Example Output](#example-output)
+  - [Configuration Options](#configuration-options)
+  - [Output Location](#output-location)
+- [Maven Plugin](#maven-plugin)
+  - [`generate` Goal](#generate-goal)
+  - [`merge` Goal](#merge-goal)
+- [How It Works](#how-it-works)
+  - [Artifact Identification](#artifact-identification)
+  - [License Resolution](#license-resolution)
+  - [Unpacked Archive Detection](#unpacked-archive-detection)
+  - [Shaded / Fat JAR Detection](#shaded--fat-jar-detection)
+  - [Dependency Graph](#dependency-graph)
+  - [SBOM Merging](#sbom-merging)
+  - [Reproducible Builds](#reproducible-builds)
+  - [CycloneDX Component Types](#cyclonedx-component-types)
+  - [Evidence](#evidence)
+- [Requirements](#requirements)
+- [Project Structure](#project-structure)
+
 ## Assembly Handler
 
 ### Quick Start
@@ -198,135 +221,13 @@ Setting `attach` to `true` registers the external BOM as an attached Maven proje
 </containerDescriptorHandler>
 ```
 
-### Features
-
-#### Artifact Identification
-
-Every file in the assembly is inspected and classified as either a **library** (Maven artifact) or a **file** (non-artifact):
-
-- **Content hash matching** — each archive entry's content hash is computed and looked up against a pre-built index of the project's resolved Maven artifacts. This identifies artifacts reliably regardless of filename (e.g., custom `outputFileNameMapping` in the assembly descriptor).
-- **Deduplication** — if the same artifact appears at multiple locations in the archive, it is represented as a single component with multiple `evidence/occurrence` entries.
-
-Library components include full [Package URL](https://github.com/package-url/purl-spec) (PURL) identifiers:
-
-```
-pkg:maven/org.apache.commons/commons-io@2.22.0?type=jar
-```
-
-#### License Resolution
-
-The generator resolves licenses for every Maven artifact component by reading the artifact's effective POM (including licenses inherited from parent POMs). License names and URLs are mapped to [SPDX](https://spdx.org/licenses/) license identifiers using the CycloneDX license database, which includes exact matches, name matching, URL matching, and fuzzy matching against common license name variants.
-
-When no SPDX match is found, the raw license name and URL from the POM are preserved in the component. If an artifact's effective POM declares no licenses at all, a warning is logged. Set `failOnMissingLicense` to `true` to fail the build instead.
-
-#### Unpacked Archive Detection
-
-When an assembly descriptor unpacks an artifact (e.g., a WAR with `<unpack>true</unpack>`), the handler detects the unpacked content by comparing SHA-256 hashes of the artifact's internal entries against the archive entries.
-
-- The unpacked artifact is added as a single **library** component.
-- Individual files from the unpacked archive that can be identified are **not** listed as separate file components — they appear as nested **library** components.
-- Files that cannot be identified remain as **file** components.
-- Nested JARs within the unpacked archive (e.g., JARs in a WAR's `WEB-INF/lib/`) are identified as separate **library** components with proper Maven PURLs.
-
-Nested JAR identification uses three strategies:
-
-1. **Reactor module lookup** — if the unpacked artifact is a module in the current reactor build, its resolved Maven dependencies are used to identify nested JARs by content hash.
-2. **Effective POM resolution** — for non-reactor artifacts, the handler builds the artifact's effective POM model and resolves its compile/runtime-scoped dependencies from the Maven repository, then matches nested JARs by content hash.
-3. **`pom.properties` parsing** — as a fallback, the handler reads `META-INF/maven/**/pom.properties` from inside each nested JAR to extract Maven coordinates.
-
-#### Shaded / Fat JAR Detection
-
-Shaded (fat) JARs bundle their dependencies inside a single JAR file. These JARs contain multiple `META-INF/maven/**/pom.properties` entries — one for the main artifact and one for each bundled dependency.
-
-When a nested JAR contains multiple `pom.properties` entries, the handler attempts to identify the owner by matching the JAR filename against the `artifactId` values. For example, a file named `nimbus-jose-jwt-10.6.jar` containing `pom.properties` for `nimbus-jose-jwt`, `jcip-annotations`, and `gson` would be identified as `nimbus-jose-jwt` because only that `artifactId` appears in the filename. The bundled dependencies (`jcip-annotations` and `gson`) are then registered as nested **library** components under the identified artifact.
-
-When the filename is ambiguous (zero or multiple `artifactId` values match), the JAR appears as a **file** component with the discovered Maven artifacts nested as **library** sub-components. This preserves all available identity information without making an incorrect attribution.
-
-#### Dependency Graph
-
-The BOM includes a CycloneDX dependency graph reflecting the Maven dependency tree. Only artifacts that are actually present in the assembly are included.
-
-- **Direct vs. transitive** — the graph preserves the Maven dependency hierarchy. Transitive dependencies are connected through their parent, not listed as direct dependencies of the main component.
-- **Unpacked artifact dependencies** — nested JARs identified within unpacked archives are connected to their parent artifact via dependency edges.
-
-#### SBOM Merging
-
-Distribution archives often bundle artifacts from non-Maven ecosystems — most commonly JavaScript libraries inside WARs or JARs. The generator can detect and integrate CycloneDX SBOMs from those ecosystems, turning otherwise unidentified files into properly typed LIBRARY components with Package URLs, licenses, and dependency relationships.
-
-##### Auto-detection
-
-CycloneDX SBOM files (`.cdx.json` or `.cdx.xml`) are automatically detected in two places:
-
-1. **Archive entries** — when an artifact is unpacked into the distribution (e.g., a WAR with `<unpack>true</unpack>`), any SBOM file among the unpacked content is detected. The parent is determined by the directory structure.
-2. **Inside bundled JARs/WARs** — matched artifacts that are ZIP-based archives are scanned for embedded SBOM files.
-
-When both JSON and XML variants of the same SBOM exist (same filename stem in the same directory), the JSON variant is preferred and the XML duplicate is skipped.
-
-##### Handling modes
-
-The `embeddedSboms` option controls what happens with detected SBOMs:
-
-- **`merge`** (default) — the SBOM's components are imported as nested sub-components of the containing artifact. Dependency entries are imported into the distribution BOM's dependency section. No cross-ecosystem dependency edges are created — nesting already captures the containment relationship.
-- **`link`** — an `externalReference` of type `bom` is added to the containing artifact, pointing to the SBOM file's location within the archive. The SBOM file remains in the archive.
-- **`ignore`** — embedded SBOMs are not processed.
-
-##### External SBOMs
-
-The `externalSboms` option accepts a comma-separated list of file paths to CycloneDX SBOMs generated outside the Maven build (e.g., by `cdxgen`, `@cyclonedx/cyclonedx-npm`, or pnpm). These SBOMs are:
-
-1. **Used for archive entry matching** — component hashes from external SBOMs are checked against unmatched archive entries. If a match is found, the entry is identified from the external SBOM rather than appearing as an unidentified FILE component.
-2. **Merged under the main component** — all external SBOM components are nested under the distribution's main component.
-
-Example configuration:
-
-```xml
-<containerDescriptorHandler>
-    <handlerName>sbom</handlerName>
-    <configuration>
-        <outputMode>external</outputMode>
-        <externalSboms>target/js-sbom.cdx.json</externalSboms>
-    </configuration>
-</containerDescriptorHandler>
-```
-
-##### Generating JavaScript SBOMs
-
-| Package Manager | Tool |
-|---|---|
-| npm | [`@cyclonedx/cyclonedx-npm`](https://www.npmjs.com/package/@cyclonedx/cyclonedx-npm) |
-| Yarn | [`@cyclonedx/cyclonedx-node-yarn`](https://github.com/CycloneDX/cyclonedx-node-yarn) |
-| pnpm | [`cdxgen`](https://www.npmjs.com/package/@cyclonedx/cdxgen) |
-| Any | [`cdxgen`](https://www.npmjs.com/package/@cyclonedx/cdxgen) (multi-ecosystem) |
-
-#### Reproducible Builds
-
-The generator produces deterministic output for reproducible builds:
-
-- **Serial number** — a UUID derived from the project's `groupId:artifactId:version:assemblyId`, not random.
-- **Timestamp** — uses `project.build.outputTimestamp` when set (the standard Maven [reproducible builds](https://maven.apache.org/guides/mini/guide-reproducible-builds.html) property), otherwise falls back to the current time.
-- **Ordering** — components and dependencies are sorted alphabetically, so identical inputs produce identical output regardless of filesystem or iteration order.
-
-#### CycloneDX Component Types
-
-| Component Type | When Used |
-|---|---|
-| `application` | The main assembly (appears in BOM metadata) |
-| `library` | Maven artifacts — both packed JARs and unpacked archives. May appear as nested sub-components of other `library` or `file` components (e.g., bundled dependencies inside a shaded JAR) |
-| `file` | Non-artifact files (config files, scripts, schemas, licenses, etc.) and JARs that could not be positively identified as Maven artifacts. May contain nested `library` sub-components when Maven artifacts are discovered inside (e.g., via `pom.properties` in a shaded JAR) |
-
-The main `application` component's PURL includes the archive type derived from the output filename (e.g., `zip`, `tar.gz`) and a classifier. The classifier is determined from the assembly plugin configuration: if an explicit `<classifier>` is set it is used, otherwise the assembly descriptor id is used unless `<appendAssemblyId>` is `false`, in which case the classifier is omitted.
-
-#### Evidence
-
-Each component includes CycloneDX `evidence` with `occurrence` entries recording where it appears in the archive. Library components include an `identity` with technique `manifest-analysis` indicating they were identified through Maven artifact metadata.
-
 ## Maven Plugin
 
 The `assembly-sbom-maven-plugin` provides two goals for projects that need SBOM generation outside the assembly plugin workflow.
 
 ### `generate` Goal
 
-Scans an exploded directory (e.g., an exploded WAR produced by `maven-war-plugin`) and generates a CycloneDX SBOM by identifying Maven artifacts via content-hash matching. The same identification engine as the assembly handler is used.
+Scans an exploded directory (e.g., an exploded WAR produced by `maven-war-plugin`) and generates a CycloneDX SBOM by identifying Maven artifacts via content-hash matching. Uses the same identification engine as the [assembly handler](#assembly-handler).
 
 ```xml
 <plugin>
@@ -398,6 +299,130 @@ Combines multiple CycloneDX SBOMs into a single BOM. This is useful when a proje
 | `parentBomRef` | _(auto-detected)_ | Only used when `nested` is `true`. The `bom-ref` of the component to nest external components under. Defaults to the base BOM's `metadata.component.bomRef` |
 
 By default, external SBOM components are added as top-level components alongside the base BOM's components (flat merge). This is appropriate when the external components are peers of the base components (e.g., npm dependencies alongside Maven dependencies in a WAR). Set `nested` to `true` to nest them as sub-components of the parent component instead, which is appropriate when the external SBOM describes contents _inside_ a specific artifact. Dependency entries from external SBOMs are always imported into the merged BOM's dependency section.
+
+## How It Works
+
+Both the assembly handler and the `generate` goal use the same core engine. This section describes the identification and merging features that apply to both.
+
+### Artifact Identification
+
+Every file in the assembly is inspected and classified as either a **library** (Maven artifact) or a **file** (non-artifact):
+
+- **Content hash matching** — each archive entry's content hash is computed and looked up against a pre-built index of the project's resolved Maven artifacts. This identifies artifacts reliably regardless of filename (e.g., custom `outputFileNameMapping` in the assembly descriptor).
+- **Deduplication** — if the same artifact appears at multiple locations in the archive, it is represented as a single component with multiple `evidence/occurrence` entries.
+
+Library components include full [Package URL](https://github.com/package-url/purl-spec) (PURL) identifiers:
+
+```
+pkg:maven/org.apache.commons/commons-io@2.22.0?type=jar
+```
+
+### License Resolution
+
+The generator resolves licenses for every Maven artifact component by reading the artifact's effective POM (including licenses inherited from parent POMs). License names and URLs are mapped to [SPDX](https://spdx.org/licenses/) license identifiers using the CycloneDX license database, which includes exact matches, name matching, URL matching, and fuzzy matching against common license name variants.
+
+When no SPDX match is found, the raw license name and URL from the POM are preserved in the component. If an artifact's effective POM declares no licenses at all, a warning is logged. Set `failOnMissingLicense` to `true` to fail the build instead.
+
+### Unpacked Archive Detection
+
+When an assembly descriptor unpacks an artifact (e.g., a WAR with `<unpack>true</unpack>`), the handler detects the unpacked content by comparing SHA-256 hashes of the artifact's internal entries against the archive entries.
+
+- The unpacked artifact is added as a single **library** component.
+- Individual files from the unpacked archive that can be identified are **not** listed as separate file components — they appear as nested **library** components.
+- Files that cannot be identified remain as **file** components.
+- Nested JARs within the unpacked archive (e.g., JARs in a WAR's `WEB-INF/lib/`) are identified as separate **library** components with proper Maven PURLs.
+
+Nested JAR identification uses three strategies:
+
+1. **Reactor module lookup** — if the unpacked artifact is a module in the current reactor build, its resolved Maven dependencies are used to identify nested JARs by content hash.
+2. **Effective POM resolution** — for non-reactor artifacts, the handler builds the artifact's effective POM model and resolves its compile/runtime-scoped dependencies from the Maven repository, then matches nested JARs by content hash.
+3. **`pom.properties` parsing** — as a fallback, the handler reads `META-INF/maven/**/pom.properties` from inside each nested JAR to extract Maven coordinates.
+
+### Shaded / Fat JAR Detection
+
+Shaded (fat) JARs bundle their dependencies inside a single JAR file. These JARs contain multiple `META-INF/maven/**/pom.properties` entries — one for the main artifact and one for each bundled dependency.
+
+When a nested JAR contains multiple `pom.properties` entries, the handler attempts to identify the owner by matching the JAR filename against the `artifactId` values. For example, a file named `nimbus-jose-jwt-10.6.jar` containing `pom.properties` for `nimbus-jose-jwt`, `jcip-annotations`, and `gson` would be identified as `nimbus-jose-jwt` because only that `artifactId` appears in the filename. The bundled dependencies (`jcip-annotations` and `gson`) are then registered as nested **library** components under the identified artifact.
+
+When the filename is ambiguous (zero or multiple `artifactId` values match), the JAR appears as a **file** component with the discovered Maven artifacts nested as **library** sub-components. This preserves all available identity information without making an incorrect attribution.
+
+### Dependency Graph
+
+The BOM includes a CycloneDX dependency graph reflecting the Maven dependency tree. Only artifacts that are actually present in the assembly are included.
+
+- **Direct vs. transitive** — the graph preserves the Maven dependency hierarchy. Transitive dependencies are connected through their parent, not listed as direct dependencies of the main component.
+- **Unpacked artifact dependencies** — nested JARs identified within unpacked archives are connected to their parent artifact via dependency edges.
+
+### SBOM Merging
+
+Distribution archives often bundle artifacts from non-Maven ecosystems — most commonly JavaScript libraries inside WARs or JARs. The generator can detect and integrate CycloneDX SBOMs from those ecosystems, turning otherwise unidentified files into properly typed LIBRARY components with Package URLs, licenses, and dependency relationships.
+
+#### Auto-detection
+
+CycloneDX SBOM files (`.cdx.json` or `.cdx.xml`) are automatically detected in two places:
+
+1. **Archive entries** — when an artifact is unpacked into the distribution (e.g., a WAR with `<unpack>true</unpack>`), any SBOM file among the unpacked content is detected. The parent is determined by the directory structure.
+2. **Inside bundled JARs/WARs** — matched artifacts that are ZIP-based archives are scanned for embedded SBOM files.
+
+When both JSON and XML variants of the same SBOM exist (same filename stem in the same directory), the JSON variant is preferred and the XML duplicate is skipped.
+
+#### Handling Modes
+
+The `embeddedSboms` option controls what happens with detected SBOMs:
+
+- **`merge`** (default) — the SBOM's components are imported as nested sub-components of the containing artifact. Dependency entries are imported into the distribution BOM's dependency section. No cross-ecosystem dependency edges are created — nesting already captures the containment relationship.
+- **`link`** — an `externalReference` of type `bom` is added to the containing artifact, pointing to the SBOM file's location within the archive. The SBOM file remains in the archive.
+- **`ignore`** — embedded SBOMs are not processed.
+
+#### External SBOMs
+
+The `externalSboms` option accepts a comma-separated list of file paths to CycloneDX SBOMs generated outside the Maven build (e.g., by `cdxgen`, `@cyclonedx/cyclonedx-npm`, or pnpm). These SBOMs are:
+
+1. **Used for archive entry matching** — component hashes from external SBOMs are checked against unmatched archive entries. If a match is found, the entry is identified from the external SBOM rather than appearing as an unidentified FILE component.
+2. **Merged under the main component** — all external SBOM components are nested under the distribution's main component.
+
+Example configuration:
+
+```xml
+<containerDescriptorHandler>
+    <handlerName>sbom</handlerName>
+    <configuration>
+        <outputMode>external</outputMode>
+        <externalSboms>target/js-sbom.cdx.json</externalSboms>
+    </configuration>
+</containerDescriptorHandler>
+```
+
+#### Generating JavaScript SBOMs
+
+| Package Manager | Tool |
+|---|---|
+| npm | [`@cyclonedx/cyclonedx-npm`](https://www.npmjs.com/package/@cyclonedx/cyclonedx-npm) |
+| Yarn | [`@cyclonedx/cyclonedx-node-yarn`](https://github.com/CycloneDX/cyclonedx-node-yarn) |
+| pnpm | [`cdxgen`](https://www.npmjs.com/package/@cyclonedx/cdxgen) |
+| Any | [`cdxgen`](https://www.npmjs.com/package/@cyclonedx/cdxgen) (multi-ecosystem) |
+
+### Reproducible Builds
+
+The generator produces deterministic output for reproducible builds:
+
+- **Serial number** — a UUID derived from the project's `groupId:artifactId:version:assemblyId`, not random.
+- **Timestamp** — uses `project.build.outputTimestamp` when set (the standard Maven [reproducible builds](https://maven.apache.org/guides/mini/guide-reproducible-builds.html) property), otherwise falls back to the current time.
+- **Ordering** — components and dependencies are sorted alphabetically, so identical inputs produce identical output regardless of filesystem or iteration order.
+
+### CycloneDX Component Types
+
+| Component Type | When Used |
+|---|---|
+| `application` | The main assembly (appears in BOM metadata) |
+| `library` | Maven artifacts — both packed JARs and unpacked archives. May appear as nested sub-components of other `library` or `file` components (e.g., bundled dependencies inside a shaded JAR) |
+| `file` | Non-artifact files (config files, scripts, schemas, licenses, etc.) and JARs that could not be positively identified as Maven artifacts. May contain nested `library` sub-components when Maven artifacts are discovered inside (e.g., via `pom.properties` in a shaded JAR) |
+
+The main `application` component's PURL includes the archive type derived from the output filename (e.g., `zip`, `tar.gz`) and a classifier. The classifier is determined from the assembly plugin configuration: if an explicit `<classifier>` is set it is used, otherwise the assembly descriptor id is used unless `<appendAssemblyId>` is `false`, in which case the classifier is omitted.
+
+### Evidence
+
+Each component includes CycloneDX `evidence` with `occurrence` entries recording where it appears in the archive. Library components include an `identity` with technique `manifest-analysis` indicating they were identified through Maven artifact metadata.
 
 ## Requirements
 
