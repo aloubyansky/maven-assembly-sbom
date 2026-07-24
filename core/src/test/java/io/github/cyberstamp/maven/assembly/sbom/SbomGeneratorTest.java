@@ -529,6 +529,122 @@ class SbomGeneratorTest {
         assertEquals(2, bom.getComponents().size());
     }
 
+    // ── removeFileComponents with unmodifiable lists ───────────────────
+
+    @Test
+    void removeFileComponentsHandlesUnmodifiableComponentList() {
+        Bom bom = new Bom();
+        Component lib = createLibrary("lib-a", "ref-a");
+        Component fileComp = new Component();
+        fileComp.setType(Component.Type.FILE);
+        fileComp.setName("config.xml");
+        fileComp.setBomRef("file:config.xml");
+        bom.setComponents(List.of(lib, fileComp));
+
+        SbomGenerator.removeFileComponents(bom);
+
+        assertEquals(1, bom.getComponents().size());
+        assertEquals("lib-a", bom.getComponents().get(0).getName());
+    }
+
+    @Test
+    void removeFileComponentsHandlesUnmodifiableNestedComponentList() {
+        Bom bom = new Bom();
+        Component lib = createLibrary("lib-a", "ref-a");
+        Component nestedFile = new Component();
+        nestedFile.setType(Component.Type.FILE);
+        nestedFile.setName("nested.txt");
+        nestedFile.setBomRef("file:nested.txt");
+        Component nestedLib = createLibrary("nested-lib", "ref-nested");
+        lib.setComponents(List.of(nestedFile, nestedLib));
+        bom.setComponents(List.of(lib));
+
+        SbomGenerator.removeFileComponents(bom);
+
+        assertEquals(1, bom.getComponents().size());
+        assertEquals(1, lib.getComponents().size());
+        assertEquals("nested-lib", lib.getComponents().get(0).getName());
+    }
+
+    @Test
+    void removeFileComponentsHandlesUnmodifiableDependencyList() {
+        Bom bom = new Bom();
+        Component lib = createLibrary("lib-a", "ref-a");
+        Component fileComp = new Component();
+        fileComp.setType(Component.Type.FILE);
+        fileComp.setName("data.bin");
+        fileComp.setBomRef("file:data.bin");
+        bom.setComponents(List.of(lib, fileComp));
+
+        Dependency depA = new Dependency("ref-a");
+        depA.addDependency(new Dependency("file:data.bin"));
+        Dependency depFile = new Dependency("file:data.bin");
+        bom.setDependencies(List.of(depA, depFile));
+
+        SbomGenerator.removeFileComponents(bom);
+
+        assertEquals(1, bom.getComponents().size());
+        assertEquals(1, bom.getDependencies().size());
+        assertEquals("ref-a", bom.getDependencies().get(0).getRef());
+    }
+
+    // ── removeTopLevelFilesDuplicatedByNested with unmodifiable lists ──
+
+    @Test
+    void removeTopLevelFilesDuplicatedHandlesUnmodifiableLists() {
+        String hash = "aabb1122nested";
+        Bom bom = new Bom();
+
+        Component topFile = new Component();
+        topFile.setType(Component.Type.FILE);
+        topFile.setName("chunk.js");
+        topFile.setBomRef("file:web/app.war/chunk.js");
+        topFile.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+
+        Component nestedFile = new Component();
+        nestedFile.setType(Component.Type.FILE);
+        nestedFile.setName("chunk.js");
+        nestedFile.setBomRef("file:web/app.war/chunk.js");
+        nestedFile.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+
+        Component parent = createLibrary("app-war", "pkg:maven/g/app-war@1.0");
+        parent.setComponents(List.of(nestedFile));
+
+        bom.setComponents(List.of(topFile, parent));
+
+        SbomGenerator.removeTopLevelFilesDuplicatedByNested(bom, "sha256");
+
+        assertEquals(1, bom.getComponents().size());
+        assertEquals("app-war", bom.getComponents().get(0).getName());
+    }
+
+    // ── replaceFileComponentsWithLibraries with unmodifiable lists ─────
+
+    @Test
+    void replaceFileComponentsHandlesUnmodifiableLists() {
+        String hash = "aabbccdd11223344";
+        Bom bom = new Bom();
+
+        Component lib = createLibrary("lib-a", "pkg:maven/g/lib-a@1.0");
+        lib.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+
+        Component fileComp = new Component();
+        fileComp.setType(Component.Type.FILE);
+        fileComp.setName("lib-a-1.0.jar");
+        fileComp.setBomRef("file:lib/lib-a-1.0.jar");
+        fileComp.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+
+        bom.setComponents(List.of(lib, fileComp));
+        bom.setDependencies(List.of(
+                new Dependency("pkg:maven/g/lib-a@1.0"),
+                new Dependency("file:lib/lib-a-1.0.jar")));
+
+        SbomGenerator.replaceFileComponentsWithLibraries(bom, "sha256");
+
+        assertEquals(1, bom.getComponents().size());
+        assertEquals("lib-a", bom.getComponents().get(0).getName());
+    }
+
     // ── replaceFileComponentsWithLibraries ───────────────────────────────
 
     @Test
@@ -773,6 +889,49 @@ class SbomGeneratorTest {
         assertTrue(bom.getDependencies().stream()
                 .anyMatch(d -> "file:web/app.war/static/js/chunk.js".equals(d.getRef())),
                 "dependency entry should be preserved because nested component uses the same bom-ref");
+    }
+
+    @Test
+    void removeTopLevelFilesDuplicatedCleansChildDependencyRefs() {
+        String hash = "childdeprefs123";
+        Bom bom = new Bom();
+
+        Component topFile = new Component();
+        topFile.setType(Component.Type.FILE);
+        topFile.setName("app.js");
+        topFile.setBomRef("file:web/app.war/static/app.js");
+        topFile.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+
+        Component nestedFile = new Component();
+        nestedFile.setType(Component.Type.FILE);
+        nestedFile.setName("app.js");
+        nestedFile.setBomRef("file:static/app.js");
+        nestedFile.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+
+        Component parent = createLibrary("app-war", "pkg:maven/g/app-war@1.0");
+        parent.setComponents(new ArrayList<>(List.of(nestedFile)));
+
+        bom.setComponents(new ArrayList<>(List.of(topFile, parent)));
+
+        // Top-level dep whose child references the file that will be removed
+        Dependency parentDep = new Dependency("pkg:maven/g/app-war@1.0");
+        parentDep.addDependency(new Dependency("file:web/app.war/static/app.js"));
+        parentDep.addDependency(new Dependency("pkg:maven/g/other@1.0"));
+        bom.addDependency(parentDep);
+
+        SbomGenerator.removeTopLevelFilesDuplicatedByNested(bom, "sha256");
+
+        assertEquals(1, bom.getComponents().size(),
+                "top-level file should be removed");
+
+        Dependency survivingDep = bom.getDependencies().stream()
+                .filter(d -> "pkg:maven/g/app-war@1.0".equals(d.getRef()))
+                .findFirst().orElse(null);
+        assertNotNull(survivingDep);
+        assertEquals(1, survivingDep.getDependencies().size(),
+                "child dependency ref to removed file should be cleaned up");
+        assertEquals("pkg:maven/g/other@1.0",
+                survivingDep.getDependencies().get(0).getRef());
     }
 
     @Test

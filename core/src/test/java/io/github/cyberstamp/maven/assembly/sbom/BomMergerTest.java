@@ -808,6 +808,55 @@ class BomMergerTest {
     }
 
     @Test
+    void mergeFlatWithNullSourceComponentsIsNoOp() {
+        Component existing = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0");
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", existing);
+
+        Bom source = new Bom();
+        // source has null components
+
+        BomMerger.mergeFlat(target, source);
+
+        assertEquals(1, target.getComponents().size(),
+                "target components should be unchanged");
+        assertEquals("lib-a", target.getComponents().get(0).getName());
+    }
+
+    @Test
+    void mergeFlatAdoptsSourceDepsWhenTargetHasNoDependencies() {
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0",
+                createLibrary("org.a", "lib-a", "1.0", "pkg:maven/org.a/lib-a@1.0"));
+        // target has NO dependency entries at all
+
+        Bom source = new Bom();
+        Metadata sourceMeta = new Metadata();
+        Component sourceMain = new Component();
+        sourceMain.setType(Component.Type.APPLICATION);
+        sourceMain.setName("npm-app");
+        sourceMain.setBomRef("pkg:npm/npm-app@1.0");
+        sourceMeta.setComponent(sourceMain);
+        source.setMetadata(sourceMeta);
+        source.setComponents(new java.util.ArrayList<>(List.of(
+                createLibrary(null, "react", "18.3.1", "pkg:npm/react@18.3.1"))));
+        Dependency sourceMainDep = new Dependency("pkg:npm/npm-app@1.0");
+        sourceMainDep.addDependency(new Dependency("pkg:npm/react@18.3.1"));
+        source.addDependency(sourceMainDep);
+
+        BomMerger.mergeFlat(target, source);
+
+        // Target main component should now have a dependency entry
+        Dependency mainDep = target.getDependencies().stream()
+                .filter(d -> "pkg:maven/com.example/app@1.0".equals(d.getRef()))
+                .findFirst().orElse(null);
+        assertNotNull(mainDep,
+                "target main dependency entry should be created from scratch");
+        assertTrue(mainDep.getDependencies().stream()
+                .anyMatch(d -> "pkg:npm/react@18.3.1".equals(d.getRef())),
+                "adopted dependency should include source's react");
+    }
+
+    @Test
     void mergeFlatAddsComponentsAsTopLevel() {
         Bom target = buildTargetBom("pkg:maven/com.example/app@1.0",
                 createLibrary("org.a", "lib-a", "1.0", "pkg:maven/org.a/lib-a@1.0"));
@@ -953,6 +1002,12 @@ class BomMergerTest {
         assertEquals("pkg:maven/g/a@1.0?classifier=linux&scope=compile",
                 BomMerger.normalizeMavenPurl(
                         "pkg:maven/g/a@1.0?classifier=linux&type=jar&scope=compile"));
+        // type=jar as substring of another qualifier key
+        assertEquals("pkg:maven/g/a@1.0?archetype=jar",
+                BomMerger.normalizeMavenPurl("pkg:maven/g/a@1.0?archetype=jar"));
+        // type=jar as prefix of a longer value
+        assertEquals("pkg:maven/g/a@1.0?type=jar-with-dependencies",
+                BomMerger.normalizeMavenPurl("pkg:maven/g/a@1.0?type=jar-with-dependencies"));
         // null and non-maven
         assertNull(BomMerger.normalizeMavenPurl(null));
         assertEquals("pkg:npm/react@18.0",
@@ -1142,6 +1197,71 @@ class BomMergerTest {
             bom.setComponents(new java.util.ArrayList<>(List.of(components)));
         }
         return bom;
+    }
+
+    // ── unmodifiable list compatibility ──────────────────────────────────
+
+    @Test
+    void mergeHandlesUnmodifiableTargetComponentList() {
+        Component warOnly = createLibrary("org.x", "war-only-lib", "1.0",
+                "pkg:maven/org.x/war-only-lib@1.0");
+        warOnly.setEvidence(evidenceWithOccurrence(
+                "web/console.war/WEB-INF/lib/war-only-lib-1.0.jar"));
+
+        Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
+        war.setEvidence(evidenceWithOccurrence("web/console.war/"));
+
+        Bom target = new Bom();
+        Metadata metadata = new Metadata();
+        Component main = new Component();
+        main.setType(Component.Type.APPLICATION);
+        main.setName("app");
+        main.setBomRef("pkg:maven/com.example/app@1.0");
+        metadata.setComponent(main);
+        target.setMetadata(metadata);
+        target.setComponents(List.of(war, warOnly));
+
+        Component warOnlyFromSbom = createLibrary("org.x", "war-only-lib", "1.0",
+                "pkg:maven/org.x/war-only-lib@1.0?type=jar");
+        Bom source = buildSourceBom(warOnlyFromSbom);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", source);
+
+        assertEquals(1, target.getComponents().size(),
+                "war-only-lib should be removed from top-level");
+        assertEquals("war", target.getComponents().get(0).getName());
+    }
+
+    @Test
+    void mergeHandlesUnmodifiableOccurrenceList() {
+        Component topLevel = createLibrary("org.x", "lib", "1.0",
+                "pkg:maven/org.x/lib@1.0");
+        Evidence evidence = new Evidence();
+        Occurrence occ = new Occurrence();
+        occ.setLocation("web/console.war/WEB-INF/lib/lib-1.0.jar");
+        evidence.setOccurrences(List.of(occ));
+        topLevel.setEvidence(evidence);
+
+        Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
+        war.setEvidence(evidenceWithOccurrence("web/console.war/"));
+
+        Bom target = new Bom();
+        Metadata metadata = new Metadata();
+        Component main = new Component();
+        main.setType(Component.Type.APPLICATION);
+        main.setName("app");
+        main.setBomRef("pkg:maven/com.example/app@1.0");
+        metadata.setComponent(main);
+        target.setMetadata(metadata);
+        target.setComponents(new java.util.ArrayList<>(List.of(war, topLevel)));
+
+        Component libFromSbom = createLibrary("org.x", "lib", "1.0",
+                "pkg:maven/org.x/lib@1.0?type=jar");
+        Bom source = buildSourceBom(libFromSbom);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", source);
+
+        assertEquals(1, target.getComponents().size());
     }
 
     private static Bom buildSourceBom(Component... components) {

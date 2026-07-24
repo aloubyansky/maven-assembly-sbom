@@ -4,7 +4,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -90,16 +89,15 @@ public final class BomMerger {
      */
     public static void mergeFlat(Bom targetBom, Bom sourceBom) {
         if (sourceBom.getComponents() != null) {
-            Map<String, Component> existingByPurl = indexByPurl(targetBom.getComponents());
+            ComponentList targetComps = ComponentList.of(targetBom);
             List<Component> sorted = new ArrayList<>(sourceBom.getComponents());
             sorted.sort(COMPONENT_ORDER);
             for (Component comp : sorted) {
                 normalizePurls(comp);
-                String purl = comp.getPurl();
-                if (purl != null && existingByPurl.containsKey(purl)) {
+                if (targetComps.containsPurl(comp.getPurl())) {
                     continue;
                 }
-                targetBom.addComponent(comp);
+                targetComps.add(comp);
             }
         }
         adoptSourceMainDependencies(targetBom, sourceBom);
@@ -119,40 +117,23 @@ public final class BomMerger {
         if (sourceMainRef == null) {
             return;
         }
-        Dependency sourceMainDep = null;
-        for (Dependency dep : sourceBom.getDependencies()) {
-            if (sourceMainRef.equals(normalizeMavenPurl(dep.getRef()))) {
-                sourceMainDep = dep;
-                break;
-            }
-        }
+        DependencyList sourceDeps = DependencyList.of(sourceBom);
+        Dependency sourceMainDep = sourceDeps.findByRef(sourceMainRef);
         if (sourceMainDep == null || sourceMainDep.getDependencies() == null) {
             return;
         }
         String targetMainRef = targetBom.getMetadata().getComponent().getBomRef();
-        Dependency targetMainDep = null;
-        if (targetBom.getDependencies() != null) {
-            for (Dependency dep : targetBom.getDependencies()) {
-                if (targetMainRef.equals(dep.getRef())) {
-                    targetMainDep = dep;
-                    break;
-                }
-            }
-        }
+        DependencyList targetDeps = DependencyList.of(targetBom);
+        Dependency targetMainDep = targetDeps.findByRef(targetMainRef);
         if (targetMainDep == null) {
             targetMainDep = new Dependency(targetMainRef);
-            targetBom.addDependency(targetMainDep);
+            targetDeps.add(targetMainDep);
         }
-        Set<String> existingChildren = new HashSet<>();
-        if (targetMainDep.getDependencies() != null) {
-            for (Dependency child : targetMainDep.getDependencies()) {
-                existingChildren.add(normalizeMavenPurl(child.getRef()));
-            }
-        }
+        DependencyList existingChildren = DependencyList.ofChildren(targetMainDep);
         for (Dependency child : sourceMainDep.getDependencies()) {
             String normalizedRef = normalizeMavenPurl(child.getRef());
-            if (existingChildren.add(normalizedRef)) {
-                targetMainDep.addDependency(new Dependency(normalizedRef));
+            if (!existingChildren.containsRef(normalizedRef)) {
+                existingChildren.add(new Dependency(normalizedRef));
             }
         }
     }
@@ -212,8 +193,8 @@ public final class BomMerger {
             return;
         }
 
-        Map<String, Component> existingNestedByPurl = indexByPurl(parent.getComponents());
-        Map<String, Component> topLevelByPurl = indexByPurl(targetBom.getComponents());
+        ComponentList nestedComps = ComponentList.ofNested(parent);
+        ComponentList topLevelComps = ComponentList.of(targetBom);
 
         List<Component> sorted = new ArrayList<>(components);
         sorted.sort(COMPONENT_ORDER);
@@ -224,34 +205,34 @@ public final class BomMerger {
             String purl = comp.getPurl();
 
             if (purl != null) {
-                Component existingNested = existingNestedByPurl.get(purl);
+                Component existingNested = nestedComps.findByPurl(purl);
                 if (existingNested != null) {
                     mergeComponentData(existingNested, comp);
                     continue;
                 }
 
-                Component topLevel = topLevelByPurl.get(purl);
+                Component topLevel = topLevelComps.findByPurl(purl);
                 if (topLevel != null && topLevel != parent) {
                     migrateOccurrences(topLevel, comp, parentPathPrefix);
                     if (!hasOccurrences(topLevel)) {
-                        targetBom.getComponents().remove(topLevel);
+                        topLevelComps.remove(topLevel);
                     }
                 }
             }
 
-            parent.addComponent(comp);
-            mergeSubComponentsBySiblingOccurrence(comp, parent, parentPathPrefix);
+            nestedComps.add(comp);
+            mergeSubComponentsBySiblingOccurrence(comp, nestedComps, parentPathPrefix);
         }
     }
 
     private static void mergeSubComponentsBySiblingOccurrence(
-            Component added, Component parent, String parentPathPrefix) {
+            Component added, ComponentList parentComps, String parentPathPrefix) {
         if (added.getComponents() == null || added.getComponents().isEmpty()
-                || parent.getComponents() == null) {
+                || parentComps.isEmpty()) {
             return;
         }
         Map<String, Component> siblingsByOccurrence = new HashMap<>();
-        for (Component sibling : parent.getComponents()) {
+        for (Component sibling : parentComps) {
             if (sibling == added) {
                 continue;
             }
@@ -279,7 +260,7 @@ public final class BomMerger {
             if (sibling != null) {
                 migrateOccurrences(sibling, child, null);
                 mergeComponentData(child, sibling);
-                parent.getComponents().remove(sibling);
+                parentComps.remove(sibling);
             }
         }
     }
@@ -359,19 +340,6 @@ public final class BomMerger {
         return null;
     }
 
-    private static Map<String, Component> indexByPurl(List<Component> components) {
-        if (components == null || components.isEmpty()) {
-            return new HashMap<>();
-        }
-        Map<String, Component> index = new HashMap<>(components.size());
-        for (Component comp : components) {
-            if (comp.getPurl() != null) {
-                index.put(normalizeMavenPurl(comp.getPurl()), comp);
-            }
-        }
-        return index;
-    }
-
     /**
      * Normalizes a component's PURL and bom-ref in place by stripping
      * the redundant {@code ?type=jar} qualifier (jar is the PURL-spec
@@ -381,7 +349,7 @@ public final class BomMerger {
         String purl = comp.getPurl();
         if (purl != null) {
             String normalized = normalizeMavenPurl(purl);
-            if (normalized != purl) {
+            if (!normalized.equals(purl)) {
                 comp.setPurl(normalized);
                 if (purl.equals(comp.getBomRef())) {
                     comp.setBomRef(normalized);
@@ -406,29 +374,22 @@ public final class BomMerger {
         if (purl == null || !purl.startsWith("pkg:maven/")) {
             return purl;
         }
-        // ?type=jar as first (or only) qualifier
-        int idx = purl.indexOf("?type=jar");
-        if (idx >= 0) {
-            int end = idx + "?type=jar".length();
-            if (end == purl.length()) {
-                return purl.substring(0, idx);
-            }
-            if (purl.charAt(end) == '&') {
-                return purl.substring(0, idx) + '?' + purl.substring(end + 1);
-            }
+        int idx = purl.indexOf("type=jar");
+        if (idx <= 0) {
+            return purl;
         }
-        // &type=jar as non-first qualifier
-        idx = purl.indexOf("&type=jar");
-        if (idx >= 0) {
-            int end = idx + "&type=jar".length();
-            if (end == purl.length()) {
-                return purl.substring(0, idx);
-            }
-            if (purl.charAt(end) == '&') {
-                return purl.substring(0, idx) + purl.substring(end);
-            }
+        char before = purl.charAt(idx - 1);
+        if (before != '?' && before != '&') {
+            return purl;
         }
-        return purl;
+        int end = idx + "type=jar".length();
+        if (end < purl.length() && purl.charAt(end) != '&') {
+            return purl;
+        }
+        if (end == purl.length()) {
+            return purl.substring(0, idx - 1);
+        }
+        return purl.substring(0, idx) + purl.substring(end + 1);
     }
 
     private static void mergeComponentData(Component target, Component source) {
@@ -523,20 +484,21 @@ public final class BomMerger {
                 }
             }
         }
-        Iterator<Occurrence> it = occurrences.iterator();
-        while (it.hasNext()) {
-            Occurrence occ = it.next();
+        List<Occurrence> remaining = new ArrayList<>();
+        for (Occurrence occ : occurrences) {
             if (occ.getLocation() != null
                     && (pathPrefix == null || occ.getLocation().startsWith(pathPrefix))) {
-                it.remove();
                 if (existingLocations.add(occ.getLocation())) {
                     if (nested.getEvidence() == null) {
                         nested.setEvidence(new Evidence());
                     }
                     nested.getEvidence().addOccurrence(occ);
                 }
+            } else {
+                remaining.add(occ);
             }
         }
+        topEvidence.setOccurrences(remaining);
         if (nested.getEvidence() != null
                 && (nested.getEvidence().getIdentities() == null
                         || nested.getEvidence().getIdentities().isEmpty())
@@ -561,16 +523,11 @@ public final class BomMerger {
         if (dependencies == null) {
             return;
         }
-        Set<String> existingRefs = new HashSet<>();
-        if (targetBom.getDependencies() != null) {
-            for (Dependency d : targetBom.getDependencies()) {
-                existingRefs.add(normalizeMavenPurl(d.getRef()));
-            }
-        }
+        DependencyList targetDeps = DependencyList.of(targetBom);
         for (Dependency dep : dependencies) {
             Dependency normalized = normalizeDependency(dep, parentPathPrefix);
-            if (existingRefs.add(normalized.getRef())) {
-                targetBom.addDependency(normalized);
+            if (!targetDeps.containsRef(normalized.getRef())) {
+                targetDeps.add(normalized);
             }
         }
     }
