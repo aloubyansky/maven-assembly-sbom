@@ -50,7 +50,7 @@ The project includes two SBOM generators:
     <version>3.8.0</version>
     <dependencies>
         <dependency>
-            <groupId>io.github.cyberstamp.maven.assembly.sbom</groupId>
+            <groupId>dev.cyberstamp.maven.assembly.sbom</groupId>
             <artifactId>assembly-sbom-handler</artifactId>
             <version>0.0.1-SNAPSHOT</version>
         </dependency>
@@ -231,7 +231,7 @@ Scans an exploded directory (e.g., an exploded WAR produced by `maven-war-plugin
 
 ```xml
 <plugin>
-    <groupId>io.github.cyberstamp.maven.assembly.sbom</groupId>
+    <groupId>dev.cyberstamp.maven.assembly.sbom</groupId>
     <artifactId>assembly-sbom-maven-plugin</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <executions>
@@ -268,7 +268,7 @@ Combines multiple CycloneDX SBOMs into a single BOM. This is useful when a proje
 
 ```xml
 <plugin>
-    <groupId>io.github.cyberstamp.maven.assembly.sbom</groupId>
+    <groupId>dev.cyberstamp.maven.assembly.sbom</groupId>
     <artifactId>assembly-sbom-maven-plugin</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <executions>

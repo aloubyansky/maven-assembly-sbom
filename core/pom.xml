@@ -3,7 +3,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>io.github.cyberstamp.maven.assembly.sbom</groupId>
+        <groupId>dev.cyberstamp.maven.assembly.sbom</groupId>
         <artifactId>assembly-sbom-parent</artifactId>
         <version>0.0.1-SNAPSHOT</version>
     </parent>
