@@ -292,6 +292,8 @@ public class BomBuilder {
     /**
      * Sets user-configurable metadata (CPE, description, supplier, etc.)
      * for the main BOM component.
+     *
+     * @param product the product metadata, or {@code null}
      */
     public void setProduct(ProductInfo product) {
         this.product = product;

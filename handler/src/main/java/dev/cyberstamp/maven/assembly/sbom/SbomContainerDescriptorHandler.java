@@ -840,19 +840,31 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
         return List.of(outputPath);
     }
 
-    /** Sets the output format ({@code "json"} or {@code "xml"}). */
+    /**
+     * Sets the output format ({@code "json"} or {@code "xml"}).
+     *
+     * @param format the output format
+     */
     @SuppressWarnings("unused")
     public void setFormat(String format) {
         this.format = format;
     }
 
-    /** Sets the output filename within the archive. */
+    /**
+     * Sets the output filename within the archive.
+     *
+     * @param outputPath the archive-relative output path
+     */
     @SuppressWarnings("unused")
     public void setOutputPath(String outputPath) {
         this.outputPath = outputPath;
     }
 
-    /** Enables indented output for readability (JSON only). */
+    /**
+     * Enables indented output for readability (JSON only).
+     *
+     * @param prettyPrint whether to pretty-print the output
+     */
     @SuppressWarnings("unused")
     public void setPrettyPrint(boolean prettyPrint) {
         this.prettyPrint = prettyPrint;
@@ -861,25 +873,39 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     /**
      * Sets the output mode: {@code "embedded"} (inside the archive),
      * {@code "external"} (next to the archive), or {@code "all"} (both).
+     *
+     * @param outputMode the output mode
      */
     @SuppressWarnings("unused")
     public void setOutputMode(String outputMode) {
         this.outputMode = outputMode;
     }
 
-    /** Sets the hash algorithm for content hashes. */
+    /**
+     * Sets the hash algorithm for content hashes.
+     *
+     * @param hashAlgorithm the hash algorithm name
+     */
     @SuppressWarnings("unused")
     public void setHashAlgorithm(String hashAlgorithm) {
         this.hashAlgorithm = hashAlgorithm;
     }
 
-    /** Controls whether missing license info causes a build failure. */
+    /**
+     * Controls whether missing license info causes a build failure.
+     *
+     * @param failOnMissingLicense whether to fail on missing licenses
+     */
     @SuppressWarnings("unused")
     public void setFailOnMissingLicense(boolean failOnMissingLicense) {
         this.failOnMissingLicense = failOnMissingLicense;
     }
 
-    /** Controls whether duplicate artifact hashes cause a build failure. */
+    /**
+     * Controls whether duplicate artifact hashes cause a build failure.
+     *
+     * @param failOnDuplicateHash whether to fail on duplicate hashes
+     */
     @SuppressWarnings("unused")
     public void setFailOnDuplicateHash(boolean failOnDuplicateHash) {
         this.failOnDuplicateHash = failOnDuplicateHash;
@@ -901,6 +927,8 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
      * to the containing artifact</li>
      * <li>{@code "ignore"} — do not process embedded SBOMs</li>
      * </ul>
+     *
+     * @param embeddedSboms the embedded SBOM handling mode
      */
     @SuppressWarnings("unused")
     public void setEmbeddedSboms(String embeddedSboms) {
@@ -917,6 +945,8 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
      * are merged under the main distribution component and their
      * component hashes participate in archive entry matching.
      * </p>
+     *
+     * @param externalSboms comma-separated list of SBOM file paths
      */
     @SuppressWarnings("unused")
     public void setExternalSboms(String externalSboms) {
@@ -925,6 +955,8 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
 
     /**
      * Excludes generic file components, keeping only libraries (Maven, npm, etc.).
+     *
+     * @param librariesOnly whether to exclude file components
      */
     @SuppressWarnings("unused")
     public void setLibrariesOnly(boolean librariesOnly) {
@@ -949,6 +981,8 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
      * is {@code false} (i.e., the distribution archive is not
      * attached), the SBOM will not be attached either.
      * </p>
+     *
+     * @param attach whether to attach the SBOM as a project artifact
      */
     @SuppressWarnings("unused")
     public void setAttach(boolean attach) {
@@ -958,6 +992,8 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     /**
      * Sets user-configurable metadata (CPE, description, supplier,
      * manufacturer, publisher, copyright) for the main BOM component.
+     *
+     * @param product the product metadata
      */
     @SuppressWarnings("unused")
     public void setProduct(ProductInfo product) {
