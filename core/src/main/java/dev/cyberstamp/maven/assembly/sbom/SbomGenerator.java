@@ -36,7 +36,7 @@ import org.slf4j.LoggerFactory;
  * detected and external SBOMs.
  *
  * <p>
- * Used by both {@link SbomContainerDescriptorHandler} (assembly plugin)
+ * Used by both the {@code SbomContainerDescriptorHandler} (assembly plugin)
  * and the {@code generate} Maven goal (standalone directory scan).
  * </p>
  */
