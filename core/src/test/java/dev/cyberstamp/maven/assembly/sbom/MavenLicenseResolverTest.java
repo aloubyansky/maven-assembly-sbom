@@ -53,7 +53,7 @@ class MavenLicenseResolverTest {
      * </p>
      */
     @Test
-    void resolveLicenses_apacheLicenseMappedToSpdx() {
+    void resolveApacheLicenseMappedToSpdx() {
         Model model = new Model();
         License license = new License();
         license.setName("The Apache Software License, Version 2.0");
@@ -83,7 +83,7 @@ class MavenLicenseResolverTest {
      * </p>
      */
     @Test
-    void resolveLicenses_urlFallbackWhenNameFails() {
+    void resolveUrlFallbackWhenNameFails() {
         Model model = new Model();
         License license = new License();
         license.setName("My Custom License");
@@ -110,7 +110,7 @@ class MavenLicenseResolverTest {
      * is created preserving the original name and URL without an SPDX id.
      */
     @Test
-    void resolveLicenses_rawLicenseWhenNoSpdxMatch() {
+    void resolveRawLicenseWhenNoSpdxMatch() {
         Model model = new Model();
         License license = new License();
         license.setName("Proprietary License XYZ");
@@ -142,7 +142,7 @@ class MavenLicenseResolverTest {
      * resolver returns {@code null} rather than throwing.
      */
     @Test
-    void resolveLicenses_returnsNullWhenNoLicenses() {
+    void resolveReturnsNullWhenNoLicenses() {
         Model model = new Model();
         // model has no licenses added — getLicenses() returns empty list
 
@@ -162,7 +162,7 @@ class MavenLicenseResolverTest {
      * artifact's GAV coordinates.
      */
     @Test
-    void resolveLicenses_failsWhenConfigured() {
+    void resolveFailsWhenConfigured() {
         Model model = new Model();
 
         when(effectiveModelResolver.resolveEffectiveModel(GROUP_ID, ARTIFACT_ID, VERSION))
@@ -185,7 +185,7 @@ class MavenLicenseResolverTest {
      * contains all of them with their respective SPDX identifiers.
      */
     @Test
-    void resolveLicenses_multipleLicensesCombined() {
+    void resolveMultipleLicensesCombined() {
         Model model = new Model();
 
         License apache = new License();
@@ -214,13 +214,64 @@ class MavenLicenseResolverTest {
     }
 
     /**
+     * Verifies that the URL is preferred over an ambiguous name.
+     * JLine declares name="The BSD License" (which the CycloneDX
+     * resolver maps to BSD-4-Clause) but
+     * url="https://opensource.org/licenses/BSD-3-Clause" (BSD-3-Clause).
+     */
+    @Test
+    void resolveUrlPreferredOverAmbiguousName() {
+        Model model = new Model();
+        License license = new License();
+        license.setName("The BSD License");
+        license.setUrl("https://opensource.org/licenses/BSD-3-Clause");
+        model.addLicense(license);
+
+        when(effectiveModelResolver.resolveEffectiveModel(GROUP_ID, ARTIFACT_ID, VERSION))
+                .thenReturn(model);
+
+        MavenLicenseResolver resolver = new MavenLicenseResolver(effectiveModelResolver, false);
+        LicenseChoice result = resolver.resolveLicenses(GROUP_ID, ARTIFACT_ID, VERSION);
+
+        assertNotNull(result);
+        List<org.cyclonedx.model.License> licenses = result.getLicenses();
+        assertEquals(1, licenses.size());
+        assertEquals("BSD-3-Clause", licenses.get(0).getId(),
+                "should prefer URL-resolved BSD-3-Clause over name-resolved BSD-4-Clause");
+    }
+
+    /**
+     * Verifies that when name and URL resolve to the same SPDX ID,
+     * the result is that ID (no unnecessary URL lookup changes anything).
+     */
+    @Test
+    void resolveNameAndUrlAgree() {
+        Model model = new Model();
+        License license = new License();
+        license.setName("MIT License");
+        license.setUrl("https://opensource.org/licenses/MIT");
+        model.addLicense(license);
+
+        when(effectiveModelResolver.resolveEffectiveModel(GROUP_ID, ARTIFACT_ID, VERSION))
+                .thenReturn(model);
+
+        MavenLicenseResolver resolver = new MavenLicenseResolver(effectiveModelResolver, false);
+        LicenseChoice result = resolver.resolveLicenses(GROUP_ID, ARTIFACT_ID, VERSION);
+
+        assertNotNull(result);
+        List<org.cyclonedx.model.License> licenses = result.getLicenses();
+        assertEquals(1, licenses.size());
+        assertEquals("MIT", licenses.get(0).getId());
+    }
+
+    /**
      * Verifies that when the {@link EffectiveModelResolver} returns
      * {@code null} (i.e., the POM could not be resolved) and
      * {@code failOnMissingLicense} is {@code false}, the resolver
      * returns {@code null} gracefully.
      */
     @Test
-    void resolveLicenses_returnsNullWhenModelNotResolvable() {
+    void resolveReturnsNullWhenModelNotResolvable() {
         when(effectiveModelResolver.resolveEffectiveModel(GROUP_ID, ARTIFACT_ID, VERSION))
                 .thenReturn(null);
 

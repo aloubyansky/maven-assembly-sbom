@@ -20,11 +20,12 @@ import org.slf4j.LoggerFactory;
  * The resolution strategy for each Maven license entry is:
  * </p>
  * <ol>
- * <li>Try resolving the license {@linkplain org.apache.maven.model.License#getName() name}
- * via the CycloneDX {@link LicenseResolver} (which attempts SPDX ID match,
- * name match, URL match, and fuzzy match against a curated mapping)</li>
- * <li>If the name does not resolve and a URL is available, try resolving the
- * {@linkplain org.apache.maven.model.License#getUrl() URL}</li>
+ * <li>Try resolving the license
+ * {@linkplain org.apache.maven.model.License#getUrl() URL}
+ * via the CycloneDX {@link LicenseResolver}, since URLs point to a
+ * specific license text and are more reliable than names</li>
+ * <li>If the URL does not resolve, try the license
+ * {@linkplain org.apache.maven.model.License#getName() name}</li>
  * <li>If neither resolves to an SPDX identifier, create a raw
  * {@link License} preserving the original name and URL</li>
  * </ol>
@@ -133,19 +134,25 @@ class MavenLicenseResolver {
 
     /**
      * Attempts to resolve a single Maven license to a CycloneDX
-     * {@link License} with an SPDX identifier, trying the license
-     * name first and then the URL.
+     * {@link License} with an SPDX identifier, trying the URL
+     * first and falling back to the name.
+     *
+     * <p>
+     * URLs are preferred because they point to a specific license
+     * text, while POM license names are often ambiguous (e.g.,
+     * "The BSD License" could mean BSD-3-Clause or BSD-4-Clause).
+     * </p>
      *
      * @param mavenLicense the Maven license entry
      * @return a license with an SPDX {@code id} set, or {@code null}
      *         if no SPDX match was found
      */
     private License resolveToSpdx(org.apache.maven.model.License mavenLicense) {
-        License resolved = tryResolve(mavenLicense.getName());
-        if (resolved != null) {
-            return resolved;
+        License fromUrl = tryResolve(mavenLicense.getUrl());
+        if (fromUrl != null) {
+            return fromUrl;
         }
-        return tryResolve(mavenLicense.getUrl());
+        return tryResolve(mavenLicense.getName());
     }
 
     /**
