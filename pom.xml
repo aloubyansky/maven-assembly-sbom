@@ -59,6 +59,7 @@
         <maven-source-plugin.version>3.4.0</maven-source-plugin.version>
         <sigmund.version>0.0.1</sigmund.version>
         <format.skip>false</format.skip>
+        <readme.update.skip>true</readme.update.skip>
     </properties>
 
     <dependencyManagement>
@@ -215,8 +216,9 @@
                         <configuration>
                             <tagNameFormat>@{project.version}</tagNameFormat>
                             <autoVersionSubmodules>true</autoVersionSubmodules>
-                            <preparationGoals>clean install -Pupdate-readme</preparationGoals>
+                            <preparationGoals>clean install</preparationGoals>
                             <completionGoals>clean install</completionGoals>
+                            <arguments>-Dreadme.update.skip=false</arguments>
                             <pushChanges>false</pushChanges>
                             <localCheckout>true</localCheckout>
                             <remoteTagging>false</remoteTagging>
@@ -272,23 +274,45 @@
         </profile>
         <profile>
             <id>update-readme</id>
+            <activation>
+                <property>
+                    <name>readme.update.skip</name>
+                    <value>false</value>
+                </property>
+            </activation>
             <build>
                 <plugins>
                     <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-antrun-plugin</artifactId>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.6.0</version>
                         <executions>
                             <execution>
                                 <id>update-readme-version</id>
-                                <phase>generate-resources</phase>
+                                <phase>validate</phase>
                                 <goals>
-                                    <goal>run</goal>
+                                    <goal>exec</goal>
                                 </goals>
                                 <configuration>
-                                    <target>
-                                        <replaceregexp file="${project.basedir}/README.md" match="(&lt;artifactId&gt;assembly-sbom-handler&lt;/artifactId&gt;\s*&lt;version&gt;)[^&lt;]+(&lt;/version&gt;)" replace="\1${project.version}\2" flags="s" />
-                                        <replaceregexp file="${project.basedir}/README.md" match="(&lt;artifactId&gt;assembly-sbom-maven-plugin&lt;/artifactId&gt;\s*&lt;version&gt;)[^&lt;]+(&lt;/version&gt;)" replace="\1${project.version}\2" flags="sg" />
-                                    </target>
+                                    <executable>bash</executable>
+                                    <arguments>
+                                        <argument>-c</argument>
+                                        <argument>echo '${project.version}' | grep -q SNAPSHOT || sed -i -e '/&lt;artifactId&gt;assembly-sbom-handler&lt;\/artifactId&gt;/{n;s/&lt;version&gt;[^&lt;]*&lt;\/version&gt;/&lt;version&gt;${project.version}&lt;\/version&gt;/}' -e '/&lt;artifactId&gt;assembly-sbom-maven-plugin&lt;\/artifactId&gt;/{n;s/&lt;version&gt;[^&lt;]*&lt;\/version&gt;/&lt;version&gt;${project.version}&lt;\/version&gt;/}' ${project.basedir}/README.md</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>commit-readme-version</id>
+                                <phase>validate</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <executable>bash</executable>
+                                    <arguments>
+                                        <argument>-c</argument>
+                                        <argument>echo '${project.version}' | grep -q SNAPSHOT || { cd ${project.basedir} &amp;&amp; git diff --quiet README.md 2&gt;/dev/null || (git add README.md &amp;&amp; git commit -m "Update README plugin version to ${project.version}"); }</argument>
+                                    </arguments>
                                 </configuration>
                             </execution>
                         </executions>
