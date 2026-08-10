@@ -12,6 +12,8 @@ import java.time.format.DateTimeParseException;
 import java.util.Date;
 import java.util.HexFormat;
 
+import org.cyclonedx.model.Component;
+import org.cyclonedx.model.Hash;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -173,6 +175,44 @@ final class SbomUtils {
         try (InputStream is = Files.newInputStream(path)) {
             return computeHash(digest, is);
         }
+    }
+
+    /**
+     * Normalizes a hash algorithm name by removing dashes and
+     * lowercasing, so that e.g. {@code "SHA-256"} and {@code "sha256"}
+     * compare equal.
+     *
+     * @param algorithm the raw algorithm name (e.g. from
+     *        {@link org.cyclonedx.model.Hash.Algorithm#getSpec()})
+     * @return the normalized form (e.g. {@code "sha256"})
+     */
+    static String normalizeAlgorithm(String algorithm) {
+        return algorithm.replace("-", "").toLowerCase();
+    }
+
+    /**
+     * Extracts the hash value from a CycloneDX component whose
+     * algorithm matches {@code normalizedAlg}. Only the first
+     * matching hash is returned. The returned value is lowercased
+     * for consistent comparison with archive-computed hashes.
+     *
+     * @param comp the component to inspect
+     * @param normalizedAlg the target algorithm, already normalized
+     *        via {@link #normalizeAlgorithm}
+     * @return the lowercase hex-encoded hash value, or {@code null}
+     *         if the component has no hash of the target algorithm
+     */
+    static String extractHash(Component comp, String normalizedAlg) {
+        if (comp.getHashes() == null) {
+            return null;
+        }
+        for (Hash h : comp.getHashes()) {
+            if (h.getAlgorithm() != null && h.getValue() != null
+                    && normalizedAlg.equals(normalizeAlgorithm(h.getAlgorithm()))) {
+                return h.getValue().toLowerCase();
+            }
+        }
+        return null;
     }
 
     /**

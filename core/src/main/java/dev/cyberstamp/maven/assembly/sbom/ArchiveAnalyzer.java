@@ -25,7 +25,6 @@ import org.apache.maven.project.MavenProject;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Evidence;
-import org.cyclonedx.model.Hash;
 import org.cyclonedx.model.component.evidence.Occurrence;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.graph.Dependency;
@@ -98,9 +97,9 @@ class ArchiveAnalyzer {
                 }
                 String entryPrefix = null;
                 for (String zipName : zipNames) {
-                    if (entry.path().endsWith(zipName)) {
-                        entryPrefix = entry.path().substring(
-                                0, entry.path().length() - zipName.length());
+                    if (entry.archivePath().endsWith(zipName)) {
+                        entryPrefix = entry.archivePath().substring(
+                                0, entry.archivePath().length() - zipName.length());
                         break;
                     }
                 }
@@ -226,7 +225,7 @@ class ArchiveAnalyzer {
             Map<String, ArchiveContent.FileEntry> unmatchedByPath) {
         hashIndex = new ArtifactHashIndex(allArtifacts(), messageDigest, failOnDuplicateHash);
         for (ArchiveContent.FileEntry entry : entries) {
-            String relativePath = stripBaseDir(entry.path(), baseDirPrefix);
+            String relativePath = stripBaseDir(entry.archivePath(), baseDirPrefix);
             if (relativePath.isEmpty()) {
                 continue;
             }
@@ -354,15 +353,15 @@ class ArchiveAnalyzer {
         List<ArchiveContent.FileNestedArtifact> fileNestedArtifacts = content.fileNestedArtifacts();
         Set<String> alreadyProcessed = new HashSet<>(fileNestedArtifacts.size());
         for (ArchiveContent.FileNestedArtifact fna : fileNestedArtifacts) {
-            alreadyProcessed.add(fna.filePath());
+            alreadyProcessed.add(fna.archivePath());
         }
         var it = unmatchedByPath.values().iterator();
         while (it.hasNext()) {
             ArchiveContent.FileEntry fileEntry = it.next();
             if (fileEntry.sourceFile() == null
                     || !fileEntry.sourceFile().isFile()
-                    || !hasZipBasedExtension(fileEntry.path())
-                    || alreadyProcessed.contains(fileEntry.path())) {
+                    || !hasZipBasedExtension(fileEntry.archivePath())
+                    || alreadyProcessed.contains(fileEntry.archivePath())) {
                 continue;
             }
             try (ZipFile zf = new ZipFile(fileEntry.sourceFile())) {
@@ -398,7 +397,7 @@ class ArchiveAnalyzer {
         }
         ArtifactCoords coords = ArtifactCoords.of(gId, aId, ver);
         content.addMavenEntry(new ArchiveContent.MavenEntry(
-                coords, fileEntry.path(), fileEntry.hash()));
+                coords, fileEntry.archivePath(), fileEntry.hash()));
         return coords;
     }
 
@@ -412,7 +411,7 @@ class ArchiveAnalyzer {
     private static boolean registerStandaloneShadedJar(List<Properties> allProps,
             ArchiveContent.FileEntry fileEntry, ArchiveContent content) {
         return resolveAndRegisterShadedOwner(allProps, fileEntry, content,
-                fileEntry.path(),
+                fileEntry.archivePath(),
                 props -> registerFromStandaloneProps(props, fileEntry, content));
     }
 
@@ -496,7 +495,7 @@ class ArchiveAnalyzer {
                         scan.hashToZipEntryNames, nestedArtifactsByHash,
                         parentCoords, matchedArtifacts, content);
                 if (identified) {
-                    unmatchedByPath.remove(archiveEntry.path());
+                    unmatchedByPath.remove(archiveEntry.archivePath());
                 }
                 entriesByHash.remove(archiveEntry.hash());
             }
@@ -658,7 +657,7 @@ class ArchiveAnalyzer {
             String aId = p.getProperty("artifactId");
             String ver = p.getProperty("version");
             if (gId != null && aId != null && ver != null) {
-                content.addFileNestedArtifact(archiveEntry.path(),
+                content.addFileNestedArtifact(archiveEntry.archivePath(),
                         ArtifactCoords.of(gId, aId, ver));
             }
         }
@@ -758,7 +757,7 @@ class ArchiveAnalyzer {
         matchedArtifacts.add(artifact);
         ArtifactCoords nestedId = ArtifactCoords.of(artifact);
         content.addNestedEntry(new ArchiveContent.NestedMavenEntry(
-                parentId, nestedId, archiveEntry.path(), archiveEntry.hash()));
+                parentId, nestedId, archiveEntry.archivePath(), archiveEntry.hash()));
         content.addDependencyEdge(parentId, nestedId);
         content.addNestedDependency(parentId, new Dependency(
                 SbomUtils.toAetherArtifact(artifact.getGroupId(), artifact.getArtifactId(),
@@ -902,26 +901,37 @@ class ArchiveAnalyzer {
         if (externalHashIndex.isEmpty()) {
             return;
         }
+        // Collect all archive paths per matched component before mutating
+        Map<Component, List<String>> matchedPaths = new HashMap<>();
         var it = unmatchedByPath.entrySet().iterator();
         while (it.hasNext()) {
             var entry = it.next();
             ExternalComponentRef ref = externalHashIndex.get(entry.getValue().hash());
             if (ref != null) {
-                addOccurrence(ref.component(), entry.getKey());
+                matchedPaths.computeIfAbsent(ref.component(), k -> new ArrayList<>())
+                        .add(entry.getKey());
                 it.remove();
             }
         }
+        // Replace stale occurrences with the collected archive paths
+        for (var matched : matchedPaths.entrySet()) {
+            setOccurrences(matched.getKey(), matched.getValue());
+        }
     }
 
-    private static void addOccurrence(Component component, String archivePath) {
+    private static void setOccurrences(Component component, List<String> archivePaths) {
         Evidence evidence = component.getEvidence();
         if (evidence == null) {
             evidence = new Evidence();
             component.setEvidence(evidence);
         }
-        Occurrence occ = new Occurrence();
-        occ.setLocation(archivePath);
-        evidence.addOccurrence(occ);
+        List<Occurrence> occurrences = new ArrayList<>(archivePaths.size());
+        for (String path : archivePaths) {
+            Occurrence occ = new Occurrence();
+            occ.setLocation(path);
+            occurrences.add(occ);
+        }
+        evidence.setOccurrences(occurrences);
     }
 
     /**
@@ -940,49 +950,29 @@ class ArchiveAnalyzer {
      */
     private Map<String, ExternalComponentRef> buildExternalHashIndex() {
         Map<String, ExternalComponentRef> index = new HashMap<>();
-        String targetAlg = messageDigest.getAlgorithm().replace("-", "")
-                .toLowerCase();
+        String normalizedAlg = SbomUtils.normalizeAlgorithm(
+                messageDigest.getAlgorithm());
         for (Bom bom : externalBoms) {
             if (bom.getComponents() == null) {
                 continue;
             }
-            indexComponentTree(bom.getComponents(), bom, targetAlg, index);
+            indexComponentTree(bom.getComponents(), bom, normalizedAlg, index);
         }
         return index;
     }
 
     private static void indexComponentTree(List<Component> components, Bom bom,
-            String targetAlg, Map<String, ExternalComponentRef> index) {
+            String normalizedAlg, Map<String, ExternalComponentRef> index) {
         for (Component comp : components) {
-            String hash = extractMatchingHash(comp, targetAlg);
+            String hash = SbomUtils.extractHash(comp, normalizedAlg);
             if (hash != null) {
                 index.putIfAbsent(hash, new ExternalComponentRef(comp, bom));
             }
             if (comp.getComponents() != null) {
-                indexComponentTree(comp.getComponents(), bom, targetAlg, index);
+                indexComponentTree(comp.getComponents(), bom,
+                        normalizedAlg, index);
             }
         }
-    }
-
-    /**
-     * Extracts a hash value from a component that matches the target
-     * algorithm. Returns {@code null} if no matching hash is found.
-     */
-    private static String extractMatchingHash(Component comp, String targetAlg) {
-        if (comp.getHashes() == null) {
-            return null;
-        }
-        for (Hash hash : comp.getHashes()) {
-            if (hash.getAlgorithm() == null || hash.getValue() == null) {
-                continue;
-            }
-            String algName = hash.getAlgorithm().replace("-", "")
-                    .toLowerCase();
-            if (targetAlg.equals(algName)) {
-                return hash.getValue().toLowerCase();
-            }
-        }
-        return null;
     }
 
     /**

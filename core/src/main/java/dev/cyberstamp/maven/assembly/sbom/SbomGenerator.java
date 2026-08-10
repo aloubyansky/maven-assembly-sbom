@@ -123,14 +123,11 @@ public class SbomGenerator {
         addToBom(content, builder);
 
         Bom bom = builder.build();
-        String normalizedAlg = normalizeAlgorithm(bomHashAlgorithm.getSpec());
-        Set<String> archivePaths = collectArchivePaths(entries, baseDirPrefix);
-        Set<String> archiveHashes = collectArchiveHashes(entries);
-        processDetectedSboms(bom, content, builder,
-                archivePaths, archiveHashes, normalizedAlg);
-        processExternalBoms(bom, externalBoms,
-                archivePaths, archiveHashes, normalizedAlg);
+        ArchiveIndex archiveIndex = ArchiveIndex.of(entries, baseDirPrefix, bomHashAlgorithm.getSpec());
+        processDetectedSboms(bom, content, builder, archiveIndex);
+        processExternalBoms(bom, externalBoms, archiveIndex);
 
+        String normalizedAlg = archiveIndex.normalizedAlg();
         removeTopLevelFilesDuplicatedByNested(bom, normalizedAlg);
         replaceFileComponentsWithLibraries(bom, normalizedAlg);
         if (librariesOnly) {
@@ -167,20 +164,18 @@ public class SbomGenerator {
             builder.addExplicitDependency(edge.parent(), edge.child());
         }
         for (var e : content.unmatchedFiles()) {
-            builder.addFile(e.path(), e.hash());
+            builder.addFile(e.archivePath(), e.hash());
         }
         for (var e : content.fileNestedArtifacts()) {
             ArtifactCoords id = e.artifactId();
-            builder.addNestedArtifactUnderFile(e.filePath(), id,
+            builder.addNestedArtifactUnderFile(e.archivePath(), id,
                     licenseResolver.resolveLicenses(
                             id.groupId(), id.artifactId(), id.version()));
         }
         buildDependencyGraph(builder, content);
     }
 
-    private void processDetectedSboms(Bom bom, ArchiveContent content,
-            BomBuilder builder, Set<String> archivePaths,
-            Set<String> archiveHashes, String normalizedAlg) {
+    private void processDetectedSboms(Bom bom, ArchiveContent content, BomBuilder builder, ArchiveIndex archiveIndex) {
         if ("ignore".equalsIgnoreCase(embeddedSboms)) {
             return;
         }
@@ -195,8 +190,7 @@ public class SbomGenerator {
                 String parentPrefix = parent != null
                         ? BomMerger.getParentPathPrefix(parent)
                         : null;
-                Bom filtered = filterSbomByArchive(detected.parsedBom(),
-                        archivePaths, archiveHashes, normalizedAlg, parentPrefix);
+                Bom filtered = filterSbomByArchive(detected.parsedBom(), archiveIndex, parentPrefix);
                 if (parent != null) {
                     BomMerger.mergeUnder(bom, parentRef, filtered);
                 } else {
@@ -206,46 +200,21 @@ public class SbomGenerator {
         }
     }
 
-    private static Set<String> collectArchivePaths(
-            List<ArchiveContent.FileEntry> entries, String baseDirPrefix) {
-        Set<String> paths = new HashSet<>(entries.size());
-        for (var e : entries) {
-            String path = e.path();
-            if (baseDirPrefix != null && path.startsWith(baseDirPrefix)) {
-                path = path.substring(baseDirPrefix.length());
-            }
-            paths.add(path);
-        }
-        return paths;
-    }
-
-    private static Set<String> collectArchiveHashes(
-            List<ArchiveContent.FileEntry> entries) {
-        Set<String> hashes = new HashSet<>(entries.size());
-        for (var e : entries) {
-            if (e.hash() != null) {
-                hashes.add(e.hash());
-            }
-        }
-        return hashes;
-    }
-
-    static Bom filterSbomByArchive(Bom sbom, Set<String> archivePaths,
-            Set<String> archiveHashes, String normalizedAlg,
-            String parentPathPrefix) {
+    static Bom filterSbomByArchive(Bom sbom, ArchiveIndex archiveIndex, String parentPathPrefix) {
         if (sbom.getComponents() == null) {
             return sbom;
         }
+        ArchiveIndex index = archiveIndex.scopedTo(parentPathPrefix);
         Set<String> survivingRefs = new HashSet<>();
         List<Component> filtered = new ArrayList<>();
         for (Component comp : sbom.getComponents()) {
-            if (matchesArchive(comp, archivePaths, archiveHashes,
-                    normalizedAlg, parentPathPrefix)) {
+            ComponentView cv = new ComponentView(comp, index.normalizedAlg());
+            if (matchesArchive(cv, index)) {
+                correctOccurrences(cv, index);
                 filtered.add(comp);
                 collectBomRefs(comp, survivingRefs);
             } else {
-                log.debug("Filtering out component {} from SBOM:"
-                        + " no matching file in archive", comp.getPurl());
+                log.debug("Filtering out component {} from SBOM: no matching file in archive", comp.getPurl());
             }
         }
         Bom result = new Bom();
@@ -254,8 +223,7 @@ public class SbomGenerator {
             List<Dependency> filteredDeps = new ArrayList<>();
             for (Dependency dep : sbom.getDependencies()) {
                 if (survivingRefs.contains(dep.getRef())) {
-                    Dependency pruned = filterDependencyChildren(
-                            dep, survivingRefs);
+                    Dependency pruned = filterDependencyChildren(dep, survivingRefs);
                     filteredDeps.add(pruned);
                 }
             }
@@ -266,8 +234,7 @@ public class SbomGenerator {
         return result;
     }
 
-    private static Dependency filterDependencyChildren(
-            Dependency dep, Set<String> survivingRefs) {
+    private static Dependency filterDependencyChildren(Dependency dep, Set<String> survivingRefs) {
         if (dep.getDependencies() == null || dep.getDependencies().isEmpty()) {
             return dep;
         }
@@ -281,8 +248,7 @@ public class SbomGenerator {
         return result;
     }
 
-    private static void collectBomRefs(Component comp,
-            Set<String> refs) {
+    private static void collectBomRefs(Component comp, Set<String> refs) {
         if (comp.getBomRef() != null) {
             refs.add(comp.getBomRef());
         }
@@ -295,107 +261,79 @@ public class SbomGenerator {
 
     /**
      * Checks whether a component from an external/embedded SBOM corresponds
-     * to a file actually present in the archive. A component matches if:
-     * <ul>
-     * <li>It has an occurrence whose path (prefixed with the parent's
-     * archive path when applicable) exists as an archive entry, OR</li>
-     * <li>It has no occurrences and its hash matches an archive file
-     * (hash-only fallback), OR</li>
-     * <li>It has no hash with a comparable algorithm (can't verify).</li>
-     * </ul>
+     * to a file actually present in the archive.
      */
-    private static boolean matchesArchive(Component comp,
-            Set<String> archivePaths, Set<String> archiveHashes,
-            String normalizedAlg, String parentPathPrefix) {
-        if (hasMatchingOccurrence(comp, archivePaths, parentPathPrefix)) {
-            if (comp.getType() == Component.Type.FILE
-                    && hasVerifiableHash(comp, normalizedAlg)
-                    && !hasMatchingHash(comp, archiveHashes, normalizedAlg)) {
+    private static boolean matchesArchive(ComponentView cv, ArchiveIndex index) {
+        if (hasMatchingOccurrence(cv, index)) {
+            if (cv.component().getType() == Component.Type.FILE
+                    && cv.hasVerifiableHash()
+                    && !index.containsHash(cv.hash())) {
                 return false;
             }
             return true;
         }
-        if (hasEmptyOccurrence(comp, parentPathPrefix)) {
+        if (hasEmptyOccurrence(cv, index)) {
             return true;
         }
-        if (BomMerger.hasOccurrences(comp)) {
-            if (isNpmComponent(comp)) {
+        if (cv.hasOccurrences()) {
+            if (isNpmComponent(cv.component())) {
+                return true;
+            }
+            if (index.findPathByHash(cv.hash()) != null) {
                 return true;
             }
             return false;
         }
-        // no occurrences — fall back to hash check
-        if (comp.getHashes() == null || comp.getHashes().isEmpty()) {
+        if (!cv.hasVerifiableHash()) {
             return true;
         }
-        return hasMatchingHash(comp, archiveHashes, normalizedAlg)
-                || !hasVerifiableHash(comp, normalizedAlg);
+        return index.containsHash(cv.hash());
     }
 
-    private static boolean hasMatchingHash(Component comp,
-            Set<String> archiveHashes, String normalizedAlg) {
-        if (comp.getHashes() == null) {
-            return false;
-        }
-        for (Hash h : comp.getHashes()) {
-            if (normalizedAlg.equals(normalizeAlgorithm(h.getAlgorithm()))
-                    && archiveHashes.contains(h.getValue())) {
+    private static boolean hasMatchingOccurrence(ComponentView cv, ArchiveIndex index) {
+        for (String loc : cv.locations()) {
+            if (!loc.isEmpty() && index.containsPath(loc)) {
                 return true;
             }
         }
         return false;
     }
 
-    private static boolean hasVerifiableHash(Component comp,
-            String normalizedAlg) {
-        if (comp.getHashes() == null) {
+    private static boolean hasEmptyOccurrence(ComponentView cv, ArchiveIndex index) {
+        if (!index.isScoped()
+                || cv.component().getType() == Component.Type.FILE) {
             return false;
         }
-        for (Hash h : comp.getHashes()) {
-            if (normalizedAlg.equals(normalizeAlgorithm(h.getAlgorithm()))) {
+        for (String loc : cv.locations()) {
+            if (loc.isEmpty()) {
                 return true;
             }
         }
         return false;
     }
 
-    private static boolean hasMatchingOccurrence(Component comp,
-            Set<String> archivePaths, String parentPathPrefix) {
-        Evidence evidence = comp.getEvidence();
-        if (evidence == null || evidence.getOccurrences() == null) {
-            return false;
+    /**
+     * Corrects occurrence paths on a component that survived archive
+     * filtering. If occurrences already match, this is a no-op.
+     */
+    private static void correctOccurrences(ComponentView cv, ArchiveIndex index) {
+        if (hasMatchingOccurrence(cv, index)) {
+            return;
         }
-        for (Occurrence occ : evidence.getOccurrences()) {
-            String location = occ.getLocation();
-            if (location == null || location.isEmpty()) {
-                continue;
-            }
-            String fullPath = parentPathPrefix != null
-                    ? parentPathPrefix + location
-                    : location;
-            if (archivePaths.contains(fullPath)) {
-                return true;
-            }
+        String location = index.findPathByHash(cv.hash());
+        if (location == null) {
+            return;
         }
-        return false;
-    }
-
-    private static boolean hasEmptyOccurrence(Component comp,
-            String parentPathPrefix) {
-        if (parentPathPrefix == null
-                || comp.getType() == Component.Type.FILE) {
-            return false;
+        Evidence evidence = cv.component().getEvidence();
+        if (evidence == null) {
+            evidence = new Evidence();
+            cv.component().setEvidence(evidence);
         }
-        Evidence evidence = comp.getEvidence();
-        if (evidence == null || evidence.getOccurrences() == null) {
-            return false;
-        }
-        for (Occurrence occ : evidence.getOccurrences()) {
-            if ("".equals(occ.getLocation())) {
-                return true;
-            }
-        }
-        return false;
+        List<Occurrence> occurrences = new ArrayList<>(1);
+        Occurrence occ = new Occurrence();
+        occ.setLocation(location);
+        occurrences.add(occ);
+        evidence.setOccurrences(occurrences);
     }
 
     private static boolean isNpmComponent(Component comp) {
@@ -403,19 +341,12 @@ public class SbomGenerator {
         return purl != null && purl.startsWith("pkg:npm/");
     }
 
-    private static String normalizeAlgorithm(String algorithm) {
-        return algorithm.replace("-", "").toLowerCase();
-    }
-
-    private void processExternalBoms(Bom bom, List<Bom> externalBomList,
-            Set<String> archivePaths, Set<String> archiveHashes,
-            String normalizedAlg) {
+    private void processExternalBoms(Bom bom, List<Bom> externalBomList, ArchiveIndex archiveIndex) {
         if (externalBomList.isEmpty()) {
             return;
         }
         for (Bom externalBom : externalBomList) {
-            Bom filtered = filterSbomByArchive(externalBom,
-                    archivePaths, archiveHashes, normalizedAlg, null);
+            Bom filtered = filterSbomByArchive(externalBom, archiveIndex, null);
             BomMerger.mergeFlat(bom, filtered);
         }
     }
@@ -439,17 +370,15 @@ public class SbomGenerator {
         }
         Set<String> removedRefs = new HashSet<>();
         comps.removeIf(comp -> {
-            if (comp.getType() != Component.Type.FILE || comp.getHashes() == null) {
+            if (comp.getType() != Component.Type.FILE) {
                 return false;
             }
-            for (Hash h : comp.getHashes()) {
-                if (normalizedAlg.equals(normalizeAlgorithm(h.getAlgorithm()))
-                        && nestedFileHashes.contains(h.getValue())) {
-                    if (comp.getBomRef() != null) {
-                        removedRefs.add(comp.getBomRef());
-                    }
-                    return true;
+            String hash = SbomUtils.extractHash(comp, normalizedAlg);
+            if (hash != null && nestedFileHashes.contains(hash)) {
+                if (comp.getBomRef() != null) {
+                    removedRefs.add(comp.getBomRef());
                 }
+                return true;
             }
             return false;
         });
@@ -465,8 +394,7 @@ public class SbomGenerator {
         }
     }
 
-    private static void collectNestedFileBomRefs(Component parent,
-            Set<String> bomRefs) {
+    private static void collectNestedFileBomRefs(Component parent, Set<String> bomRefs) {
         if (parent.getComponents() == null) {
             return;
         }
@@ -478,17 +406,15 @@ public class SbomGenerator {
         }
     }
 
-    private static void collectNestedFileHashes(Component parent,
-            String normalizedAlg, Set<String> hashes) {
+    private static void collectNestedFileHashes(Component parent, String normalizedAlg, Set<String> hashes) {
         if (parent.getComponents() == null) {
             return;
         }
         for (Component child : parent.getComponents()) {
-            if (child.getType() == Component.Type.FILE && child.getHashes() != null) {
-                for (Hash h : child.getHashes()) {
-                    if (normalizedAlg.equals(normalizeAlgorithm(h.getAlgorithm()))) {
-                        hashes.add(h.getValue());
-                    }
+            if (child.getType() == Component.Type.FILE) {
+                String hash = SbomUtils.extractHash(child, normalizedAlg);
+                if (hash != null) {
+                    hashes.add(hash);
                 }
             }
             collectNestedFileHashes(child, normalizedAlg, hashes);
@@ -506,13 +432,11 @@ public class SbomGenerator {
         Map<String, List<Component>> filesByHash = new HashMap<>();
         for (Component comp : comps) {
             if (comp.getBomRef() != null
-                    && comp.getBomRef().startsWith("file:")
-                    && comp.getHashes() != null) {
-                for (Hash h : comp.getHashes()) {
-                    if (normalizedAlg.equals(normalizeAlgorithm(h.getAlgorithm()))) {
-                        filesByHash.computeIfAbsent(h.getValue(),
-                                k -> new ArrayList<>()).add(comp);
-                    }
+                    && comp.getBomRef().startsWith("file:")) {
+                String hash = SbomUtils.extractHash(comp, normalizedAlg);
+                if (hash != null) {
+                    filesByHash.computeIfAbsent(hash,
+                            k -> new ArrayList<>()).add(comp);
                 }
             }
         }
@@ -545,12 +469,10 @@ public class SbomGenerator {
     private static void matchFilesByLibraryHash(Component comp,
             Map<String, List<Component>> filesByHash,
             String normalizedAlg, Map<String, String> fileToLibRef) {
-        if (comp.getType() == Component.Type.LIBRARY && comp.getHashes() != null) {
-            for (Hash h : comp.getHashes()) {
-                if (!normalizedAlg.equals(normalizeAlgorithm(h.getAlgorithm()))) {
-                    continue;
-                }
-                List<Component> fileComps = filesByHash.get(h.getValue());
+        if (comp.getType() == Component.Type.LIBRARY) {
+            String hash = SbomUtils.extractHash(comp, normalizedAlg);
+            if (hash != null) {
+                List<Component> fileComps = filesByHash.get(hash);
                 if (fileComps != null) {
                     for (Component fileComp : fileComps) {
                         fileToLibRef.putIfAbsent(fileComp.getBomRef(), comp.getBomRef());

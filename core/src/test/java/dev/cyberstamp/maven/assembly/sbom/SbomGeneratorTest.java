@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.cyclonedx.model.Bom;
@@ -154,6 +155,132 @@ class SbomGeneratorTest {
     }
 
     @Test
+    void filterCorrectsStaleOccurrencePathByHash() {
+        String hash = "aabbccdd";
+        Component comp = createLibrary("lib-a", "pkg:maven/g/lib-a@1.0");
+        comp.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+        addOccurrence(comp, "lib/main/lib-a-1.0.jar");
+
+        Bom sbom = new Bom();
+        sbom.setComponents(new ArrayList<>(List.of(comp)));
+        Bom result = SbomGenerator.filterSbomByArchive(sbom,
+                buildIndex(Map.of(hash, List.of("lib/lib/main/lib-a-1.0.jar"))),
+                null);
+
+        assertEquals(1, result.getComponents().size());
+        List<Occurrence> occs = result.getComponents().get(0)
+                .getEvidence().getOccurrences();
+        assertEquals(1, occs.size());
+        assertEquals("lib/lib/main/lib-a-1.0.jar", occs.get(0).getLocation(),
+                "stale occurrence should be corrected to actual archive path");
+    }
+
+    @Test
+    void filterPreservesCorrectOccurrencePath() {
+        String hash = "aabbccdd";
+        Component comp = createLibrary("lib-a", "pkg:maven/g/lib-a@1.0");
+        comp.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+        addOccurrence(comp, "lib/lib-a-1.0.jar");
+
+        Bom sbom = new Bom();
+        sbom.setComponents(new ArrayList<>(List.of(comp)));
+        Bom result = SbomGenerator.filterSbomByArchive(sbom,
+                buildIndex(Map.of(hash, List.of("lib/lib-a-1.0.jar"))),
+                null);
+
+        assertEquals(1, result.getComponents().size());
+        assertEquals("lib/lib-a-1.0.jar",
+                result.getComponents().get(0).getEvidence()
+                        .getOccurrences().get(0).getLocation(),
+                "already-correct occurrence should not be changed");
+    }
+
+    @Test
+    void filterAddsOccurrenceWhenComponentHasNoneButMatchesByHash() {
+        String hash = "aabbccdd";
+        Component comp = createLibrary("lib-a", "pkg:maven/g/lib-a@1.0");
+        comp.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+
+        Bom sbom = new Bom();
+        sbom.setComponents(new ArrayList<>(List.of(comp)));
+        Bom result = SbomGenerator.filterSbomByArchive(sbom,
+                buildIndex(Map.of(hash, List.of("lib/lib-a-1.0.jar"))),
+                null);
+
+        assertEquals(1, result.getComponents().size());
+        List<Occurrence> occs = result.getComponents().get(0)
+                .getEvidence().getOccurrences();
+        assertEquals(1, occs.size());
+        assertEquals("lib/lib-a-1.0.jar", occs.get(0).getLocation(),
+                "occurrence should be added from archive path when missing");
+    }
+
+    @Test
+    void filterCorrectsOccurrenceWithParentPathPrefix() {
+        String hash = "aabbccdd";
+        Component comp = createLibrary("lib-a", "pkg:maven/g/lib-a@1.0");
+        comp.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+        addOccurrence(comp, "WEB-INF/lib/lib-a-1.0.jar");
+
+        Bom sbom = new Bom();
+        sbom.setComponents(new ArrayList<>(List.of(comp)));
+        Bom result = SbomGenerator.filterSbomByArchive(sbom,
+                buildIndex(Map.of(hash,
+                        List.of("web/app.war/WEB-INF/lib/lib-a-1.0.jar"))),
+                "web/app.war/");
+
+        assertEquals(1, result.getComponents().size());
+        assertEquals("WEB-INF/lib/lib-a-1.0.jar",
+                result.getComponents().get(0).getEvidence()
+                        .getOccurrences().get(0).getLocation(),
+                "occurrence should be relative to parent path prefix");
+    }
+
+    @Test
+    void filterRejectsStaleOccurrenceWhenHashMatchesOutsideParentScope() {
+        String hash = "aabbccdd";
+        Component comp = createLibrary("caffeine", "pkg:maven/g/caffeine@3.2");
+        comp.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+        addOccurrence(comp, "WEB-INF/lib/caffeine-3.2.jar");
+
+        Bom sbom = new Bom();
+        sbom.setComponents(new ArrayList<>(List.of(comp)));
+        // Hash matches a file at lib/ (top-level), NOT under web/app.war/
+        List<ArchiveContent.FileEntry> entries = new ArrayList<>();
+        entries.add(new ArchiveContent.FileEntry("web/app.war/WEB-INF/lib/other.jar", null));
+        entries.add(new ArchiveContent.FileEntry("lib/caffeine-3.2.jar", hash));
+        ArchiveIndex index = ArchiveIndex.of(entries, null, "sha256");
+        Bom result = SbomGenerator.filterSbomByArchive(sbom, index,
+                "web/app.war/");
+
+        assertTrue(result.getComponents().isEmpty(),
+                "component whose hash matches outside parent scope should be filtered out");
+    }
+
+    @Test
+    void filterRetainsScopedComponentWhenHashExistsAtMultiplePaths() {
+        String hash = "aabbccdd";
+        Component comp = createLibrary("jspecify", "pkg:maven/g/jspecify@1.0");
+        comp.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+        addOccurrence(comp, "WEB-INF/lib/jspecify-1.0.jar");
+
+        Bom sbom = new Bom();
+        sbom.setComponents(new ArrayList<>(List.of(comp)));
+        // Same hash exists at top-level AND under the parent scope
+        Bom result = SbomGenerator.filterSbomByArchive(sbom,
+                buildIndex(Map.of(hash, List.of("lib/jspecify-1.0.jar",
+                        "web/app.war/WEB-INF/lib/jspecify-1.0.jar"))),
+                "web/app.war/");
+
+        assertEquals(1, result.getComponents().size(),
+                "component should survive when hash matches a path under parent scope");
+        assertEquals("WEB-INF/lib/jspecify-1.0.jar",
+                result.getComponents().get(0).getEvidence()
+                        .getOccurrences().get(0).getLocation(),
+                "occurrence should use the scoped path");
+    }
+
+    @Test
     void filterRetainsComponentWithHashOfDifferentAlgorithm() {
         Component comp = createLibrary("lib-a", "pkg:maven/g/lib-a@1.0");
         comp.addHash(new Hash(Hash.Algorithm.MD5, "aabbccdd"));
@@ -181,7 +308,7 @@ class SbomGeneratorTest {
         sbom.addDependency(depB);
 
         Bom result = SbomGenerator.filterSbomByArchive(sbom,
-                Set.of(), Set.of("otherhash"), "sha256", null);
+                buildIndex(Map.of("otherhash", List.of("other.jar"))), null);
 
         assertEquals(1, result.getComponents().size());
         assertEquals("lib-a", result.getComponents().get(0).getName());
@@ -209,7 +336,7 @@ class SbomGeneratorTest {
     void filterReturnsUnchangedWhenNoComponents() {
         Bom sbom = new Bom();
         Bom result = SbomGenerator.filterSbomByArchive(sbom,
-                Set.of(), Set.of(), "sha256", null);
+                buildIndex(Map.of()), null);
         assertSame(sbom, result);
     }
 
@@ -225,7 +352,7 @@ class SbomGeneratorTest {
         sbom.addDependency(dep);
 
         Bom result = SbomGenerator.filterSbomByArchive(sbom,
-                Set.of(), Set.of(), "sha256", null);
+                buildIndex(Map.of()), null);
 
         assertEquals(1, result.getComponents().size());
         assertNotNull(result.getDependencies());
@@ -280,6 +407,31 @@ class SbomGeneratorTest {
 
         assertEquals(1, result.getComponents().size(),
                 "FILE component with no hash should survive (can't verify)");
+    }
+
+    @Test
+    void filterRejectsFileComponentWithScopedOccurrenceButHashOutsideScope() {
+        String hash = "aabbccdd";
+        Component fileComp = new Component();
+        fileComp.setType(Component.Type.FILE);
+        fileComp.setName("config.json");
+        fileComp.setBomRef("file:config.json");
+        fileComp.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+        addOccurrence(fileComp, "config.json");
+
+        Bom sbom = new Bom();
+        sbom.setComponents(new ArrayList<>(List.of(fileComp)));
+        // Hash exists at top-level, but not under the parent scope
+        Bom result = SbomGenerator.filterSbomByArchive(sbom,
+                buildIndex(Map.of(hash,
+                        List.of("lib/config.json"),
+                        "other", List.of("web/app.war/config.json"))),
+                "web/app.war/");
+
+        assertTrue(result.getComponents().isEmpty(),
+                "FILE component whose occurrence matches the scope but"
+                        + " whose hash only exists outside the scope"
+                        + " should be filtered out");
     }
 
     @Test
@@ -1050,12 +1202,32 @@ class SbomGeneratorTest {
         evidence.addOccurrence(occ);
     }
 
+    private static ArchiveIndex buildIndex(
+            Map<String, List<String>> hashToPath) {
+        List<ArchiveContent.FileEntry> entries = new ArrayList<>();
+        for (var e : hashToPath.entrySet()) {
+            for (String path : e.getValue()) {
+                entries.add(new ArchiveContent.FileEntry(path, e.getKey()));
+            }
+        }
+        return ArchiveIndex.of(entries, null, "sha256");
+    }
+
     private static Bom filterSbom(List<Component> components,
             Set<String> archivePaths, Set<String> archiveHashes,
             String normalizedAlg, String parentPathPrefix) {
+        List<ArchiveContent.FileEntry> entries = new ArrayList<>();
+        for (String path : archivePaths) {
+            entries.add(new ArchiveContent.FileEntry(path, null));
+        }
+        for (String hash : archiveHashes) {
+            entries.add(new ArchiveContent.FileEntry(
+                    "__hash_shim_" + hash, hash));
+        }
+        ArchiveIndex index = ArchiveIndex.of(entries, null, normalizedAlg);
         Bom sbom = new Bom();
         sbom.setComponents(new ArrayList<>(components));
-        return SbomGenerator.filterSbomByArchive(sbom,
-                archivePaths, archiveHashes, normalizedAlg, parentPathPrefix);
+        return SbomGenerator.filterSbomByArchive(sbom, index,
+                parentPathPrefix);
     }
 }

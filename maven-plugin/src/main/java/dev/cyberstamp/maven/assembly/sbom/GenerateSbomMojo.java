@@ -160,12 +160,28 @@ public class GenerateSbomMojo extends AbstractMojo {
         List<Bom> externalBomList = SbomGenerator.parseExternalBoms(
                 externalSboms, project.getBasedir().toPath());
 
+        // If the output file exists from a previous build, remember its hash
+        // so we can exclude stale copies from the scan (e.g. a WAR plugin may
+        // have copied the old SBOM into the exploded directory before we run).
+        String previousOutputHash = null;
+        if (outputFile.isFile()) {
+            try {
+                previousOutputHash = SbomUtils.computeHash(messageDigest, outputFile.toPath());
+            } catch (IOException e) {
+                getLog().debug("Could not hash previous output file: " + e.getMessage());
+            }
+        }
+
         List<ArchiveContent.FileEntry> entries;
         try {
             entries = collectDirectoryEntries(inputDirectory.toPath(), messageDigest);
         } catch (IOException e) {
             throw new MojoExecutionException(
                     "Failed to scan directory: " + inputDirectory, e);
+        }
+        if (previousOutputHash != null) {
+            String excludeHash = previousOutputHash;
+            entries.removeIf(e -> excludeHash.equals(e.hash()));
         }
         getLog().info("Scanned " + entries.size() + " files in " + inputDirectory);
 

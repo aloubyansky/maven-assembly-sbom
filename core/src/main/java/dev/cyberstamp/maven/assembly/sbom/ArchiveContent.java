@@ -43,9 +43,9 @@ class ArchiveContent {
      * An archive file entry pairing its path with its content hash
      * and an optional reference to the source file on disk.
      */
-    record FileEntry(String path, String hash, File sourceFile) {
-        FileEntry(String path, String hash) {
-            this(path, hash, null);
+    record FileEntry(String archivePath, String hash, File sourceFile) {
+        FileEntry(String archivePath, String hash) {
+            this(archivePath, hash, null);
         }
     }
 
@@ -61,12 +61,12 @@ class ArchiveContent {
      * in a shaded JAR) that should be nested under the file's component.
      *
      * <p>
-     * The file at {@code filePath} is most likely a Maven artifact itself
+     * The file at {@code archivePath} is most likely a Maven artifact itself
      * (e.g. a shaded or fat JAR) that could not be positively identified
      * because its filename matched zero or multiple embedded artifactIds.
      * </p>
      */
-    record FileNestedArtifact(String filePath, ArtifactCoords artifactId) {
+    record FileNestedArtifact(String archivePath, ArtifactCoords artifactId) {
     }
 
     /**
@@ -129,8 +129,8 @@ class ArchiveContent {
         explicitDependencies.add(new DependencyEdge(parent, child));
     }
 
-    void addFileNestedArtifact(String filePath, ArtifactCoords artifactId) {
-        fileNestedArtifacts.add(new FileNestedArtifact(filePath, artifactId));
+    void addFileNestedArtifact(String archivePath, ArtifactCoords artifactId) {
+        fileNestedArtifacts.add(new FileNestedArtifact(archivePath, artifactId));
     }
 
     List<DetectedSbom> detectedSboms() {
