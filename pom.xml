@@ -286,6 +286,7 @@
                         <groupId>org.codehaus.mojo</groupId>
                         <artifactId>exec-maven-plugin</artifactId>
                         <version>3.6.3</version>
+                        <inherited>false</inherited>
                         <executions>
                             <execution>
                                 <id>update-readme-version</id>
