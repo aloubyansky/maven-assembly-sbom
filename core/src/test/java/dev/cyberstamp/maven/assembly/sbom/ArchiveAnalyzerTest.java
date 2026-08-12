@@ -18,6 +18,7 @@ import org.apache.maven.artifact.Artifact;
 import org.apache.maven.artifact.DefaultArtifact;
 import org.apache.maven.artifact.handler.DefaultArtifactHandler;
 import org.apache.maven.execution.MavenSession;
+import org.apache.maven.model.Build;
 import org.apache.maven.project.MavenProject;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
@@ -56,6 +57,9 @@ class ArchiveAnalyzerTest {
     void setUp() throws Exception {
         digest = MessageDigest.getInstance("SHA-256");
         lenient().when(session.getProjects()).thenReturn(List.of());
+        Build build = new Build();
+        build.setDirectory(tempDir.resolve("target").toString());
+        lenient().when(project.getBuild()).thenReturn(build);
     }
 
     @Test
@@ -165,6 +169,38 @@ class ArchiveAnalyzerTest {
         assertEquals("mywar", content.mavenEntries().get(0).artifactId().artifactId());
         assertEquals(1, content.unmatchedFiles().size(),
                 "non-identifiable nested file should be preserved as unmatched");
+    }
+
+    @Test
+    void sourceFileOutsideBuildDirExcludedFromUnpackDetection() throws Exception {
+        Path sourceDir = tempDir.resolve("src");
+        Files.createDirectories(sourceDir);
+        Path licenseFile = Files.writeString(sourceDir.resolve("LICENSE.txt"),
+                "Apache License 2.0 text");
+
+        Path depJar = tempDir.resolve("dep-1.0.jar");
+        try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(depJar))) {
+            jos.putNextEntry(new JarEntry("META-INF/LICENSE"));
+            jos.write(Files.readAllBytes(licenseFile));
+            jos.closeEntry();
+        }
+
+        Artifact depArtifact = createArtifact("org.example", "dep", "1.0", "jar",
+                depJar.toFile());
+        when(project.getArtifacts()).thenReturn(Set.of(depArtifact));
+
+        String licenseHash = SbomUtils.computeHash(digest, licenseFile);
+        List<ArchiveContent.FileEntry> entries = List.of(
+                new ArchiveContent.FileEntry("LICENSE.txt", licenseHash,
+                        licenseFile.toFile()));
+
+        ArchiveAnalyzer analyzer = createAnalyzer();
+        ArchiveContent content = analyzer.analyze(entries, null);
+
+        assertTrue(content.mavenEntries().isEmpty(),
+                "dependency should not be detected as unpacked from a project source file hash match");
+        assertEquals(1, content.unmatchedFiles().size(),
+                "source file should remain as unmatched");
     }
 
     @Test
