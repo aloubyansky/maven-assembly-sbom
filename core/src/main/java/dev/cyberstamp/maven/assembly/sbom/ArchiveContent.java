@@ -1,6 +1,8 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
 import java.io.File;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -44,6 +46,23 @@ class ArchiveContent {
      * and an optional reference to the source file on disk.
      */
     record FileEntry(String archivePath, String hash, File sourceFile) {
+        FileEntry(String archivePath, String hash, File sourceFile) {
+            this.archivePath = archivePath;
+            this.hash = hash;
+            this.sourceFile = normalizeFile(sourceFile);
+        }
+
+        private static File normalizeFile(File file) {
+            if (file == null) {
+                return null;
+            }
+            try {
+                return file.getCanonicalFile();
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+
         FileEntry(String archivePath, String hash) {
             this(archivePath, hash, null);
         }

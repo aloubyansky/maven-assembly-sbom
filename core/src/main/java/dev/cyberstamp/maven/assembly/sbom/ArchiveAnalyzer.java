@@ -3,6 +3,7 @@ package dev.cyberstamp.maven.assembly.sbom;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -190,8 +191,7 @@ class ArchiveAnalyzer {
         Set<Artifact> matchedArtifacts = new HashSet<>();
         Map<String, ArchiveContent.FileEntry> unmatchedByPath = new HashMap<>();
 
-        classifyArchiveEntries(entries, baseDirPrefix, content,
-                matchedArtifacts, unmatchedByPath);
+        classifyArchiveEntries(entries, baseDirPrefix, content, matchedArtifacts, unmatchedByPath);
         if (!unmatchedByPath.isEmpty()) {
             detectUnpackedArtifacts(matchedArtifacts, unmatchedByPath, content);
             reclassifyEntriesUnderUnpackedArtifacts(content);
@@ -253,7 +253,9 @@ class ArchiveAnalyzer {
             Map<String, ArchiveContent.FileEntry> unmatchedByPath,
             ArchiveContent content) {
 
-        Map<String, List<ArchiveContent.FileEntry>> entriesByHash = indexEntriesByHash(unmatchedByPath.values());
+        Path buildDir = Path.of(project.getBuild().getDirectory()).toAbsolutePath().normalize();
+        Map<String, List<ArchiveContent.FileEntry>> entriesByHash = indexEntriesByHash(
+                unmatchedByPath.values(), buildDir);
 
         for (Artifact artifact : allArtifacts()) {
             if (entriesByHash.isEmpty()) {
@@ -329,17 +331,39 @@ class ArchiveAnalyzer {
     }
 
     /**
-     * Indexes entries by content hash.
+     * Indexes entries by content hash, excluding project source files.
+     *
+     * <p>
+     * Entries whose {@link ArchiveContent.FileEntry#sourceFile() sourceFile}
+     * resolves outside the project's build output directory are considered
+     * project source files (e.g. {@code LICENSE.txt} included via a
+     * {@code <fileSet>}) and are excluded from the index. This prevents
+     * false-positive unpack detection when a dependency jar happens to
+     * contain a file with the same hash as a project source file.
+     * </p>
      */
     private static Map<String, List<ArchiveContent.FileEntry>> indexEntriesByHash(
-            Iterable<ArchiveContent.FileEntry> entries) {
+            Iterable<ArchiveContent.FileEntry> entries, Path buildDir) {
         Map<String, List<ArchiveContent.FileEntry>> index = new HashMap<>();
         for (ArchiveContent.FileEntry e : entries) {
-            if (e.hash() != null) {
+            if (e.hash() != null && !isProjectSourceFile(e, buildDir)) {
                 index.computeIfAbsent(e.hash(), k -> new ArrayList<>(1)).add(e);
             }
         }
         return index;
+    }
+
+    /**
+     * Returns {@code true} if the entry originates from a project source
+     * file rather than a build output. An entry is considered a project
+     * source file when its {@code sourceFile} is known and does not
+     * reside under the project's build directory.
+     */
+    private static boolean isProjectSourceFile(ArchiveContent.FileEntry entry, Path buildDir) {
+        if (entry.sourceFile() == null) {
+            return false;
+        }
+        return !entry.sourceFile().toPath().startsWith(buildDir);
     }
 
     /**

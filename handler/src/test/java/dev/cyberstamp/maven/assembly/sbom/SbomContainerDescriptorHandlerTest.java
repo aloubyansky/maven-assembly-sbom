@@ -435,7 +435,7 @@ class SbomContainerDescriptorHandlerTest {
         Path nestedJar = createJarWithPomProperties("jolokia-json-2.4.jar",
                 "org.jolokia", "jolokia-json", "2.4", "jolokia-content");
 
-        Path warFile = tempDir.resolve("external-1.0.war");
+        Path warFile = tempDir.resolve("target/external-1.0.war");
         try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(warFile))) {
             jos.putNextEntry(new JarEntry("WEB-INF/lib/jolokia-json-2.4.jar"));
             jos.write(Files.readAllBytes(nestedJar));
@@ -483,7 +483,9 @@ class SbomContainerDescriptorHandlerTest {
     @Test
     void shadedJarArtifactsNestedUnderFileComponent() throws Exception {
         // Shaded JAR with ambiguous filename — both artifactIds appear in it
-        Path shadedJar = tempDir.resolve("ab-cd-1.0.jar");
+        Path buildDir = tempDir.resolve("target");
+        Files.createDirectories(buildDir);
+        Path shadedJar = buildDir.resolve("ab-cd-1.0.jar");
         try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(shadedJar))) {
             jos.putNextEntry(new JarEntry("data.txt"));
             jos.write("shaded-data".getBytes(StandardCharsets.UTF_8));
@@ -498,7 +500,7 @@ class SbomContainerDescriptorHandlerTest {
             jos.closeEntry();
         }
 
-        Path warFile = tempDir.resolve("mywar-1.0.war");
+        Path warFile = buildDir.resolve("mywar-1.0.war");
         try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(warFile))) {
             jos.putNextEntry(new JarEntry("WEB-INF/lib/ab-cd-1.0.jar"));
             jos.write(Files.readAllBytes(shadedJar));
@@ -1835,7 +1837,9 @@ class SbomContainerDescriptorHandlerTest {
     private Path createJarWithPomProperties(String name, String groupId,
             String artifactId, String version,
             String content) throws Exception {
-        Path jarPath = tempDir.resolve(name);
+        Path dir = tempDir.resolve("target");
+        Files.createDirectories(dir);
+        Path jarPath = dir.resolve(name);
         try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(jarPath))) {
             jos.putNextEntry(new JarEntry("data.txt"));
             jos.write(content.getBytes(StandardCharsets.UTF_8));
@@ -1853,7 +1857,9 @@ class SbomContainerDescriptorHandlerTest {
     }
 
     private Path createTestJar(String name, String content) throws Exception {
-        Path jarPath = tempDir.resolve(name);
+        Path dir = tempDir.resolve("target");
+        Files.createDirectories(dir);
+        Path jarPath = dir.resolve(name);
         try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(jarPath))) {
             jos.putNextEntry(new JarEntry("data.txt"));
             jos.write(content.getBytes(StandardCharsets.UTF_8));
@@ -1863,7 +1869,9 @@ class SbomContainerDescriptorHandlerTest {
     }
 
     private Path createTestFile(String name, String content) throws Exception {
-        Path path = tempDir.resolve(name);
+        Path dir = tempDir.resolve("target");
+        Files.createDirectories(dir);
+        Path path = dir.resolve(name);
         Files.writeString(path, content);
         return path;
     }
