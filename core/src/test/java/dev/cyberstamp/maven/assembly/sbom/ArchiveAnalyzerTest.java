@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.jar.JarEntry;
@@ -18,6 +19,11 @@ import org.apache.maven.artifact.DefaultArtifact;
 import org.apache.maven.artifact.handler.DefaultArtifactHandler;
 import org.apache.maven.execution.MavenSession;
 import org.apache.maven.project.MavenProject;
+import org.cyclonedx.model.Bom;
+import org.cyclonedx.model.Component;
+import org.cyclonedx.model.Evidence;
+import org.cyclonedx.model.Hash;
+import org.cyclonedx.model.component.evidence.Occurrence;
 import org.eclipse.aether.RepositorySystem;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -113,7 +119,7 @@ class ArchiveAnalyzerTest {
 
         assertEquals(0, content.mavenEntries().size());
         assertEquals(1, content.unmatchedFiles().size());
-        assertEquals("conf/app.properties", content.unmatchedFiles().get(0).path());
+        assertEquals("conf/app.properties", content.unmatchedFiles().get(0).archivePath());
     }
 
     @Test
@@ -208,7 +214,7 @@ class ArchiveAnalyzerTest {
 
         assertEquals(1, content.mavenEntries().size());
         assertEquals(1, content.unmatchedFiles().size());
-        assertEquals("conf/settings.xml", content.unmatchedFiles().get(0).path());
+        assertEquals("conf/settings.xml", content.unmatchedFiles().get(0).archivePath());
     }
 
     @Test
@@ -427,7 +433,7 @@ class ArchiveAnalyzerTest {
         assertEquals(2, content.fileNestedArtifacts().size(),
                 "both artifacts should be nested under the file");
         assertTrue(content.fileNestedArtifacts().stream()
-                .allMatch(e -> "web/myapp/WEB-INF/lib/ab-cd-1.0.jar".equals(e.filePath())),
+                .allMatch(e -> "web/myapp/WEB-INF/lib/ab-cd-1.0.jar".equals(e.archivePath())),
                 "all file-nested artifacts should reference the JAR path");
         assertTrue(content.fileNestedArtifacts().stream()
                 .anyMatch(e -> "ab".equals(e.artifactId().artifactId())));
@@ -600,7 +606,7 @@ class ArchiveAnalyzerTest {
         assertTrue(content.fileNestedArtifacts().stream()
                 .anyMatch(e -> "cd".equals(e.artifactId().artifactId())));
         assertTrue(content.fileNestedArtifacts().stream()
-                .allMatch(e -> "lib/ab-cd-1.0.jar".equals(e.filePath())));
+                .allMatch(e -> "lib/ab-cd-1.0.jar".equals(e.archivePath())));
     }
 
     @Test
@@ -690,6 +696,45 @@ class ArchiveAnalyzerTest {
                     .anyMatch(e -> "dist".equals(e.parentId().artifactId())),
                     "inner JAR should NOT be nested under dist (shorter prefix)");
         }
+    }
+
+    @Test
+    void matchAgainstExternalSbomsReplacesStaleOccurrences() throws Exception {
+        // An archive entry that doesn't match any Maven artifact
+        Path jarFile = createTestJar("h2-2.4.jar", "h2-content");
+        String hash = SbomUtils.computeHash(digest, jarFile);
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        // External SBOM has this component with a stale occurrence path
+        Bom externalBom = new Bom();
+        Component extComp = new Component();
+        extComp.setType(Component.Type.LIBRARY);
+        extComp.setName("h2");
+        extComp.setPurl("pkg:maven/com.h2database/h2@2.4");
+        extComp.setBomRef("pkg:maven/com.h2database/h2@2.4");
+        extComp.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+        Evidence evidence = new Evidence();
+        Occurrence staleOcc = new Occurrence();
+        staleOcc.setLocation("lib/main/com.h2database.h2-2.4.jar");
+        evidence.addOccurrence(staleOcc);
+        extComp.setEvidence(evidence);
+        externalBom.setComponents(new ArrayList<>(List.of(extComp)));
+
+        List<ArchiveContent.FileEntry> entries = List.of(
+                new ArchiveContent.FileEntry("lib/lib/main/com.h2database.h2-2.4.jar", hash));
+
+        ArchiveAnalyzer analyzer = new ArchiveAnalyzer(
+                effectiveModelResolver, repoSystem, project, session, digest,
+                false, List.of(externalBom), false);
+        analyzer.analyze(entries, null);
+
+        // The stale occurrence should be replaced with the archive path
+        List<Occurrence> occs = extComp.getEvidence().getOccurrences();
+        assertEquals(1, occs.size(),
+                "should have exactly one occurrence (stale replaced, not appended)");
+        assertEquals("lib/lib/main/com.h2database.h2-2.4.jar",
+                occs.get(0).getLocation(),
+                "occurrence should be the actual archive path");
     }
 
     private ArchiveAnalyzer createAnalyzer() {

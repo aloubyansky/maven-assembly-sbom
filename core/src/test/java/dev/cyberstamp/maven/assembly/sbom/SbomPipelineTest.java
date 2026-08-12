@@ -168,22 +168,19 @@ class SbomPipelineTest {
         embeddedSbom.addDependency(new Dependency("file:hawtconfig.json"));
 
         // Simulate archive contents — what actually exists in the distribution
-        Set<String> archivePaths = Set.of(
-                "lib/caffeine-3.2.4.jar",
-                "lib/guava-33.6.jar",
-                "lib/jspecify-1.0.0.jar",
-                "web/console.war/WEB-INF/lib/jspecify-1.0.0.jar",
-                "web/console.war/WEB-INF/lib/error-prone-2.36.jar",
-                "web/console.war/hawtconfig.json");
         // caffeine is NOT in web/console.war/WEB-INF/lib/ (excluded from unpack)
-        Set<String> archiveHashes = Set.of(
-                "hash-caffeine", "hash-guava", "hash-jspecify",
-                "hash-errorprone", "hash-hawtconfig");
+        ArchiveIndex archiveIndex = ArchiveIndex.of(List.of(
+                new ArchiveContent.FileEntry("lib/caffeine-3.2.4.jar", "hash-caffeine"),
+                new ArchiveContent.FileEntry("lib/guava-33.6.jar", "hash-guava"),
+                new ArchiveContent.FileEntry("lib/jspecify-1.0.0.jar", "hash-jspecify"),
+                new ArchiveContent.FileEntry("web/console.war/WEB-INF/lib/jspecify-1.0.0.jar", "hash-jspecify"),
+                new ArchiveContent.FileEntry("web/console.war/WEB-INF/lib/error-prone-2.36.jar", "hash-errorprone"),
+                new ArchiveContent.FileEntry("web/console.war/hawtconfig.json", "hash-hawtconfig")),
+                null, "sha256");
 
         // Filter then merge
         Bom filtered = SbomGenerator.filterSbomByArchive(
-                embeddedSbom, archivePaths, archiveHashes, "sha256",
-                "web/console.war/");
+                embeddedSbom, archiveIndex, "web/console.war/");
         BomMerger.mergeUnder(distBom,
                 "pkg:maven/org.example/artemis-console@1.0?type=war", filtered);
 
@@ -208,6 +205,11 @@ class SbomPipelineTest {
         // error-prone should be nested (matches archive path with prefix)
         assertTrue(consoleWar.getComponents().stream()
                 .anyMatch(c -> "error-prone".equals(c.getName())));
+
+        // caffeine should NOT be nested (excluded from unpack — not in archive under web/console.war/)
+        assertFalse(consoleWar.getComponents().stream()
+                .anyMatch(c -> "caffeine".equals(c.getName())),
+                "caffeine was excluded from unpack and should not appear as nested");
 
         // hawtconfig file component should be nested with prefixed bomRef
         Component nestedHawt = consoleWar.getComponents().stream()
@@ -535,6 +537,145 @@ class SbomPipelineTest {
             }
             if (c.getComponents() != null) {
                 collectBomRefs(c.getComponents(), refs);
+            }
+        }
+    }
+
+    // ── Test E: Merge external SBOM with ?type=jar bom-refs ────────
+
+    @Test
+    void mergeFlatWithTypeJarBomRefsProducesNoOrphanDeps() {
+        // Assembly handler produces components without ?type=jar
+        Bom distBom = newBom("pkg:maven/org.example/dist@1.0");
+        addComp(distBom, library("jackson-core",
+                "pkg:maven/com.fasterxml/jackson-core@2.22.0",
+                "lib/jackson-core-2.22.0.jar", "hash-jcore"));
+        addComp(distBom, library("jackson-databind",
+                "pkg:maven/com.fasterxml/jackson-databind@2.22.0",
+                "lib/jackson-databind-2.22.0.jar", "hash-jdb"));
+        addComp(distBom, library("snakeyaml",
+                "pkg:maven/org.yaml/snakeyaml@2.0",
+                "lib/snakeyaml-2.0.jar", "hash-snake"));
+
+        Dependency distMain = new Dependency("pkg:maven/org.example/dist@1.0");
+        distMain.addDependency(new Dependency("pkg:maven/com.fasterxml/jackson-core@2.22.0"));
+        distMain.addDependency(new Dependency("pkg:maven/com.fasterxml/jackson-databind@2.22.0"));
+        distMain.addDependency(new Dependency("pkg:maven/org.yaml/snakeyaml@2.0"));
+        distBom.addDependency(distMain);
+        distBom.addDependency(new Dependency("pkg:maven/com.fasterxml/jackson-core@2.22.0"));
+        Dependency distDbDep = new Dependency("pkg:maven/com.fasterxml/jackson-databind@2.22.0");
+        distDbDep.addDependency(new Dependency("pkg:maven/com.fasterxml/jackson-core@2.22.0"));
+        distBom.addDependency(distDbDep);
+        distBom.addDependency(new Dependency("pkg:maven/org.yaml/snakeyaml@2.0"));
+
+        // Quarkus SBOM uses ?type=jar in bom-refs (same artifacts)
+        Bom quarkusBom = newBom("pkg:generic/quarkus-run.jar@1.0");
+        addComp(quarkusBom, library("jackson-core",
+                "pkg:maven/com.fasterxml/jackson-core@2.22.0?type=jar",
+                null, "hash-jcore"));
+        addComp(quarkusBom, library("jackson-databind",
+                "pkg:maven/com.fasterxml/jackson-databind@2.22.0?type=jar",
+                null, "hash-jdb"));
+        addComp(quarkusBom, library("snakeyaml",
+                "pkg:maven/org.yaml/snakeyaml@2.0?type=jar",
+                null, "hash-snake"));
+
+        Dependency qMain = new Dependency("pkg:generic/quarkus-run.jar@1.0");
+        qMain.addDependency(new Dependency("pkg:maven/com.fasterxml/jackson-core@2.22.0?type=jar"));
+        qMain.addDependency(new Dependency("pkg:maven/com.fasterxml/jackson-databind@2.22.0?type=jar"));
+        quarkusBom.addDependency(qMain);
+        Dependency qCoreDep = new Dependency("pkg:maven/com.fasterxml/jackson-core@2.22.0?type=jar");
+        quarkusBom.addDependency(qCoreDep);
+        Dependency qDbDep = new Dependency("pkg:maven/com.fasterxml/jackson-databind@2.22.0?type=jar");
+        qDbDep.addDependency(new Dependency("pkg:maven/com.fasterxml/jackson-core@2.22.0?type=jar"));
+        quarkusBom.addDependency(qDbDep);
+        quarkusBom.addDependency(new Dependency("pkg:maven/org.yaml/snakeyaml@2.0?type=jar"));
+
+        BomMerger.mergeFlat(distBom, quarkusBom);
+        SbomGenerator.deduplicateBomRefs(distBom);
+
+        // No dependency ref with a #N suffix should exist without a matching component
+        Set<String> allBomRefs = collectAllBomRefs(distBom);
+        for (Dependency dep : distBom.getDependencies()) {
+            if (dep.getRef().contains("#")) {
+                assertTrue(allBomRefs.contains(dep.getRef()),
+                        "dependency ref " + dep.getRef()
+                                + " has a #N suffix but no matching component");
+            }
+        }
+
+        // No duplicate dependency refs
+        assertNoDuplicateDepRefs(distBom);
+    }
+
+    // ── Test F: External SBOM with transitive deps not in archive ──
+
+    @Test
+    void mergeFlatExternalSbomDoesNotCreateOrphanTransitiveDeps() {
+        // Assembly BOM with components matching archive JARs
+        Bom distBom = newBom("pkg:maven/org.example/dist@1.0");
+        addComp(distBom, library("narayana-jta",
+                "pkg:maven/org.jboss.narayana.jta/narayana-jta@7.3.4",
+                "lib/narayana-jta-7.3.4.jar", "hash-njta"));
+        addComp(distBom, library("jboss-logging",
+                "pkg:maven/org.jboss.logging/jboss-logging@3.6.3",
+                "lib/jboss-logging-3.6.3.jar", "hash-jlog"));
+
+        Dependency distMain = new Dependency("pkg:maven/org.example/dist@1.0");
+        distMain.addDependency(new Dependency("pkg:maven/org.jboss.narayana.jta/narayana-jta@7.3.4"));
+        distMain.addDependency(new Dependency("pkg:maven/org.jboss.logging/jboss-logging@3.6.3"));
+        distBom.addDependency(distMain);
+        Dependency njtaDep = new Dependency("pkg:maven/org.jboss.narayana.jta/narayana-jta@7.3.4");
+        njtaDep.addDependency(new Dependency("pkg:maven/org.jboss.logging/jboss-logging@3.6.3"));
+        distBom.addDependency(njtaDep);
+        distBom.addDependency(new Dependency("pkg:maven/org.jboss.logging/jboss-logging@3.6.3"));
+
+        // External SBOM from Quarkus — includes transitive deps NOT in the archive
+        Bom quarkusBom = newBom("pkg:generic/quarkus-run.jar@1.0");
+        addComp(quarkusBom, library("narayana-jta",
+                "pkg:maven/org.jboss.narayana.jta/narayana-jta@7.3.4?type=jar",
+                null, "hash-njta"));
+        // These transitive deps have JARs NOT in the distribution archive
+        addComp(quarkusBom, library("arjuna",
+                "pkg:maven/org.jboss.narayana.arjunacore/arjuna@7.3.4?type=jar",
+                null, "hash-arjuna"));
+        addComp(quarkusBom, library("common",
+                "pkg:maven/org.jboss.narayana/common@7.3.4?type=jar",
+                null, "hash-common"));
+
+        Dependency qMain = new Dependency("pkg:generic/quarkus-run.jar@1.0");
+        qMain.addDependency(new Dependency("pkg:maven/org.jboss.narayana.jta/narayana-jta@7.3.4?type=jar"));
+        quarkusBom.addDependency(qMain);
+        Dependency qNjta = new Dependency("pkg:maven/org.jboss.narayana.jta/narayana-jta@7.3.4?type=jar");
+        qNjta.addDependency(new Dependency("pkg:maven/org.jboss.narayana.arjunacore/arjuna@7.3.4?type=jar"));
+        qNjta.addDependency(new Dependency("pkg:maven/org.jboss.narayana/common@7.3.4?type=jar"));
+        quarkusBom.addDependency(qNjta);
+        quarkusBom.addDependency(new Dependency("pkg:maven/org.jboss.narayana.arjunacore/arjuna@7.3.4?type=jar"));
+        quarkusBom.addDependency(new Dependency("pkg:maven/org.jboss.narayana/common@7.3.4?type=jar"));
+
+        // Filter external SBOM by archive contents (arjuna and common are NOT in archive)
+        ArchiveIndex archiveIndex = ArchiveIndex.of(List.of(
+                new ArchiveContent.FileEntry("lib/narayana-jta-7.3.4.jar", "hash-njta"),
+                new ArchiveContent.FileEntry("lib/jboss-logging-3.6.3.jar", "hash-jlog")),
+                null, "sha256");
+
+        Bom filtered = SbomGenerator.filterSbomByArchive(
+                quarkusBom, archiveIndex, null);
+        BomMerger.mergeFlat(distBom, filtered);
+        SbomGenerator.deduplicateBomRefs(distBom);
+
+        // Transitive deps not in archive should not appear in dependency graph
+        Set<String> allBomRefs = collectAllBomRefs(distBom);
+        for (Dependency dep : distBom.getDependencies()) {
+            assertTrue(allBomRefs.contains(dep.getRef()),
+                    "dependency ref " + dep.getRef()
+                            + " should have a matching component (no orphan transitive deps)");
+            if (dep.getDependencies() != null) {
+                for (Dependency child : dep.getDependencies()) {
+                    assertTrue(allBomRefs.contains(child.getRef()),
+                            "dependsOn ref " + child.getRef()
+                                    + " should have a matching component");
+                }
             }
         }
     }

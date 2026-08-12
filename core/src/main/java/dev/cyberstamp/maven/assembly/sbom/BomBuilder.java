@@ -62,7 +62,7 @@ public class BomBuilder {
     private final String assemblyId;
     private final Date timestamp;
     private final Hash.Algorithm hashAlgorithm;
-    private final String hashAlgorithmName;
+    private final String normalizedAlg;
 
     private final List<Component> components = new ArrayList<>();
     private final Map<ArtifactCoords, String> bomRefById = new HashMap<>();
@@ -116,7 +116,7 @@ public class BomBuilder {
         this.assemblyId = assemblyId;
         this.timestamp = timestamp;
         this.hashAlgorithm = hashAlgorithm;
-        this.hashAlgorithmName = hashAlgorithm.getSpec().replace("-", "").toLowerCase();
+        this.normalizedAlg = SbomUtils.normalizeAlgorithm(hashAlgorithm.getSpec());
     }
 
     /**
@@ -213,17 +213,17 @@ public class BomBuilder {
      * component (e.g. an artifact discovered via pom.properties inside
      * a shaded JAR that could not be positively identified as the owner).
      *
-     * @param filePath the archive path of the parent FILE component
+     * @param archivePath the archive path of the parent FILE component
      * @param coords the Maven artifact coordinates
      * @param licenses the resolved license information, or {@code null}
      */
-    public void addNestedArtifactUnderFile(String filePath, ArtifactCoords coords,
+    public void addNestedArtifactUnderFile(String archivePath, ArtifactCoords coords,
             LicenseChoice licenses) {
-        Component comp = newMavenComponent(coords, filePath, null, licenses);
+        Component comp = newMavenComponent(coords, archivePath, null, licenses);
         bomRefById.putIfAbsent(coords, comp.getBomRef());
         componentsById.putIfAbsent(coords, comp);
 
-        nestedComponentsByFile.computeIfAbsent(filePath, k -> new ArrayList<>())
+        nestedComponentsByFile.computeIfAbsent(archivePath, k -> new ArrayList<>())
                 .add(comp);
     }
 
@@ -802,7 +802,7 @@ public class BomBuilder {
     private String buildGenericPurl(String fileName, String hash) {
         String purl = "pkg:generic/" + purlEncode(fileName);
         if (hash != null) {
-            purl += "?checksum=" + purlEncode(hashAlgorithmName) + ":" + purlEncode(hash);
+            purl += "?checksum=" + purlEncode(normalizedAlg) + ":" + purlEncode(hash);
         }
         return purl;
     }

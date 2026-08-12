@@ -280,7 +280,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
         if (!includeBaseDir || entries.isEmpty()) {
             return null;
         }
-        String firstPath = entries.get(0).path();
+        String firstPath = entries.get(0).archivePath();
         int slash = firstPath.indexOf('/');
         return slash > 0 ? firstPath.substring(0, slash + 1) : null;
     }
