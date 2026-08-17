@@ -14,6 +14,7 @@ import org.cyclonedx.model.Dependency;
 import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.ExternalReference;
 import org.cyclonedx.model.Hash;
+import org.cyclonedx.model.Property;
 import org.cyclonedx.model.component.evidence.Occurrence;
 
 /**
@@ -94,7 +95,11 @@ public final class BomMerger {
             sorted.sort(COMPONENT_ORDER);
             for (Component comp : sorted) {
                 normalizePurls(comp);
-                if (targetComps.containsPurl(comp.getPurl())) {
+                Component existing = targetComps.findByPurl(comp.getPurl());
+                if (existing != null) {
+                    mergeComponentData(existing, comp);
+                    mergeProperties(existing, comp);
+                    mergeExternalReferences(existing, comp);
                     continue;
                 }
                 targetComps.add(comp);
@@ -416,19 +421,110 @@ public final class BomMerger {
         }
     }
 
+    /**
+     * Merges hashes from the source component into the target,
+     * adding any hash algorithms that the target does not already
+     * have.
+     *
+     * <p>
+     * When both components share a hash algorithm, the values are
+     * compared. If any shared algorithm has a different value, all
+     * source hashes are discarded — the mismatch indicates the
+     * source may describe a different version of the artifact (e.g.
+     * before shading or repackaging), so its hashes cannot be
+     * trusted.
+     * </p>
+     */
     private static void mergeHashes(Component target, Component source) {
         if (source.getHashes() == null || source.getHashes().isEmpty()) {
             return;
         }
-        Set<String> existingAlgorithms = new HashSet<>();
+        Map<String, String> existingByAlg = new HashMap<>();
         if (target.getHashes() != null) {
             for (Hash h : target.getHashes()) {
-                existingAlgorithms.add(h.getAlgorithm());
+                existingByAlg.put(h.getAlgorithm(), h.getValue());
             }
         }
         for (Hash h : source.getHashes()) {
-            if (existingAlgorithms.add(h.getAlgorithm())) {
+            String existingValue = existingByAlg.get(h.getAlgorithm());
+            if (existingValue != null && !existingValue.equals(h.getValue())) {
+                return;
+            }
+        }
+        for (Hash h : source.getHashes()) {
+            if (existingByAlg.putIfAbsent(h.getAlgorithm(), h.getValue()) == null) {
                 target.addHash(h);
+            }
+        }
+    }
+
+    /**
+     * Copies properties from the source component into the target,
+     * skipping any property whose name already exists on the target.
+     *
+     * <p>
+     * Deduplication uses the property name alone because CycloneDX
+     * properties are key-value pairs where the name serves as the
+     * unique key. When the same property name appears on both sides,
+     * the target's value is preserved.
+     * </p>
+     *
+     * @param target the component to merge properties into
+     * @param source the component to copy properties from
+     */
+    private static void mergeProperties(Component target, Component source) {
+        if (source.getProperties() == null || source.getProperties().isEmpty()) {
+            return;
+        }
+        if (target.getProperties() == null || target.getProperties().isEmpty()) {
+            target.setProperties(new ArrayList<>(source.getProperties()));
+            return;
+        }
+        Set<String> existing = new HashSet<>();
+        for (Property p : target.getProperties()) {
+            existing.add(p.getName());
+        }
+        for (Property p : source.getProperties()) {
+            if (existing.add(p.getName())) {
+                target.addProperty(p);
+            }
+        }
+    }
+
+    /**
+     * Copies external references from the source component into the
+     * target, skipping any reference that already exists on the target.
+     *
+     * <p>
+     * Deduplication uses the combination of reference type and URL
+     * because a component can legitimately have multiple references
+     * of the same type (e.g. several {@code mailing-list} entries
+     * pointing to different lists). The type alone is therefore not
+     * sufficient as a dedup key; type plus URL uniquely identifies
+     * a reference.
+     * </p>
+     *
+     * @param target the component to merge external references into
+     * @param source the component to copy external references from
+     */
+    private static void mergeExternalReferences(Component target, Component source) {
+        if (source.getExternalReferences() == null
+                || source.getExternalReferences().isEmpty()) {
+            return;
+        }
+        if (target.getExternalReferences() == null
+                || target.getExternalReferences().isEmpty()) {
+            target.setExternalReferences(
+                    new ArrayList<>(source.getExternalReferences()));
+            return;
+        }
+        Set<String> existing = new HashSet<>();
+        for (ExternalReference ref : target.getExternalReferences()) {
+            existing.add(ref.getType() + " " + ref.getUrl());
+        }
+        for (ExternalReference ref : source.getExternalReferences()) {
+            if (existing.add(ref.getType() + " " + ref.getUrl())) {
+                target.addExternalReference(ref);
             }
         }
     }
