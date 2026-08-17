@@ -12,6 +12,7 @@ import org.cyclonedx.model.ExternalReference;
 import org.cyclonedx.model.Hash;
 import org.cyclonedx.model.LicenseChoice;
 import org.cyclonedx.model.Metadata;
+import org.cyclonedx.model.Property;
 import org.cyclonedx.model.component.evidence.Identity;
 import org.cyclonedx.model.component.evidence.Occurrence;
 import org.junit.jupiter.api.Test;
@@ -891,6 +892,179 @@ class BomMergerTest {
         long libACount = target.getComponents().stream()
                 .filter(c -> "lib-a".equals(c.getName())).count();
         assertEquals(1, libACount, "lib-a should appear only once");
+    }
+
+    @Test
+    void mergeFlatMergesPropertiesOnDuplicate() {
+        Component existing = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0");
+        existing.addProperty(new Property("target-prop", "target-value"));
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", existing);
+
+        Component source = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0?type=jar");
+        source.addProperty(new Property("quarkus:component:scope", "runtime"));
+        source.addProperty(new Property("target-prop", "source-value"));
+
+        BomMerger.mergeFlat(target, buildSourceBom(source));
+
+        assertEquals(1, target.getComponents().size());
+        List<Property> props = target.getComponents().get(0).getProperties();
+        assertNotNull(props);
+        assertEquals(2, props.size(),
+                "source property should be added, duplicate name skipped");
+        assertTrue(props.stream().anyMatch(
+                p -> "quarkus:component:scope".equals(p.getName())
+                        && "runtime".equals(p.getValue())));
+        assertTrue(props.stream().anyMatch(
+                p -> "target-prop".equals(p.getName())
+                        && "target-value".equals(p.getValue())),
+                "existing property value should not be overwritten");
+    }
+
+    @Test
+    void mergeFlatMergesPropertiesWhenTargetHasNone() {
+        Component existing = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0");
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", existing);
+
+        Component source = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0?type=jar");
+        source.addProperty(new Property("quarkus:component:scope", "runtime"));
+
+        BomMerger.mergeFlat(target, buildSourceBom(source));
+
+        List<Property> props = target.getComponents().get(0).getProperties();
+        assertNotNull(props);
+        assertEquals(1, props.size());
+        assertEquals("quarkus:component:scope", props.get(0).getName());
+        assertEquals("runtime", props.get(0).getValue());
+    }
+
+    @Test
+    void mergeFlatMergesExternalReferencesOnDuplicate() {
+        Component existing = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0");
+        ExternalReference existingRef = new ExternalReference();
+        existingRef.setType(ExternalReference.Type.BOM);
+        existingRef.setUrl("bom.cdx.json");
+        existing.addExternalReference(existingRef);
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", existing);
+
+        Component source = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0?type=jar");
+        ExternalReference websiteRef = new ExternalReference();
+        websiteRef.setType(ExternalReference.Type.WEBSITE);
+        websiteRef.setUrl("https://example.com");
+        source.addExternalReference(websiteRef);
+        ExternalReference vcsRef = new ExternalReference();
+        vcsRef.setType(ExternalReference.Type.VCS);
+        vcsRef.setUrl("https://github.com/example/lib-a");
+        source.addExternalReference(vcsRef);
+
+        BomMerger.mergeFlat(target, buildSourceBom(source));
+
+        assertEquals(1, target.getComponents().size());
+        List<ExternalReference> refs = target.getComponents().get(0).getExternalReferences();
+        assertNotNull(refs);
+        assertEquals(3, refs.size(),
+                "source external references should be merged");
+    }
+
+    @Test
+    void mergeFlatMergesExternalReferencesWhenTargetHasNone() {
+        Component existing = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0");
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", existing);
+
+        Component source = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0?type=jar");
+        ExternalReference ref = new ExternalReference();
+        ref.setType(ExternalReference.Type.WEBSITE);
+        ref.setUrl("https://example.com");
+        source.addExternalReference(ref);
+
+        BomMerger.mergeFlat(target, buildSourceBom(source));
+
+        List<ExternalReference> refs = target.getComponents().get(0).getExternalReferences();
+        assertNotNull(refs);
+        assertEquals(1, refs.size());
+        assertEquals(ExternalReference.Type.WEBSITE, refs.get(0).getType());
+    }
+
+    @Test
+    void mergeFlatDeduplicatesExternalReferencesByTypeAndUrl() {
+        Component existing = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0");
+        ExternalReference existingRef = new ExternalReference();
+        existingRef.setType(ExternalReference.Type.WEBSITE);
+        existingRef.setUrl("https://example.com");
+        existing.addExternalReference(existingRef);
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", existing);
+
+        Component source = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0?type=jar");
+        ExternalReference dupRef = new ExternalReference();
+        dupRef.setType(ExternalReference.Type.WEBSITE);
+        dupRef.setUrl("https://example.com");
+        source.addExternalReference(dupRef);
+        ExternalReference mailingList1 = new ExternalReference();
+        mailingList1.setType(ExternalReference.Type.MAILING_LIST);
+        mailingList1.setUrl("https://lists.example.com/dev");
+        source.addExternalReference(mailingList1);
+        ExternalReference mailingList2 = new ExternalReference();
+        mailingList2.setType(ExternalReference.Type.MAILING_LIST);
+        mailingList2.setUrl("https://lists.example.com/users");
+        source.addExternalReference(mailingList2);
+
+        BomMerger.mergeFlat(target, buildSourceBom(source));
+
+        List<ExternalReference> refs = target.getComponents().get(0).getExternalReferences();
+        assertEquals(3, refs.size(),
+                "duplicate website should be skipped,"
+                        + " both mailing lists should be added");
+    }
+
+    @Test
+    void mergeFlatMergesHashesWhenSharedAlgorithmsAgree() {
+        Component existing = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0");
+        existing.addHash(new Hash(Hash.Algorithm.SHA_256, "abc123"));
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", existing);
+
+        Component source = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0?type=jar");
+        source.addHash(new Hash(Hash.Algorithm.SHA_256, "abc123"));
+        source.addHash(new Hash("MD5", "md5hash"));
+        source.addHash(new Hash("SHA-512", "sha512hash"));
+
+        BomMerger.mergeFlat(target, buildSourceBom(source));
+
+        assertEquals(1, target.getComponents().size());
+        assertEquals(3, target.getComponents().get(0).getHashes().size(),
+                "new hash algorithms should be merged in");
+    }
+
+    @Test
+    void mergeFlatDropsAllSourceHashesWhenSharedAlgorithmDisagrees() {
+        Component existing = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0");
+        existing.addHash(new Hash(Hash.Algorithm.SHA_256, "abc123"));
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", existing);
+
+        Component source = createLibrary("org.a", "lib-a", "1.0",
+                "pkg:maven/org.a/lib-a@1.0?type=jar");
+        source.addHash(new Hash(Hash.Algorithm.SHA_256, "different"));
+        source.addHash(new Hash("MD5", "md5hash"));
+
+        BomMerger.mergeFlat(target, buildSourceBom(source));
+
+        assertEquals(1, target.getComponents().size());
+        assertEquals(1, target.getComponents().get(0).getHashes().size(),
+                "all source hashes should be dropped on mismatch");
+        assertEquals("abc123",
+                target.getComponents().get(0).getHashes().get(0).getValue(),
+                "target hash should be preserved");
     }
 
     @Test
