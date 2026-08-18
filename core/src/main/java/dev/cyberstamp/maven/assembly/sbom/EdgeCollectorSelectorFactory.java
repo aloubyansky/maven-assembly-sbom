@@ -95,8 +95,8 @@ class EdgeCollectorSelectorFactory implements DependencySelector {
         public boolean selectDependency(Dependency dependency) {
             boolean selected = delegate.selectDependency(dependency);
             if (parent != null && !JavaScopes.TEST.equals(dependency.getScope())) {
-                edges.computeIfAbsent(ArtifactCoords.of(parent), k -> ConcurrentHashMap.newKeySet())
-                        .add(ArtifactCoords.of(dependency.getArtifact()));
+                edges.computeIfAbsent(MavenArtifactCoords.of(parent), k -> ConcurrentHashMap.newKeySet())
+                        .add(MavenArtifactCoords.of(dependency.getArtifact()));
             }
             return selected;
         }

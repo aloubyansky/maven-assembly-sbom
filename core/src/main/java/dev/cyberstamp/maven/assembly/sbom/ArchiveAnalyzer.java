@@ -153,7 +153,7 @@ class ArchiveAnalyzer {
             List<MavenProject> projects) {
         Map<ArtifactCoords, MavenProject> index = new HashMap<>(projects.size());
         for (MavenProject p : projects) {
-            index.put(ArtifactCoords.of(p), p);
+            index.put(MavenArtifactCoords.of(p), p);
         }
         return index;
     }
@@ -234,7 +234,7 @@ class ArchiveAnalyzer {
                 for (Artifact artifact : artifacts) {
                     matchedArtifacts.add(artifact);
                     content.addMavenEntry(new ArchiveContent.MavenEntry(
-                            ArtifactCoords.of(artifact), relativePath, entry.hash()));
+                            MavenArtifactCoords.of(artifact), relativePath, entry.hash()));
                     detectBundledDepsInArtifactFile(artifact, content);
                 }
             } else {
@@ -509,10 +509,10 @@ class ArchiveAnalyzer {
                 log.debug("Could not determine unpack prefix for {}", artifact);
             }
             content.addMavenEntry(new ArchiveContent.MavenEntry(
-                    ArtifactCoords.of(artifact), occurrence, hashIndex.hashOf(artifact)));
+                    MavenArtifactCoords.of(artifact), occurrence, hashIndex.hashOf(artifact)));
 
             Map<String, Artifact> nestedArtifactsByHash = buildNestedArtifactHashMap(artifact);
-            ArtifactCoords parentCoords = ArtifactCoords.of(artifact);
+            ArtifactCoords parentCoords = MavenArtifactCoords.of(artifact);
 
             for (ArchiveContent.FileEntry archiveEntry : scan.matchedArchiveEntries) {
                 boolean identified = identifyNestedArtifact(archiveEntry, zf,
@@ -573,7 +573,7 @@ class ArchiveAnalyzer {
             if (nestedArtifact != null) {
                 registerNestedArtifact(nestedArtifact, archiveEntry, parentId, matchedArtifacts, content);
                 detectBundledDependencies(archiveEntry, parentZip, hashToZipEntryNames,
-                        ArtifactCoords.of(nestedArtifact), content);
+                        MavenArtifactCoords.of(nestedArtifact), content);
                 return true;
             }
         }
@@ -591,7 +591,7 @@ class ArchiveAnalyzer {
         }
         try (ZipFile zf = new ZipFile(file)) {
             List<Properties> allProps = readPomPropertiesFromZip(zf);
-            registerBundledDependencies(ArtifactCoords.of(artifact), allProps, content);
+            registerBundledDependencies(MavenArtifactCoords.of(artifact), allProps, content);
         } catch (IOException e) {
             log.debug("Could not scan {} for bundled dependencies", file, e);
         }
@@ -769,7 +769,7 @@ class ArchiveAnalyzer {
                 gId, aId, ver, "compile", JAR, null,
                 new org.apache.maven.artifact.handler.DefaultArtifactHandler(JAR));
         registerNestedArtifact(nested, archiveEntry, parentId, matchedArtifacts, content);
-        return ArtifactCoords.of(nested);
+        return MavenArtifactCoords.of(nested);
     }
 
     /**
@@ -779,7 +779,7 @@ class ArchiveAnalyzer {
             ArtifactCoords parentId, Set<Artifact> matchedArtifacts,
             ArchiveContent content) {
         matchedArtifacts.add(artifact);
-        ArtifactCoords nestedId = ArtifactCoords.of(artifact);
+        ArtifactCoords nestedId = MavenArtifactCoords.of(artifact);
         content.addNestedEntry(new ArchiveContent.NestedMavenEntry(
                 parentId, nestedId, archiveEntry.archivePath(), archiveEntry.hash()));
         content.addDependencyEdge(parentId, nestedId);
@@ -819,7 +819,7 @@ class ArchiveAnalyzer {
      * Builds a hash-to-artifact map for the given artifact's dependencies.
      */
     private Map<String, Artifact> buildNestedArtifactHashMap(Artifact artifact) {
-        ArtifactCoords coords = ArtifactCoords.of(artifact);
+        ArtifactCoords coords = MavenArtifactCoords.of(artifact);
         MavenProject module = reactorModuleIndex.get(coords);
         if (module != null && module.getArtifacts() != null) {
             return buildHashMapFromArtifacts(module.getArtifacts());
@@ -1018,7 +1018,7 @@ class ArchiveAnalyzer {
         Set<ArtifactCoords> knownCoords = content.collectKnownArtifactCoords();
         Set<File> scannedFiles = new HashSet<>();
         for (Artifact artifact : allArtifacts()) {
-            ArtifactCoords coords = ArtifactCoords.of(artifact);
+            ArtifactCoords coords = MavenArtifactCoords.of(artifact);
             if (!knownCoords.contains(coords)) {
                 continue;
             }
