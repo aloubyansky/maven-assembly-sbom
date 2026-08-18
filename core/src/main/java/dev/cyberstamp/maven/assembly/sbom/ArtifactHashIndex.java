@@ -120,7 +120,7 @@ class ArtifactHashIndex {
     private static void handleDuplicate(Artifact incoming, Artifact existing,
             String hash, boolean fail) {
         String message = "Duplicate artifact hash " + hash + ": "
-                + ArtifactCoords.of(existing) + " and " + ArtifactCoords.of(incoming);
+                + MavenArtifactCoords.of(existing) + " and " + MavenArtifactCoords.of(incoming);
         if (fail) {
             throw new IllegalStateException(message);
         }

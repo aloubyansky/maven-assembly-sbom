@@ -3,9 +3,6 @@ package dev.cyberstamp.maven.assembly.sbom;
 import java.util.Map;
 import java.util.Objects;
 
-import org.apache.maven.artifact.Artifact;
-import org.apache.maven.project.MavenProject;
-
 /**
  * Immutable Maven artifact coordinates used as a deduplication key
  * across the SBOM generation pipeline.
@@ -35,7 +32,7 @@ import org.apache.maven.project.MavenProject;
  * @param type the packaging type (e.g. "jar", "war", "test-jar"), or {@code null}
  * @param classifier the Maven classifier, or {@code null} if none
  */
-record ArtifactCoords(String groupId, String artifactId, String version,
+public record ArtifactCoords(String groupId, String artifactId, String version,
         String type, String classifier) {
 
     private static final String SEPARATOR = ":";
@@ -60,7 +57,7 @@ record ArtifactCoords(String groupId, String artifactId, String version,
             "sources", "java-source",
             "javadoc", "javadoc");
 
-    ArtifactCoords {
+    public ArtifactCoords {
         Objects.requireNonNull(groupId, "groupId");
         Objects.requireNonNull(artifactId, "artifactId");
         Objects.requireNonNull(version, "version");
@@ -86,32 +83,8 @@ record ArtifactCoords(String groupId, String artifactId, String version,
     /**
      * Creates an {@link ArtifactCoords} without type or classifier.
      */
-    static ArtifactCoords of(String groupId, String artifactId, String version) {
+    public static ArtifactCoords of(String groupId, String artifactId, String version) {
         return new ArtifactCoords(groupId, artifactId, version, null, null);
-    }
-
-    /**
-     * Creates an {@link ArtifactCoords} from a Maven {@link Artifact}.
-     */
-    static ArtifactCoords of(Artifact a) {
-        return new ArtifactCoords(a.getGroupId(), a.getArtifactId(), a.getVersion(),
-                a.getType(), a.getClassifier());
-    }
-
-    /**
-     * Creates an {@link ArtifactCoords} from an Aether artifact.
-     */
-    static ArtifactCoords of(org.eclipse.aether.artifact.Artifact a) {
-        return new ArtifactCoords(a.getGroupId(), a.getArtifactId(), a.getVersion(),
-                a.getExtension(), a.getClassifier());
-    }
-
-    /**
-     * Creates an {@link ArtifactCoords} from a {@link MavenProject}.
-     */
-    static ArtifactCoords of(MavenProject p) {
-        return new ArtifactCoords(p.getGroupId(), p.getArtifactId(), p.getVersion(),
-                p.getPackaging(), null);
     }
 
     /**

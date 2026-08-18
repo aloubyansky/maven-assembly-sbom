@@ -60,7 +60,7 @@ class ArtifactCoordsTest {
         DefaultArtifact artifact = new DefaultArtifact(
                 "org.example", "bar", "2.0", "compile", "jar", null,
                 new DefaultArtifactHandler("jar"));
-        ArtifactCoords id = ArtifactCoords.of(artifact);
+        ArtifactCoords id = MavenArtifactCoords.of(artifact);
         assertEquals("org.example", id.groupId());
         assertEquals("bar", id.artifactId());
         assertEquals("2.0", id.version());
@@ -73,7 +73,7 @@ class ArtifactCoordsTest {
         DefaultArtifact artifact = new DefaultArtifact(
                 "org.example", "bar", "2.0", "compile", "jar", "linux-x86_64",
                 new DefaultArtifactHandler("jar"));
-        ArtifactCoords id = ArtifactCoords.of(artifact);
+        ArtifactCoords id = MavenArtifactCoords.of(artifact);
         assertEquals("linux-x86_64", id.classifier());
         assertEquals("org.example:bar:2.0:linux-x86_64", id.toString());
     }
@@ -82,7 +82,7 @@ class ArtifactCoordsTest {
     void fromAetherArtifact() {
         org.eclipse.aether.artifact.DefaultArtifact artifact = new org.eclipse.aether.artifact.DefaultArtifact(
                 "org.example", "baz", "javadoc", "jar", "3.0");
-        ArtifactCoords id = ArtifactCoords.of(artifact);
+        ArtifactCoords id = MavenArtifactCoords.of(artifact);
         assertEquals("org.example", id.groupId());
         assertEquals("baz", id.artifactId());
         assertEquals("3.0", id.version());
@@ -141,7 +141,7 @@ class ArtifactCoordsTest {
         DefaultArtifact artifact = new DefaultArtifact(
                 "org.example", "bar", "2.0", "compile", mavenType, handlerClassifier,
                 new DefaultArtifactHandler(mavenType));
-        ArtifactCoords id = ArtifactCoords.of(artifact);
+        ArtifactCoords id = MavenArtifactCoords.of(artifact);
         assertEquals(mavenType, id.type());
         assertNull(id.classifier());
     }
@@ -157,7 +157,7 @@ class ArtifactCoordsTest {
         // Aether represents these as extension="jar" + the handler classifier
         org.eclipse.aether.artifact.DefaultArtifact artifact = new org.eclipse.aether.artifact.DefaultArtifact(
                 "org.example", "bar", handlerClassifier, "jar", "2.0");
-        ArtifactCoords id = ArtifactCoords.of(artifact);
+        ArtifactCoords id = MavenArtifactCoords.of(artifact);
         assertEquals(mavenType, id.type());
         assertNull(id.classifier());
     }
@@ -173,11 +173,11 @@ class ArtifactCoordsTest {
         DefaultArtifact mavenArtifact = new DefaultArtifact(
                 "org.example", "bar", "2.0", "compile", mavenType, handlerClassifier,
                 new DefaultArtifactHandler(mavenType));
-        ArtifactCoords fromMaven = ArtifactCoords.of(mavenArtifact);
+        ArtifactCoords fromMaven = MavenArtifactCoords.of(mavenArtifact);
 
         org.eclipse.aether.artifact.DefaultArtifact aetherArtifact = new org.eclipse.aether.artifact.DefaultArtifact(
                 "org.example", "bar", handlerClassifier, "jar", "2.0");
-        ArtifactCoords fromAether = ArtifactCoords.of(aetherArtifact);
+        ArtifactCoords fromAether = MavenArtifactCoords.of(aetherArtifact);
 
         assertEquals(fromMaven, fromAether);
     }

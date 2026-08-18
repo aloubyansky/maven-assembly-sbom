@@ -150,7 +150,7 @@ class SbomUtilsTest {
             String mavenType, String handlerClassifier) {
         DefaultArtifact aether = SbomUtils.toAetherArtifact(
                 "org.example", "foo", "1.0", mavenType, null);
-        ArtifactCoords coords = ArtifactCoords.of(aether);
+        ArtifactCoords coords = MavenArtifactCoords.of(aether);
         assertEquals(mavenType, coords.type());
         assertNull(coords.classifier());
     }

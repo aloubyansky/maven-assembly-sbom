@@ -50,9 +50,9 @@ class EdgeCollectorSelectorFactoryTest {
         boolean result = childSelector.selectDependency(dep);
 
         assertTrue(result);
-        ArtifactCoords parentId = ArtifactCoords.of(parentArtifact);
+        ArtifactCoords parentId = MavenArtifactCoords.of(parentArtifact);
         assertTrue(edges.containsKey(parentId), "edge map should contain parent");
-        assertTrue(edges.get(parentId).contains(ArtifactCoords.of(childArtifact)),
+        assertTrue(edges.get(parentId).contains(MavenArtifactCoords.of(childArtifact)),
                 "parent's children should contain child");
     }
 
