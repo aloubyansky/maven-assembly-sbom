@@ -265,6 +265,32 @@ class MavenLicenseResolverTest {
     }
 
     /**
+     * Verifies that a dual-licensed artifact whose name maps to an SPDX
+     * expression (e.g. "CDDL + GPLv2 with classpath exception") is
+     * represented as a {@link LicenseChoice#getExpression() expression}
+     * rather than being stuffed into a {@link org.cyclonedx.model.License#getId() license id}.
+     */
+    @Test
+    void resolveSpdxExpressionNotStuffedIntoLicenseId() {
+        Model model = new Model();
+        License license = new License();
+        license.setName("CDDL + GPLv2 with classpath exception");
+        model.addLicense(license);
+
+        when(effectiveModelResolver.resolveEffectiveModel(GROUP_ID, ARTIFACT_ID, VERSION))
+                .thenReturn(model);
+
+        MavenLicenseResolver resolver = new MavenLicenseResolver(effectiveModelResolver, false);
+        LicenseChoice result = resolver.resolveLicenses(GROUP_ID, ARTIFACT_ID, VERSION);
+
+        assertNotNull(result, "LicenseChoice should not be null");
+        assertNotNull(result.getExpression(),
+                "should be represented as an SPDX expression, not a license id");
+        assertEquals("(CDDL-1.0 OR GPL-2.0-with-classpath-exception)",
+                result.getExpression().getValue());
+    }
+
+    /**
      * Verifies that when the {@link EffectiveModelResolver} returns
      * {@code null} (i.e., the POM could not be resolved) and
      * {@code failOnMissingLicense} is {@code false}, the resolver
