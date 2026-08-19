@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
+import org.cyclonedx.Version;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
 import org.junit.jupiter.api.Test;
@@ -18,17 +19,18 @@ class BomWriterTest {
     @Test
     void writeJsonProducesValidCycloneDx() throws Exception {
         Path output = tempDir.resolve("test.cdx.json");
-        BomWriter.writeJson(createMinimalBom(), output, true);
+        Version defaultVersion = SbomGenerator.parseSchemaVersion(null);
+        BomWriter.writeJson(createMinimalBom(), output, true, defaultVersion);
 
         String content = Files.readString(output);
         assertTrue(content.contains("\"bomFormat\" : \"CycloneDX\""));
-        assertTrue(content.contains("\"specVersion\" : \"1.6\""));
+        assertTrue(content.contains("\"specVersion\" : \"" + defaultVersion.getVersionString() + "\""));
     }
 
     @Test
     void writeXmlProducesValidCycloneDx() throws Exception {
         Path output = tempDir.resolve("test.cdx.xml");
-        BomWriter.writeXml(createMinimalBom(), output);
+        BomWriter.writeXml(createMinimalBom(), output, SbomGenerator.parseSchemaVersion(null));
 
         String content = Files.readString(output);
         assertTrue(content.contains("<bom"));
@@ -46,7 +48,7 @@ class BomWriterTest {
         bom.addComponent(comp);
 
         Path output = tempDir.resolve("test.cdx.json");
-        BomWriter.writeJson(bom, output, true);
+        BomWriter.writeJson(bom, output, true, SbomGenerator.parseSchemaVersion(null));
 
         String content = Files.readString(output);
         assertTrue(content.contains("test-lib"));
@@ -63,7 +65,7 @@ class BomWriterTest {
         bom.addComponent(comp);
 
         Path output = tempDir.resolve("test.cdx.xml");
-        BomWriter.writeXml(bom, output);
+        BomWriter.writeXml(bom, output, SbomGenerator.parseSchemaVersion(null));
 
         String content = Files.readString(output);
         assertTrue(content.contains("test-lib"));

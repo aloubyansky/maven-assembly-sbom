@@ -11,6 +11,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+import org.cyclonedx.Version;
+import org.cyclonedx.generators.BomGeneratorFactory;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Dependency;
@@ -63,6 +65,7 @@ public class BomBuilder {
     private final Date timestamp;
     private final Hash.Algorithm hashAlgorithm;
     private final String normalizedAlg;
+    private final Version schemaVersion;
 
     private final List<Component> components = new ArrayList<>();
     private final Map<ArtifactCoords, String> bomRefById = new HashMap<>();
@@ -83,33 +86,35 @@ public class BomBuilder {
 
     /**
      * Creates a builder for the given project coordinates, using the current
-     * time as the BOM timestamp and SHA-256 as the hash algorithm.
+     * time as the BOM timestamp, SHA-256 as the hash algorithm, and the latest
+     * CycloneDX schema version supported by the integrated library.
      *
      * @param projectGroupId the project's Maven groupId
      * @param projectArtifactId the project's Maven artifactId
      * @param projectVersion the project's version
-     * @param assemblyId the assembly descriptor id (used in the serial number seed)
+     * @param assemblyId the assembly descriptor id (not used directly by the builder)
      */
     public BomBuilder(String projectGroupId, String projectArtifactId,
             String projectVersion, String assemblyId) {
         this(projectGroupId, projectArtifactId, projectVersion, assemblyId, null,
-                Hash.Algorithm.SHA_256);
+                Hash.Algorithm.SHA_256, SbomGenerator.parseSchemaVersion(null));
     }
 
     /**
      * Creates a builder for the given project coordinates, explicit timestamp,
-     * and hash algorithm.
+     * hash algorithm, and CycloneDX schema version.
      *
      * @param projectGroupId the project's Maven groupId
      * @param projectArtifactId the project's Maven artifactId
      * @param projectVersion the project's version
-     * @param assemblyId the assembly descriptor id (used in the serial number seed)
+     * @param assemblyId the assembly descriptor id (not used directly by the builder)
      * @param timestamp the BOM metadata timestamp, or {@code null} to use the current time
      * @param hashAlgorithm the hash algorithm to use for component hashes
+     * @param schemaVersion the CycloneDX schema version to use for serialization
      */
     public BomBuilder(String projectGroupId, String projectArtifactId,
             String projectVersion, String assemblyId, Date timestamp,
-            Hash.Algorithm hashAlgorithm) {
+            Hash.Algorithm hashAlgorithm, Version schemaVersion) {
         this.projectGroupId = projectGroupId;
         this.projectArtifactId = projectArtifactId;
         this.projectVersion = projectVersion;
@@ -117,6 +122,7 @@ public class BomBuilder {
         this.timestamp = timestamp;
         this.hashAlgorithm = hashAlgorithm;
         this.normalizedAlg = SbomUtils.normalizeAlgorithm(hashAlgorithm.getSpec());
+        this.schemaVersion = schemaVersion;
     }
 
     /**
@@ -336,7 +342,6 @@ public class BomBuilder {
      */
     public Bom build() {
         Bom bom = new Bom();
-        bom.setSerialNumber(generateSerialNumber());
 
         attachNestedComponents();
 
@@ -344,6 +349,8 @@ public class BomBuilder {
         bom.setMetadata(createMetadata(mainComponent));
         bom.setComponents(buildSortedComponentList());
         buildDependencyTree(bom, mainComponent.getBomRef());
+
+        bom.setSerialNumber(generateSerialNumber(bom));
 
         return bom;
     }
@@ -377,23 +384,36 @@ public class BomBuilder {
     }
 
     /**
-     * Generates a deterministic UUID-based serial number from the project
-     * coordinates and assembly id.
+     * Generates a serial number for the BOM in {@code urn:uuid:} format.
+     *
+     * <p>
+     * The UUID is derived from the BOM serialized as compact JSON, making
+     * the serial number a pure function of the BOM content. This avoids
+     * relying on {@link Bom#hashCode()}, which includes JVM-dependent
+     * identity hash codes of enum constants and is therefore
+     * non-deterministic across builds.
+     * </p>
+     *
+     * <p>
+     * Must be called after the BOM is fully assembled and before the
+     * serial number itself is set, so that the serialized form does not
+     * yet contain one.
+     * </p>
+     *
+     * @param bom the fully assembled BOM (with serial number still {@code null})
+     * @return a {@code urn:uuid:} serial number string
      */
-    private String generateSerialNumber() {
-        StringBuilder seed = new StringBuilder();
-        seed.append(projectGroupId).append(':').append(projectArtifactId)
-                .append(':').append(projectVersion);
-        if (assemblyId != null) {
-            seed.append(':').append(assemblyId);
+    private String generateSerialNumber(Bom bom) {
+        final String json;
+        try {
+            json = BomGeneratorFactory.createJson(schemaVersion, bom)
+                    .toJsonString(false);
+        } catch (Exception e) {
+            throw new RuntimeException(
+                    "Failed to serialize the SBOM to compute its serial number", e);
         }
-        if (archiveType != null) {
-            seed.append(':').append(archiveType);
-        }
-        if (classifier != null) {
-            seed.append(':').append(classifier);
-        }
-        return "urn:uuid:" + UUID.nameUUIDFromBytes(seed.toString().getBytes(StandardCharsets.UTF_8));
+        return "urn:uuid:" + UUID.nameUUIDFromBytes(
+                json.getBytes(StandardCharsets.UTF_8));
     }
 
     /**

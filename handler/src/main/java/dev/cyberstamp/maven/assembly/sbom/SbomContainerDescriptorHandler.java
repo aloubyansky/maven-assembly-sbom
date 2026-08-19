@@ -28,6 +28,7 @@ import org.codehaus.plexus.archiver.ArchiverException;
 import org.codehaus.plexus.archiver.ResourceIterator;
 import org.codehaus.plexus.archiver.UnArchiver;
 import org.codehaus.plexus.components.io.fileselectors.FileInfo;
+import org.cyclonedx.Version;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Hash;
 import org.eclipse.aether.RepositorySystem;
@@ -70,6 +71,11 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     private String outputPath = "bom.cdx.json";
     private String outputMode = "embedded";
     private String hashAlgorithm = "SHA-256";
+    /**
+     * CycloneDX schema version string configured by the user (e.g. {@code "1.6"}).
+     * {@code null} means use the latest version supported by the integrated library.
+     */
+    private String schemaVersion;
     private boolean prettyPrint;
     private boolean failOnMissingLicense;
     private boolean failOnDuplicateHash = true;
@@ -86,6 +92,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     // not thread-safe — safe here because finalizeArchiveCreation is single-threaded
     private MessageDigest messageDigest;
     private Hash.Algorithm bomHashAlgorithm;
+    private Version resolvedSchemaVersion;
     private String outputArchivePath;
 
     /**
@@ -139,7 +146,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                     project, session, repoSystem, effectiveModelResolver,
                     messageDigest, bomHashAlgorithm,
                     failOnDuplicateHash, failOnMissingLicense, embeddedSboms,
-                    librariesOnly);
+                    librariesOnly, schemaVersion);
             generator.setProduct(product);
             Bom bom = generator.generate(entries, baseDirPrefix, externalBomList,
                     assemblyId, classifier, detectArchiveType(archiver));
@@ -192,6 +199,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                     "Unsupported embeddedSboms: " + embeddedSboms
                             + ". Supported values: merge, link, ignore");
         }
+        resolvedSchemaVersion = SbomGenerator.parseSchemaVersion(schemaVersion);
         AssemblyConfig assemblyConfig = resolveAssemblyConfig(archiver);
         includeBaseDir = assemblyConfig.assembly == null
                 || assemblyConfig.assembly.isIncludeBaseDirectory();
@@ -765,7 +773,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
      */
     private void writeBom(Bom bom, Path output)
             throws IOException, org.cyclonedx.exception.GeneratorException {
-        BomWriter.write(bom, output, format, prettyPrint);
+        BomWriter.write(bom, output, format, prettyPrint, resolvedSchemaVersion);
     }
 
     /**
@@ -889,6 +897,27 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     @SuppressWarnings("unused")
     public void setHashAlgorithm(String hashAlgorithm) {
         this.hashAlgorithm = hashAlgorithm;
+    }
+
+    /**
+     * Sets the CycloneDX schema version to use for SBOM output and
+     * serial-number computation.
+     *
+     * <p>
+     * Accepts the version number as a string, e.g. {@code "1.5"} or
+     * {@code "1.6"}. When not set (or set to {@code null}), the latest
+     * version supported by the integrated CycloneDX Java library is used
+     * automatically.
+     * </p>
+     *
+     * @param schemaVersion the CycloneDX schema version string, or {@code null}
+     *        to use the latest supported version
+     * @throws IllegalArgumentException if the value does not match any known
+     *         CycloneDX schema version
+     */
+    @SuppressWarnings("unused")
+    public void setSchemaVersion(String schemaVersion) {
+        this.schemaVersion = schemaVersion;
     }
 
     /**
