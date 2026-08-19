@@ -15,6 +15,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.apache.maven.execution.MavenSession;
 import org.apache.maven.model.Model;
 import org.apache.maven.project.MavenProject;
+import org.cyclonedx.Version;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Dependency;
@@ -54,6 +55,7 @@ public class SbomGenerator {
     private final boolean failOnMissingLicense;
     private final String embeddedSboms;
     private final boolean librariesOnly;
+    private final Version schemaVersion;
 
     private ProductInfo product;
     private MavenLicenseResolver licenseResolver;
@@ -64,7 +66,7 @@ public class SbomGenerator {
             EffectiveModelResolver effectiveModelResolver,
             MessageDigest messageDigest, Hash.Algorithm bomHashAlgorithm,
             boolean failOnDuplicateHash, boolean failOnMissingLicense,
-            String embeddedSboms, boolean librariesOnly) {
+            String embeddedSboms, boolean librariesOnly, String schemaVersion) {
         this.project = project;
         this.session = session;
         this.repoSystem = repoSystem;
@@ -75,6 +77,55 @@ public class SbomGenerator {
         this.failOnMissingLicense = failOnMissingLicense;
         this.embeddedSboms = embeddedSboms;
         this.librariesOnly = librariesOnly;
+        this.schemaVersion = parseSchemaVersion(schemaVersion);
+    }
+
+    /**
+     * Returns the resolved CycloneDX schema version used for serialization
+     * and serial-number computation.
+     */
+    Version getSchemaVersion() {
+        return schemaVersion;
+    }
+
+    /**
+     * Parses a user-supplied schema version string (e.g. {@code "1.6"}) to the
+     * corresponding {@link Version} enum constant.
+     *
+     * <p>
+     * When {@code value} is {@code null} or blank, the latest version supported
+     * by the integrated CycloneDX Java library is returned.
+     * </p>
+     *
+     * @param value the version string, or {@code null} for the default
+     * @return the resolved {@link Version}
+     * @throws IllegalArgumentException if the string is non-null and does not
+     *         match any known CycloneDX schema version
+     */
+    static Version parseSchemaVersion(String value) {
+        Version[] versions = Version.values();
+        if (value == null || value.isBlank()) {
+            return versions[versions.length - 1];
+        }
+        for (Version v : versions) {
+            if (v.getVersionString().equals(value.trim())) {
+                return v;
+            }
+        }
+        throw new IllegalArgumentException(
+                "Unsupported CycloneDX schema version: '" + value
+                        + "'. Supported values: " + supportedVersionStrings());
+    }
+
+    private static String supportedVersionStrings() {
+        StringBuilder sb = new StringBuilder();
+        for (Version v : Version.values()) {
+            if (sb.length() > 0) {
+                sb.append(", ");
+            }
+            sb.append(v.getVersionString());
+        }
+        return sb.toString();
     }
 
     /**
@@ -111,7 +162,8 @@ public class SbomGenerator {
         BomBuilder builder = new BomBuilder(
                 project.getGroupId(), project.getArtifactId(),
                 project.getVersion(), assemblyId,
-                SbomUtils.parseBuildTimestamp(getTimestamp()), bomHashAlgorithm);
+                SbomUtils.parseBuildTimestamp(getTimestamp()), bomHashAlgorithm,
+                schemaVersion);
         builder.setProjectLicenses(licenseResolver.resolveLicenses(
                 project.getGroupId(), project.getArtifactId(),
                 project.getVersion()));

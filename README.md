@@ -158,6 +158,7 @@ Options are set inside the `<containerDescriptorHandler>` block in the assembly 
 | `externalSboms` | _(none)_ | Comma-separated list of file paths to external CycloneDX SBOMs to merge into the distribution SBOM. Relative paths are resolved against the project base directory. External SBOM component hashes also participate in archive entry matching |
 | `librariesOnly` | `false` | When `true`, generic file components are removed from the generated SBOM, keeping only library components (Maven, npm, etc.). Filtering is applied after embedded and external SBOMs have been merged, so files recognized as libraries by those SBOMs are retained |
 | `attach` | `false` | When `true`, the generated SBOM is attached to the Maven project as an artifact. The attached artifact has the same groupId, artifactId, classifier, and version as the distribution archive but a different type (`cdx.json` or `cdx.xml`). Requires `outputMode` to be `external` or `all`. If the Maven Assembly Plugin's own `attach` is `false`, the SBOM is not attached either |
+| `schemaVersion` | _(latest)_ | CycloneDX schema version to use for SBOM output and serial-number computation, e.g. `1.5` or `1.6`. Defaults to the latest version supported by the integrated CycloneDX Java library |
 | `product` | _(none)_ | User-configurable metadata for the main BOM component. See [Product](#product) below |
 
 The generator reads `includeBaseDirectory` from the assembly descriptor. When it is `true`, the base directory prefix is stripped from file paths in the BOM.
@@ -260,6 +261,7 @@ Scans an exploded directory (e.g., an exploded WAR produced by `maven-war-plugin
 | `failOnDuplicateHash` | `true` | Fail the build on duplicate artifact hashes |
 | `librariesOnly` | `false` | Exclude generic file components from the output |
 | `attach` | `false` | Attach the generated SBOM to the Maven project as an artifact with type `cdx.json` or `cdx.xml` and classifier `cyclonedx` |
+| `schemaVersion` | _(latest)_ | CycloneDX schema version to use for SBOM output and serial-number computation, e.g. `1.5` or `1.6`. Defaults to the latest version supported by the integrated CycloneDX Java library |
 | `product` | _(none)_ | User-configurable metadata for the main BOM component (CPE, description, supplier, manufacturer, publisher, copyright). See [Product](#product) |
 
 ### `merge` Goal
@@ -297,6 +299,7 @@ Combines multiple CycloneDX SBOMs into a single BOM. This is useful when a proje
 | `prettyPrint` | `true` | Whether to indent the JSON output |
 | `nested` | `false` | When `false`, external components are added as top-level components (flat merge). When `true`, they are nested as sub-components of the parent component |
 | `parentBomRef` | _(auto-detected)_ | Only used when `nested` is `true`. The `bom-ref` of the component to nest external components under. Defaults to the base BOM's `metadata.component.bomRef` |
+| `schemaVersion` | _(latest)_ | CycloneDX schema version to use for the merged SBOM output, e.g. `1.5` or `1.6`. Defaults to the latest version supported by the integrated CycloneDX Java library |
 
 By default, external SBOM components are added as top-level components alongside the base BOM's components (flat merge). This is appropriate when the external components are peers of the base components (e.g., npm dependencies alongside Maven dependencies in a WAR). Set `nested` to `true` to nest them as sub-components of the parent component instead, which is appropriate when the external SBOM describes contents _inside_ a specific artifact. Dependency entries from external SBOMs are always imported into the merged BOM's dependency section.
 
@@ -406,8 +409,8 @@ Example configuration:
 
 The generator produces deterministic output for reproducible builds:
 
-- **Serial number** — a UUID derived from the project's `groupId:artifactId:version:assemblyId`, not random.
-- **Timestamp** — uses `project.build.outputTimestamp` when set (the standard Maven [reproducible builds](https://maven.apache.org/guides/mini/guide-reproducible-builds.html) property), otherwise falls back to the current time.
+- **Serial number** — a UUID derived from the serialized BOM content (compact JSON), making it a pure function of what the SBOM describes. Two builds with identical content produce the same serial number; any change to components, dependencies, properties, or metadata produces a different one.
+- **Timestamp** — uses `project.build.outputTimestamp` when set (the standard Maven [reproducible builds](https://maven.apache.org/guides/mini/guide-reproducible-builds.html) property), otherwise falls back to the current time. Since the timestamp is part of the serialized content, setting `project.build.outputTimestamp` is required for fully reproducible serial numbers.
 - **Ordering** — components and dependencies are sorted alphabetically, so identical inputs produce identical output regardless of filesystem or iteration order.
 
 ### CycloneDX Component Types

@@ -787,7 +787,7 @@ class SbomContainerDescriptorHandlerTest {
         externalBom.addComponent(extComp);
 
         Path bomFile = tempDir.resolve("npm-sbom.cdx.json");
-        BomWriter.writeJson(externalBom, bomFile, true);
+        BomWriter.writeJson(externalBom, bomFile, true, SbomGenerator.parseSchemaVersion(null));
         handler.setExternalSboms(bomFile.toString());
 
         ZipArchiver archiver = buildArchiver(
@@ -888,7 +888,7 @@ class SbomContainerDescriptorHandlerTest {
         externalBom.addComponent(extComp);
 
         Path bomFile = tempDir.resolve("ext.cdx.json");
-        BomWriter.writeJson(externalBom, bomFile, true);
+        BomWriter.writeJson(externalBom, bomFile, true, SbomGenerator.parseSchemaVersion(null));
         handler.setExternalSboms(bomFile.toString());
 
         ZipArchiver archiver = buildArchiver("base/conf/other.txt", otherFile);
@@ -929,7 +929,7 @@ class SbomContainerDescriptorHandlerTest {
         externalBom.addComponent(react);
 
         Path bomFile = tempDir.resolve("npm.cdx.json");
-        BomWriter.writeJson(externalBom, bomFile, true);
+        BomWriter.writeJson(externalBom, bomFile, true, SbomGenerator.parseSchemaVersion(null));
         handler.setExternalSboms(bomFile.toString());
 
         ZipArchiver archiver = buildArchiver("base/static/js/main.js", jsFile);
@@ -1479,7 +1479,7 @@ class SbomContainerDescriptorHandlerTest {
 
         // Create the WAR file with the embedded SBOM
         Path bomJson = tempDir.resolve("embedded-bom.cdx.json");
-        BomWriter.writeJson(embeddedBom, bomJson, false);
+        BomWriter.writeJson(embeddedBom, bomJson, false, SbomGenerator.parseSchemaVersion(null));
         byte[] bomBytes = Files.readAllBytes(bomJson);
 
         Path warFile = tempDir.resolve("overlay-1.0.war");
@@ -1631,7 +1631,7 @@ class SbomContainerDescriptorHandlerTest {
         embeddedBom.addComponent(upstreamWar);
 
         Path bomJson = tempDir.resolve("multi-level-embedded.cdx.json");
-        BomWriter.writeJson(embeddedBom, bomJson, false);
+        BomWriter.writeJson(embeddedBom, bomJson, false, SbomGenerator.parseSchemaVersion(null));
         byte[] bomBytes = Files.readAllBytes(bomJson);
 
         Path warFile = tempDir.resolve("console-1.0.war");
@@ -1818,7 +1818,7 @@ class SbomContainerDescriptorHandlerTest {
         embeddedBom.addComponent(comp);
 
         Path bomJson = tempDir.resolve(jarName + ".tmp.cdx.json");
-        BomWriter.writeJson(embeddedBom, bomJson, false);
+        BomWriter.writeJson(embeddedBom, bomJson, false, SbomGenerator.parseSchemaVersion(null));
         byte[] bomBytes = Files.readAllBytes(bomJson);
 
         Path jarPath = tempDir.resolve(jarName);

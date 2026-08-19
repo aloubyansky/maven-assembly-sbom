@@ -127,6 +127,20 @@ public class GenerateSbomMojo extends AbstractMojo {
     private boolean attach;
 
     /**
+     * CycloneDX schema version to use for SBOM output and serial-number
+     * computation, e.g. {@code "1.5"} or {@code "1.6"}.
+     *
+     * <p>
+     * When omitted, the latest version supported by the integrated
+     * CycloneDX Java library is used automatically. Set this explicitly
+     * only when you need to produce output compatible with a tool that
+     * does not yet consume the latest schema version.
+     * </p>
+     */
+    @Parameter
+    private String schemaVersion;
+
+    /**
      * User-configurable metadata (CPE, description, supplier,
      * manufacturer, publisher, copyright) for the main BOM component.
      */
@@ -189,7 +203,7 @@ public class GenerateSbomMojo extends AbstractMojo {
                 project, session, repoSystem, effectiveModelResolver,
                 messageDigest, bomHashAlgorithm,
                 failOnDuplicateHash, failOnMissingLicense, embeddedSboms,
-                librariesOnly);
+                librariesOnly, schemaVersion);
         generator.setProduct(product);
         Bom bom = generator.generate(entries, null, externalBomList,
                 null, null, project.getPackaging());
@@ -198,7 +212,8 @@ public class GenerateSbomMojo extends AbstractMojo {
             outputFile.getParentFile().mkdirs();
         }
         try {
-            BomWriter.write(bom, outputFile.toPath(), format, prettyPrint);
+            BomWriter.write(bom, outputFile.toPath(), format, prettyPrint,
+                    generator.getSchemaVersion());
         } catch (Exception e) {
             throw new MojoExecutionException(
                     "Failed to write SBOM to " + outputFile, e);

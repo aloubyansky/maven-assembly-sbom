@@ -90,6 +90,20 @@ public class MergeSbomMojo extends AbstractMojo {
     @Parameter
     private String parentBomRef;
 
+    /**
+     * CycloneDX schema version to use for SBOM output, e.g. {@code "1.5"} or
+     * {@code "1.6"}.
+     *
+     * <p>
+     * When omitted, the latest version supported by the integrated
+     * CycloneDX Java library is used automatically. Set this explicitly
+     * only when you need to produce output compatible with a tool that
+     * does not yet consume the latest schema version.
+     * </p>
+     */
+    @Parameter
+    private String schemaVersion;
+
     @Override
     public void execute() throws MojoExecutionException {
         if (!baseSbom.isFile()) {
@@ -136,7 +150,8 @@ public class MergeSbomMojo extends AbstractMojo {
             outputFile.getParentFile().mkdirs();
         }
         try {
-            BomWriter.write(bom, outputFile.toPath(), format, prettyPrint);
+            BomWriter.write(bom, outputFile.toPath(), format, prettyPrint,
+                    SbomGenerator.parseSchemaVersion(schemaVersion));
         } catch (java.io.IOException | GeneratorException e) {
             throw new MojoExecutionException("Failed to write merged BOM to " + outputFile, e);
         }

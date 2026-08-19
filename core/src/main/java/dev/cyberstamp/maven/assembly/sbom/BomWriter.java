@@ -16,8 +16,7 @@ import org.cyclonedx.model.Bom;
  * Serializes a CycloneDX {@link Bom} to disk in JSON or XML format.
  *
  * <p>
- * All output uses the CycloneDX 1.6 specification version. The class is
- * a stateless utility and cannot be instantiated.
+ * The class is a stateless utility and cannot be instantiated.
  * </p>
  */
 public final class BomWriter {
@@ -26,32 +25,34 @@ public final class BomWriter {
     }
 
     /**
-     * Writes the given BOM as a CycloneDX 1.6 JSON document.
+     * Writes the given BOM as a CycloneDX JSON document.
      *
      * @param bom the BOM model to serialize
      * @param output the file path to write to (created or overwritten)
      * @param prettyPrint whether to indent the output for readability
+     * @param schemaVersion the CycloneDX schema version to use
      * @throws IOException if the file cannot be written
      * @throws GeneratorException if the BOM model cannot be converted to JSON
      */
-    public static void writeJson(Bom bom, Path output, boolean prettyPrint)
+    public static void writeJson(Bom bom, Path output, boolean prettyPrint, Version schemaVersion)
             throws IOException, GeneratorException {
-        BomJsonGenerator generator = BomGeneratorFactory.createJson(Version.VERSION_16, bom);
+        BomJsonGenerator generator = BomGeneratorFactory.createJson(schemaVersion, bom);
         Files.writeString(output, generator.toJsonString(prettyPrint), StandardCharsets.UTF_8);
     }
 
     /**
-     * Writes the given BOM as a CycloneDX 1.6 XML document.
+     * Writes the given BOM as a CycloneDX XML document.
      * The output is always indented.
      *
      * @param bom the BOM model to serialize
      * @param output the file path to write to (created or overwritten)
+     * @param schemaVersion the CycloneDX schema version to use
      * @throws IOException if the file cannot be written
      * @throws GeneratorException if the BOM model cannot be converted to XML
      */
-    public static void writeXml(Bom bom, Path output)
+    public static void writeXml(Bom bom, Path output, Version schemaVersion)
             throws IOException, GeneratorException {
-        BomXmlGenerator generator = BomGeneratorFactory.createXml(Version.VERSION_16, bom);
+        BomXmlGenerator generator = BomGeneratorFactory.createXml(schemaVersion, bom);
         Files.writeString(output, generator.toXmlString(), StandardCharsets.UTF_8);
     }
 
@@ -62,15 +63,16 @@ public final class BomWriter {
      * @param output the file path to write to (created or overwritten)
      * @param format {@code "json"} or {@code "xml"} (case-insensitive)
      * @param prettyPrint whether to indent JSON output (ignored for XML)
+     * @param schemaVersion the CycloneDX schema version to use
      * @throws IOException if the file cannot be written
      * @throws GeneratorException if the BOM model cannot be serialized
      */
-    public static void write(Bom bom, Path output, String format, boolean prettyPrint)
-            throws IOException, GeneratorException {
+    public static void write(Bom bom, Path output, String format, boolean prettyPrint,
+            Version schemaVersion) throws IOException, GeneratorException {
         if ("xml".equalsIgnoreCase(format)) {
-            writeXml(bom, output);
+            writeXml(bom, output, schemaVersion);
         } else {
-            writeJson(bom, output, prettyPrint);
+            writeJson(bom, output, prettyPrint, schemaVersion);
         }
     }
 }
