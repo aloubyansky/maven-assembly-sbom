@@ -1,7 +1,6 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 import org.apache.maven.model.Model;
@@ -20,12 +19,10 @@ import org.slf4j.LoggerFactory;
  * The resolution strategy for each Maven license entry is:
  * </p>
  * <ol>
- * <li>Try resolving the license
- * {@linkplain org.apache.maven.model.License#getUrl() URL}
- * via the CycloneDX {@link LicenseResolver}, since URLs point to a
- * specific license text and are more reliable than names</li>
- * <li>If the URL does not resolve, try the license
- * {@linkplain org.apache.maven.model.License#getName() name}</li>
+ * <li>Try resolving the license URL via the CycloneDX
+ * {@link LicenseResolver}, since URLs point to a specific license text
+ * and are more reliable than names</li>
+ * <li>If the URL does not resolve, try the license name</li>
  * <li>If neither resolves to an SPDX identifier, create a raw
  * {@link License} preserving the original name and URL</li>
  * </ol>
@@ -97,45 +94,31 @@ class MavenLicenseResolver {
                     "effective model could not be resolved");
         }
 
-        List<org.apache.maven.model.License> mavenLicenses = model.getLicenses();
+        var mavenLicenses = model.getLicenses();
         if (mavenLicenses == null || mavenLicenses.isEmpty()) {
             return handleMissingLicenses(groupId, artifactId, version,
                     "no <licenses> declared in the effective POM");
         }
 
-        return mapLicenses(mavenLicenses);
-    }
-
-    /**
-     * Maps a list of Maven license declarations to a CycloneDX
-     * {@link LicenseChoice} containing one {@link License} per entry.
-     *
-     * <p>
-     * Each Maven license is resolved to an SPDX identifier via the
-     * CycloneDX {@link LicenseResolver}. If SPDX resolution fails,
-     * a raw license with the original name and URL is created.
-     * </p>
-     *
-     * @param mavenLicenses the license entries from the effective POM
-     * @return the combined license choice
-     */
-    private LicenseChoice mapLicenses(List<org.apache.maven.model.License> mavenLicenses) {
         LicenseChoice result = new LicenseChoice();
-        for (org.apache.maven.model.License mavenLicense : mavenLicenses) {
-            License resolved = resolveToSpdx(mavenLicense);
+        for (var mavenLicense : mavenLicenses) {
+            LicenseChoice resolved = resolveToSpdx(mavenLicense.getUrl(), mavenLicense.getName());
             if (resolved != null) {
-                result.addLicense(resolved);
+                if (resolved.getExpression() != null) {
+                    result.setExpression(resolved.getExpression());
+                } else if (resolved.getLicenses() != null && !resolved.getLicenses().isEmpty()) {
+                    result.addLicense(resolved.getLicenses().get(0));
+                }
             } else {
-                result.addLicense(createRawLicense(mavenLicense));
+                result.addLicense(createRawLicense(mavenLicense.getName(), mavenLicense.getUrl()));
             }
         }
         return result;
     }
 
     /**
-     * Attempts to resolve a single Maven license to a CycloneDX
-     * {@link License} with an SPDX identifier, trying the URL
-     * first and falling back to the name.
+     * Attempts to resolve a single Maven license to an SPDX identifier
+     * or expression, trying the URL first and falling back to the name.
      *
      * <p>
      * URLs are preferred because they point to a specific license
@@ -143,27 +126,30 @@ class MavenLicenseResolver {
      * "The BSD License" could mean BSD-3-Clause or BSD-4-Clause).
      * </p>
      *
-     * @param mavenLicense the Maven license entry
-     * @return a license with an SPDX {@code id} set, or {@code null}
-     *         if no SPDX match was found
+     * @param url the license URL, or {@code null}
+     * @param name the license name, or {@code null}
+     * @return a {@link LicenseChoice} containing either an SPDX license
+     *         or expression, or {@code null} if no SPDX match was found
      */
-    private License resolveToSpdx(org.apache.maven.model.License mavenLicense) {
-        License fromUrl = tryResolve(mavenLicense.getUrl());
+    private LicenseChoice resolveToSpdx(String url, String name) {
+        LicenseChoice fromUrl = tryResolve(url);
         if (fromUrl != null) {
             return fromUrl;
         }
-        return tryResolve(mavenLicense.getName());
+        return tryResolve(name);
     }
 
     /**
-     * Attempts to resolve the given string (a license name or URL) to a
-     * CycloneDX {@link License} with an SPDX identifier.
+     * Attempts to resolve the given string (a license name or URL) to
+     * an SPDX license or expression via the CycloneDX
+     * {@link LicenseResolver}.
      *
      * @param licenseString the string to resolve, or {@code null}
-     * @return the resolved license, or {@code null} if the string is
-     *         {@code null}, blank, or does not match any SPDX entry
+     * @return the resolved {@link LicenseChoice}, or {@code null} if
+     *         the string is {@code null}, blank, or does not match any
+     *         SPDX entry
      */
-    private License tryResolve(String licenseString) {
+    private LicenseChoice tryResolve(String licenseString) {
         if (licenseString == null || licenseString.isBlank()) {
             return null;
         }
@@ -171,54 +157,31 @@ class MavenLicenseResolver {
         if (choice == null) {
             return null;
         }
-        return extractSpdxLicense(choice);
-    }
-
-    /**
-     * Extracts a single {@link License} with an SPDX {@code id} from the
-     * resolved {@link LicenseChoice}.
-     *
-     * <p>
-     * The CycloneDX {@link LicenseResolver} may return either a license
-     * list (with the {@code id} field set) or an expression. This method
-     * handles both forms, preferring the license list. If the result is an
-     * expression, a license is created with the expression value as the
-     * {@code id}.
-     * </p>
-     *
-     * @param choice the resolved license choice
-     * @return a license with an SPDX id, or {@code null} if the choice
-     *         contains no usable license information
-     */
-    private License extractSpdxLicense(LicenseChoice choice) {
-        if (choice.getLicenses() != null && !choice.getLicenses().isEmpty()) {
-            License license = choice.getLicenses().get(0);
-            if (license.getId() != null) {
-                return license;
-            }
+        if (choice.getLicenses() != null && !choice.getLicenses().isEmpty()
+                && choice.getLicenses().get(0).getId() != null) {
+            return choice;
         }
         if (choice.getExpression() != null && choice.getExpression().getValue() != null) {
-            License license = new License();
-            license.setId(choice.getExpression().getValue());
-            return license;
+            return choice;
         }
         return null;
     }
 
     /**
-     * Creates a raw CycloneDX {@link License} from a Maven license entry
-     * when SPDX resolution fails, preserving the original name and URL.
+     * Creates a raw CycloneDX {@link License} when SPDX resolution fails,
+     * preserving the original name and URL.
      *
-     * @param mavenLicense the Maven license entry
+     * @param name the license name, or {@code null}
+     * @param url the license URL, or {@code null}
      * @return a license with name and/or URL set (no SPDX id)
      */
-    private License createRawLicense(org.apache.maven.model.License mavenLicense) {
+    private License createRawLicense(String name, String url) {
         License license = new License();
-        if (mavenLicense.getName() != null) {
-            license.setName(mavenLicense.getName().trim());
+        if (name != null) {
+            license.setName(name.trim());
         }
-        if (mavenLicense.getUrl() != null) {
-            license.setUrl(mavenLicense.getUrl().trim());
+        if (url != null) {
+            license.setUrl(url.trim());
         }
         return license;
     }
