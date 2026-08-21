@@ -122,7 +122,7 @@ interface ArchiveIndex {
      *        normalized via {@link SbomUtils#normalizeAlgorithm}
      * @return an unscoped {@link RootArchiveIndex}
      */
-    static ArchiveIndex of(List<ArchiveContent.FileEntry> entries,
+    static ArchiveIndex of(List<FileEntry> entries,
             String baseDirPrefix, String algorithmSpec) {
         Set<String> paths = new HashSet<>(entries.size());
         Map<String, List<String>> hashToPath = new HashMap<>(entries.size());

@@ -32,8 +32,9 @@ import java.util.Objects;
  * @param type the packaging type (e.g. "jar", "war", "test-jar"), or {@code null}
  * @param classifier the Maven classifier, or {@code null} if none
  */
-public record ArtifactCoords(String groupId, String artifactId, String version,
-        String type, String classifier) {
+public record ArtifactCoords(String groupId, String artifactId, String version, String type, String classifier)
+        implements
+            PackageRef {
 
     private static final String SEPARATOR = ":";
 
@@ -121,5 +122,35 @@ public record ArtifactCoords(String groupId, String artifactId, String version,
             sb.append(SEPARATOR).append(classifier);
         }
         return sb.toString();
+    }
+
+    /**
+     * Returns the canonical Maven Package URL for these coordinates.
+     *
+     * <p>
+     * Built on the shared {@link Purl} engine. The default {@code jar}
+     * type is omitted (spec-compliant, and matching this project's
+     * long-standing output); a {@code type} qualifier is emitted only for
+     * non-JAR packaging, and a {@code classifier} qualifier only when a
+     * classifier is present. Qualifiers are rendered in canonical
+     * (alphabetical) order.
+     * </p>
+     *
+     * @return the canonical purl; never {@code null}
+     */
+    @Override
+    public Purl toPurl() {
+        Purl.Builder builder = Purl.builder()
+                .setType("maven")
+                .setNamespace(groupId)
+                .setName(artifactId)
+                .setVersion(version);
+        if (!"jar".equals(type)) {
+            builder.addQualifier("type", type);
+        }
+        if (classifier != null) {
+            builder.addQualifier("classifier", classifier);
+        }
+        return builder.build();
     }
 }

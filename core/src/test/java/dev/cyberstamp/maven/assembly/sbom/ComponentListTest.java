@@ -266,6 +266,67 @@ class ComponentListTest {
         assertEquals(1, list.size());
     }
 
+    @Test
+    void canonicalPurlDedupNpmQualifierReorder() {
+        Bom bom = new Bom();
+        Component comp = createComp("foo", "ref-foo", "pkg:npm/foo@1.0.0?a=1&b=2");
+        bom.setComponents(new ArrayList<>(List.of(comp)));
+
+        ComponentList list = ComponentList.of(bom);
+
+        // Same purl with qualifiers in different order should resolve to same component
+        assertSame(comp, list.findByPurl("pkg:npm/foo@1.0.0?b=2&a=1"),
+                "npm purls with reordered qualifiers should dedup");
+        assertSame(comp, list.findByPurl("pkg:npm/foo@1.0.0?a=1&b=2"),
+                "original qualifier order should still work");
+    }
+
+    @Test
+    void canonicalPurlDedupMavenTypeJar() {
+        Bom bom = new Bom();
+        Component comp = createComp("lib", "pkg:maven/g/lib@1.0", "pkg:maven/g/lib@1.0");
+        bom.setComponents(new ArrayList<>(List.of(comp)));
+
+        ComponentList list = ComponentList.of(bom);
+
+        // Maven purl WITH type=jar should resolve to same component as without it
+        assertSame(comp, list.findByPurl("pkg:maven/g/lib@1.0?type=jar"),
+                "Maven purl with type=jar should dedup with one without it");
+        assertSame(comp, list.findByPurl("pkg:maven/g/lib@1.0"),
+                "original purl should still work");
+    }
+
+    @Test
+    void canonicalPurlFallbackForUnparseable() {
+        Bom bom = new Bom();
+        Component comp = createComp("notapurl", "not a purl", null);
+        bom.setComponents(new ArrayList<>(List.of(comp)));
+
+        ComponentList list = ComponentList.of(bom);
+
+        // Unparseable bom-ref should not throw, should fall back to raw lookup
+        assertSame(comp, list.findByBomRef("not a purl"),
+                "unparseable bom-ref should work with fallback");
+    }
+
+    @Test
+    void canonicalPurlIndexConsistency() {
+        Bom bom = new Bom();
+        bom.setComponents(new ArrayList<>());
+        ComponentList list = ComponentList.of(bom);
+
+        // Add component with reordered npm qualifiers
+        Component comp1 = createComp("foo", "ref-1", "pkg:npm/foo@1.0.0?z=3&a=1");
+        list.add(comp1);
+
+        // Try to add same component with qualifiers in different order
+        Component comp2 = createComp("foo", "ref-2", "pkg:npm/foo@1.0.0?a=1&z=3");
+
+        // Both resolve to same canonical key, so findByPurl should return the first one added
+        assertSame(comp1, list.findByPurl("pkg:npm/foo@1.0.0?a=1&z=3"),
+                "index should use canonical key for both orderings");
+    }
+
     private static Component createComp(String name, String bomRef, String purl) {
         Component comp = new Component();
         comp.setType(Component.Type.LIBRARY);

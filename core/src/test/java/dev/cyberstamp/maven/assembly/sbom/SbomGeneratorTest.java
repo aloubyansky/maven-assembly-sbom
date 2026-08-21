@@ -246,9 +246,9 @@ class SbomGeneratorTest {
         Bom sbom = new Bom();
         sbom.setComponents(new ArrayList<>(List.of(comp)));
         // Hash matches a file at lib/ (top-level), NOT under web/app.war/
-        List<ArchiveContent.FileEntry> entries = new ArrayList<>();
-        entries.add(new ArchiveContent.FileEntry("web/app.war/WEB-INF/lib/other.jar", null));
-        entries.add(new ArchiveContent.FileEntry("lib/caffeine-3.2.jar", hash));
+        List<FileEntry> entries = new ArrayList<>();
+        entries.add(new FileEntry("web/app.war/WEB-INF/lib/other.jar", null));
+        entries.add(new FileEntry("lib/caffeine-3.2.jar", hash));
         ArchiveIndex index = ArchiveIndex.of(entries, null, "sha256");
         Bom result = SbomGenerator.filterSbomByArchive(sbom, index,
                 "web/app.war/");
@@ -1204,10 +1204,10 @@ class SbomGeneratorTest {
 
     private static ArchiveIndex buildIndex(
             Map<String, List<String>> hashToPath) {
-        List<ArchiveContent.FileEntry> entries = new ArrayList<>();
+        List<FileEntry> entries = new ArrayList<>();
         for (var e : hashToPath.entrySet()) {
             for (String path : e.getValue()) {
-                entries.add(new ArchiveContent.FileEntry(path, e.getKey()));
+                entries.add(new FileEntry(path, e.getKey()));
             }
         }
         return ArchiveIndex.of(entries, null, "sha256");
@@ -1216,12 +1216,12 @@ class SbomGeneratorTest {
     private static Bom filterSbom(List<Component> components,
             Set<String> archivePaths, Set<String> archiveHashes,
             String normalizedAlg, String parentPathPrefix) {
-        List<ArchiveContent.FileEntry> entries = new ArrayList<>();
+        List<FileEntry> entries = new ArrayList<>();
         for (String path : archivePaths) {
-            entries.add(new ArchiveContent.FileEntry(path, null));
+            entries.add(new FileEntry(path, null));
         }
         for (String hash : archiveHashes) {
-            entries.add(new ArchiveContent.FileEntry(
+            entries.add(new FileEntry(
                     "__hash_shim_" + hash, hash));
         }
         ArchiveIndex index = ArchiveIndex.of(entries, null, normalizedAlg);

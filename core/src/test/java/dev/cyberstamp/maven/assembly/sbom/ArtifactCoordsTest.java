@@ -201,4 +201,41 @@ class ArtifactCoordsTest {
         assertEquals(mavenType, fromExtension.type());
         assertNull(fromExtension.classifier());
     }
+
+    @Test
+    void toPurlPlainJar() {
+        assertEquals("pkg:maven/org.example/foo@1.0",
+                ArtifactCoords.of("org.example", "foo", "1.0").toPurl().toString());
+    }
+
+    @Test
+    void toPurlOmitsDefaultJarTypeButKeepsClassifier() {
+        ArtifactCoords id = new ArtifactCoords("org.example", "foo", "1.0", "jar", "linux-x86_64");
+        assertEquals("pkg:maven/org.example/foo@1.0?classifier=linux-x86_64", id.toPurl().toString());
+    }
+
+    @Test
+    void toPurlWithNonJarType() {
+        ArtifactCoords id = new ArtifactCoords("org.example", "foo", "1.0", "war", null);
+        assertEquals("pkg:maven/org.example/foo@1.0?type=war", id.toPurl().toString());
+    }
+
+    @Test
+    void toPurlCanonicalQualifierOrder() {
+        // qualifiers are emitted alphabetically: classifier before type
+        ArtifactCoords id = new ArtifactCoords("org.example", "foo", "1.0", "war", "classes");
+        assertEquals("pkg:maven/org.example/foo@1.0?classifier=classes&type=war", id.toPurl().toString());
+    }
+
+    @Test
+    void toPurlEncodesReservedCharacters() {
+        assertEquals("pkg:maven/org.example%2Bx/foo@1.0",
+                ArtifactCoords.of("org.example+x", "foo", "1.0").toPurl().toString());
+    }
+
+    @Test
+    void toPurlIsPackageRef() {
+        PackageRef ref = ArtifactCoords.of("org.example", "foo", "1.0");
+        assertEquals("pkg:maven/org.example/foo@1.0", ref.toPurl().toString());
+    }
 }

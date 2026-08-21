@@ -170,12 +170,12 @@ class SbomPipelineTest {
         // Simulate archive contents — what actually exists in the distribution
         // caffeine is NOT in web/console.war/WEB-INF/lib/ (excluded from unpack)
         ArchiveIndex archiveIndex = ArchiveIndex.of(List.of(
-                new ArchiveContent.FileEntry("lib/caffeine-3.2.4.jar", "hash-caffeine"),
-                new ArchiveContent.FileEntry("lib/guava-33.6.jar", "hash-guava"),
-                new ArchiveContent.FileEntry("lib/jspecify-1.0.0.jar", "hash-jspecify"),
-                new ArchiveContent.FileEntry("web/console.war/WEB-INF/lib/jspecify-1.0.0.jar", "hash-jspecify"),
-                new ArchiveContent.FileEntry("web/console.war/WEB-INF/lib/error-prone-2.36.jar", "hash-errorprone"),
-                new ArchiveContent.FileEntry("web/console.war/hawtconfig.json", "hash-hawtconfig")),
+                new FileEntry("lib/caffeine-3.2.4.jar", "hash-caffeine"),
+                new FileEntry("lib/guava-33.6.jar", "hash-guava"),
+                new FileEntry("lib/jspecify-1.0.0.jar", "hash-jspecify"),
+                new FileEntry("web/console.war/WEB-INF/lib/jspecify-1.0.0.jar", "hash-jspecify"),
+                new FileEntry("web/console.war/WEB-INF/lib/error-prone-2.36.jar", "hash-errorprone"),
+                new FileEntry("web/console.war/hawtconfig.json", "hash-hawtconfig")),
                 null, "sha256");
 
         // Filter then merge
@@ -655,8 +655,8 @@ class SbomPipelineTest {
 
         // Filter external SBOM by archive contents (arjuna and common are NOT in archive)
         ArchiveIndex archiveIndex = ArchiveIndex.of(List.of(
-                new ArchiveContent.FileEntry("lib/narayana-jta-7.3.4.jar", "hash-njta"),
-                new ArchiveContent.FileEntry("lib/jboss-logging-3.6.3.jar", "hash-jlog")),
+                new FileEntry("lib/narayana-jta-7.3.4.jar", "hash-njta"),
+                new FileEntry("lib/jboss-logging-3.6.3.jar", "hash-jlog")),
                 null, "sha256");
 
         Bom filtered = SbomGenerator.filterSbomByArchive(
