@@ -1444,6 +1444,54 @@ class BomMergerTest {
         return bom;
     }
 
+    @Test
+    void canonicalPurlStripsMavenTypeJar() {
+        assertEquals("pkg:maven/g/a@1.0",
+                BomMerger.canonicalPurl("pkg:maven/g/a@1.0?type=jar"),
+                "type=jar should be stripped from Maven purl");
+        assertEquals("pkg:maven/g/a@1.0",
+                BomMerger.canonicalPurl("pkg:maven/g/a@1.0"),
+                "Maven purl without type=jar should be unchanged");
+    }
+
+    @Test
+    void canonicalPurlSortsNpmQualifiers() {
+        String reordered = BomMerger.canonicalPurl("pkg:npm/foo@1.0.0?z=3&a=1&m=2");
+        String sorted = BomMerger.canonicalPurl("pkg:npm/foo@1.0.0?a=1&m=2&z=3");
+        assertEquals(sorted, reordered,
+                "npm purls with different qualifier order should canonicalize to same string");
+        assertEquals("pkg:npm/foo@1.0.0?a=1&m=2&z=3", sorted,
+                "qualifiers should be sorted alphabetically");
+    }
+
+    @Test
+    void canonicalPurlLowercasesNpmName() {
+        assertEquals("pkg:npm/foo@1.0.0",
+                BomMerger.canonicalPurl("pkg:npm/Foo@1.0.0"),
+                "npm package names should be lowercased");
+    }
+
+    @Test
+    void canonicalPurlFallbackForUnparseable() {
+        assertEquals("not a purl", BomMerger.canonicalPurl("not a purl"),
+                "unparseable string should be returned as-is");
+        assertNull(BomMerger.canonicalPurl(null),
+                "null should be returned as null");
+    }
+
+    @Test
+    void canonicalPurlComposesNormalizeThenParse() {
+        // External SBOM Maven purl WITH type=jar
+        String external = "pkg:maven/g/a@1.0?type=jar";
+        String canonical = BomMerger.canonicalPurl(external);
+        assertEquals("pkg:maven/g/a@1.0", canonical,
+                "should strip type=jar THEN canonicalize");
+
+        // Verify idempotency: canonical input stays canonical
+        assertEquals(canonical, BomMerger.canonicalPurl(canonical),
+                "canonicalPurl should be idempotent");
+    }
+
     private static Component createLibrary(String group, String name, String version,
             String bomRef) {
         Component comp = new Component();

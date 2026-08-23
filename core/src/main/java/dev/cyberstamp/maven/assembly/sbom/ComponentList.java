@@ -60,14 +60,14 @@ final class ComponentList implements Iterable<Component> {
         if (purl == null) {
             return null;
         }
-        return purlIndex().get(BomMerger.normalizeMavenPurl(purl));
+        return purlIndex().get(BomMerger.canonicalPurl(purl));
     }
 
     Component findByBomRef(String bomRef) {
         if (bomRef == null) {
             return null;
         }
-        return bomRefIndex().get(BomMerger.normalizeMavenPurl(bomRef));
+        return bomRefIndex().get(BomMerger.canonicalPurl(bomRef));
     }
 
     boolean containsPurl(String purl) {
@@ -163,28 +163,28 @@ final class ComponentList implements Iterable<Component> {
     private void indexPurl(Component comp) {
         String purl = comp.getPurl();
         if (purl != null) {
-            purlIndex.put(BomMerger.normalizeMavenPurl(purl), comp);
+            purlIndex.put(BomMerger.canonicalPurl(purl), comp);
         }
     }
 
     private void indexBomRef(Component comp) {
         String ref = comp.getBomRef();
         if (ref != null) {
-            bomRefIndex.put(BomMerger.normalizeMavenPurl(ref), comp);
+            bomRefIndex.put(BomMerger.canonicalPurl(ref), comp);
         }
     }
 
     private void removePurl(Component comp) {
         String purl = comp.getPurl();
         if (purl != null) {
-            purlIndex.remove(BomMerger.normalizeMavenPurl(purl));
+            purlIndex.remove(BomMerger.canonicalPurl(purl));
         }
     }
 
     private void removeBomRef(Component comp) {
         String ref = comp.getBomRef();
         if (ref != null) {
-            bomRefIndex.remove(BomMerger.normalizeMavenPurl(ref));
+            bomRefIndex.remove(BomMerger.canonicalPurl(ref));
         }
     }
 

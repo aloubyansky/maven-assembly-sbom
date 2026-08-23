@@ -69,16 +69,18 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of(artifact));
 
         String hash = SbomUtils.computeHash(digest, jarFile);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("lib/lib-a-1.0.jar", hash));
+        List<FileEntry> entries = List.of(
+                new FileEntry("lib/lib-a-1.0.jar", hash));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertEquals(1, content.mavenEntries().size());
-        assertEquals(0, content.unmatchedFiles().size());
-        assertEquals("org.example", content.mavenEntries().get(0).artifactId().groupId());
-        assertEquals("lib/lib-a-1.0.jar", content.mavenEntries().get(0).archivePath());
+        List<PackageComponent> packages = extractPackageComponents(model);
+        List<FileComponent> files = extractFileComponents(model);
+        assertEquals(1, packages.size());
+        assertEquals(0, files.size());
+        assertEquals("org.example", ((ArtifactCoords) packages.get(0).ref()).groupId());
+        assertEquals("lib/lib-a-1.0.jar", packages.get(0).archivePath());
     }
 
     @Test
@@ -92,21 +94,27 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of(artifact));
 
         String hash = SbomUtils.computeHash(digest, shadedJar);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("lib/nimbus-jose-jwt-10.9.1.jar", hash));
+        List<FileEntry> entries = List.of(
+                new FileEntry("lib/nimbus-jose-jwt-10.9.1.jar", hash));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertEquals(1, content.mavenEntries().size());
-        assertEquals("nimbus-jose-jwt", content.mavenEntries().get(0).artifactId().artifactId());
-        var bundledEntry = content.nestedEntries().stream()
-                .filter(e -> "jcip-annotations".equals(e.artifactId().artifactId()))
+        List<PackageComponent> topLevel = extractPackageComponents(model);
+        assertEquals(1, topLevel.size());
+        assertEquals("nimbus-jose-jwt", ((ArtifactCoords) topLevel.get(0).ref()).artifactId());
+
+        // Find the bundled dep in nested components
+        var bundledEntry = extractNestedPackages(model).stream()
+                .filter(e -> "jcip-annotations".equals(((ArtifactCoords) e.ref()).artifactId()))
                 .findFirst().orElse(null);
         assertNotNull(bundledEntry,
                 "bundled dep should be detected in top-level shaded JAR");
-        assertEquals("nimbus-jose-jwt", bundledEntry.parentId().artifactId(),
-                "bundled dep parent should be the shaded JAR");
+        // Parent relationship is implicit via nesting, so just verify it's nested
+        assertTrue(topLevel.get(0).nested().stream()
+                .anyMatch(n -> n instanceof PackageComponent pkg
+                        && "jcip-annotations".equals(((ArtifactCoords) pkg.ref()).artifactId())),
+                "bundled dep should be nested under the shaded JAR");
     }
 
     @Test
@@ -115,15 +123,15 @@ class ArchiveAnalyzerTest {
 
         String hash = SbomUtils.computeHash(digest,
                 new java.io.ByteArrayInputStream("config-data".getBytes(StandardCharsets.UTF_8)));
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("conf/app.properties", hash));
+        List<FileEntry> entries = List.of(
+                new FileEntry("conf/app.properties", hash));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertEquals(0, content.mavenEntries().size());
-        assertEquals(1, content.unmatchedFiles().size());
-        assertEquals("conf/app.properties", content.unmatchedFiles().get(0).archivePath());
+        assertEquals(0, extractPackageComponents(model).size());
+        assertEquals(1, extractFileComponents(model).size());
+        assertEquals("conf/app.properties", extractFileComponents(model).get(0).archivePath());
     }
 
     @Test
@@ -133,14 +141,13 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of(artifact));
 
         String hash = SbomUtils.computeHash(digest, jarFile);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("myapp-1.0/lib/lib-a-1.0.jar", hash));
+        List<FileEntry> entries = List.of(new FileEntry("myapp-1.0/lib/lib-a-1.0.jar", hash));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, "myapp-1.0/");
+        AssemblyComponents model = analyzer.analyze(entries, "myapp-1.0/");
 
-        assertEquals(1, content.mavenEntries().size());
-        assertEquals("lib/lib-a-1.0.jar", content.mavenEntries().get(0).archivePath());
+        assertEquals(1, extractPackageComponents(model).size());
+        assertEquals("lib/lib-a-1.0.jar", extractPackageComponents(model).get(0).archivePath());
     }
 
     @Test
@@ -159,15 +166,14 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of(warArtifact));
 
         String entryHash = SbomUtils.computeHash(digest, entryFile);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("web/entry.txt", entryHash));
+        List<FileEntry> entries = List.of(new FileEntry("web/entry.txt", entryHash));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertEquals(1, content.mavenEntries().size());
-        assertEquals("mywar", content.mavenEntries().get(0).artifactId().artifactId());
-        assertEquals(1, content.unmatchedFiles().size(),
+        assertEquals(1, extractPackageComponents(model).size());
+        assertEquals("mywar", ((ArtifactCoords) extractPackageComponents(model).get(0).ref()).artifactId());
+        assertEquals(1, extractFileComponents(model).size(),
                 "non-identifiable nested file should be preserved as unmatched");
     }
 
@@ -190,16 +196,14 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of(depArtifact));
 
         String licenseHash = SbomUtils.computeHash(digest, licenseFile);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("LICENSE.txt", licenseHash,
-                        licenseFile.toFile()));
+        List<FileEntry> entries = List.of(new FileEntry("LICENSE.txt", licenseHash, licenseFile.toFile()));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertTrue(content.mavenEntries().isEmpty(),
+        assertTrue(extractPackageComponents(model).isEmpty(),
                 "dependency should not be detected as unpacked from a project source file hash match");
-        assertEquals(1, content.unmatchedFiles().size(),
+        assertEquals(1, extractFileComponents(model).size(),
                 "source file should remain as unmatched");
     }
 
@@ -219,16 +223,16 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of(warArtifact));
 
         String nestedHash = SbomUtils.computeHash(digest, nestedJar);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("web/parent/WEB-INF/lib/nested-1.0.jar", nestedHash));
+        List<FileEntry> entries = List.of(
+                new FileEntry("web/parent/WEB-INF/lib/nested-1.0.jar", nestedHash));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertEquals(1, content.mavenEntries().size(), "parent WAR should be matched");
-        assertEquals(1, content.nestedEntries().size(), "nested JAR should be identified");
-        assertEquals("nested", content.nestedEntries().get(0).artifactId().artifactId());
-        assertEquals("org.nested", content.nestedEntries().get(0).artifactId().groupId());
+        assertEquals(1, extractPackageComponents(model).size(), "parent WAR should be matched");
+        assertEquals(1, extractNestedPackages(model).size(), "nested JAR should be identified");
+        assertEquals("nested", ((ArtifactCoords) extractNestedPackages(model).get(0).ref()).artifactId());
+        assertEquals("org.nested", ((ArtifactCoords) extractNestedPackages(model).get(0).ref()).groupId());
     }
 
     @Test
@@ -241,16 +245,16 @@ class ArchiveAnalyzerTest {
         String unknownHash = SbomUtils.computeHash(digest,
                 new java.io.ByteArrayInputStream("unknown-content".getBytes(StandardCharsets.UTF_8)));
 
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("lib/known-1.0.jar", knownHash),
-                new ArchiveContent.FileEntry("conf/settings.xml", unknownHash));
+        List<FileEntry> entries = List.of(
+                new FileEntry("lib/known-1.0.jar", knownHash),
+                new FileEntry("conf/settings.xml", unknownHash));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertEquals(1, content.mavenEntries().size());
-        assertEquals(1, content.unmatchedFiles().size());
-        assertEquals("conf/settings.xml", content.unmatchedFiles().get(0).archivePath());
+        assertEquals(1, extractPackageComponents(model).size());
+        assertEquals(1, extractFileComponents(model).size());
+        assertEquals("conf/settings.xml", extractFileComponents(model).get(0).archivePath());
     }
 
     @Test
@@ -258,11 +262,11 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of());
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(List.of(), null);
+        AssemblyComponents model = analyzer.analyze(List.of(), null);
 
-        assertEquals(0, content.mavenEntries().size());
-        assertEquals(0, content.unmatchedFiles().size());
-        assertEquals(0, content.nestedEntries().size());
+        assertEquals(0, extractPackageComponents(model).size());
+        assertEquals(0, extractFileComponents(model).size());
+        assertEquals(0, extractNestedPackages(model).size());
     }
 
     @Test
@@ -274,8 +278,7 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of(a, b));
 
         String hash = SbomUtils.computeHash(digest, fileA);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("lib/a.jar", hash));
+        List<FileEntry> entries = List.of(new FileEntry("lib/a.jar", hash));
 
         ArchiveAnalyzer analyzer = new ArchiveAnalyzer(
                 effectiveModelResolver, repoSystem, project, session, digest, true);
@@ -311,35 +314,36 @@ class ArchiveAnalyzerTest {
 
         String shadedHash = SbomUtils.computeHash(digest, shadedJar);
         String normalHash = SbomUtils.computeHash(digest, normalJar);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("web/app/WEB-INF/lib/shaded-1.0.jar", shadedHash),
-                new ArchiveContent.FileEntry("web/app/WEB-INF/lib/normal-1.0.jar", normalHash));
+        List<FileEntry> entries = List.of(
+                new FileEntry("web/app/WEB-INF/lib/shaded-1.0.jar", shadedHash),
+                new FileEntry("web/app/WEB-INF/lib/normal-1.0.jar", normalHash));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertEquals(1, content.mavenEntries().size(), "WAR should be matched");
-        assertEquals("app", content.mavenEntries().get(0).artifactId().artifactId());
+        assertEquals(1, extractPackageComponents(model).size(), "WAR should be matched");
+        assertEquals("app", ((ArtifactCoords) extractPackageComponents(model).get(0).ref()).artifactId());
         // shaded JAR (owner) + normal JAR + bundled-lib (bundled dep)
-        assertEquals(3, content.nestedEntries().size());
-        assertTrue(content.nestedEntries().stream()
-                .anyMatch(e -> "shaded".equals(e.artifactId().artifactId())
-                        && "com.example".equals(e.artifactId().groupId())),
+        assertEquals(3, extractNestedPackages(model).size());
+        assertTrue(extractNestedPackages(model).stream()
+                .anyMatch(e -> "shaded".equals(((ArtifactCoords) e.ref()).artifactId())
+                        && "com.example".equals(((ArtifactCoords) e.ref()).groupId())),
                 "shaded JAR should be identified as nested artifact");
-        assertTrue(content.nestedEntries().stream()
-                .anyMatch(e -> "normal".equals(e.artifactId().artifactId())),
+        assertTrue(extractNestedPackages(model).stream()
+                .anyMatch(e -> "normal".equals(((ArtifactCoords) e.ref()).artifactId())),
                 "normal JAR should be identified as nested artifact");
         // bundled dep should be nested under the shaded JAR, not under the WAR
-        var bundledEntry = content.nestedEntries().stream()
-                .filter(e -> "bundled-lib".equals(e.artifactId().artifactId()))
+        var bundledEntry = extractNestedPackages(model).stream()
+                .filter(e -> "bundled-lib".equals(((ArtifactCoords) e.ref()).artifactId()))
                 .findFirst().orElse(null);
         assertNotNull(bundledEntry, "bundled dep should be recorded");
-        assertEquals("shaded", bundledEntry.parentId().artifactId(),
+        assertTrue(isNestedUnder(model, "bundled-lib", "shaded"),
                 "bundled dep parent should be the shaded JAR");
-        assertTrue(content.explicitDependencies().stream()
-                .noneMatch(e -> "bundled-lib".equals(e.child().artifactId())),
+        assertTrue(model.dependencyEdges().stream()
+                .noneMatch(e -> e.child() instanceof ArtifactCoords coords
+                        && "bundled-lib".equals(coords.artifactId())),
                 "bundled dep should not have a dependency edge (nesting is sufficient)");
-        assertEquals(0, content.unmatchedFiles().size());
+        assertEquals(0, extractFileComponents(model).size());
     }
 
     @Test
@@ -375,23 +379,23 @@ class ArchiveAnalyzerTest {
         when(session.getProjects()).thenReturn(List.of(warProject));
 
         String shadedHash = SbomUtils.computeHash(digest, shadedJar);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("web/app/WEB-INF/lib/nimbus-1.0.jar", shadedHash));
+        List<FileEntry> entries = List.of(
+                new FileEntry("web/app/WEB-INF/lib/nimbus-1.0.jar", shadedHash));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertEquals(1, content.mavenEntries().size(), "WAR should be matched");
-        assertTrue(content.nestedEntries().stream()
-                .anyMatch(e -> "nimbus".equals(e.artifactId().artifactId())),
+        assertEquals(1, extractPackageComponents(model).size(), "WAR should be matched");
+        assertTrue(extractNestedPackages(model).stream()
+                .anyMatch(e -> "nimbus".equals(((ArtifactCoords) e.ref()).artifactId())),
                 "shaded JAR should be identified as nested artifact");
         // Bundled dep must be detected even though the owner was hash-identified
-        var bundledEntry = content.nestedEntries().stream()
-                .filter(e -> "jcip-annotations".equals(e.artifactId().artifactId()))
+        var bundledEntry = extractNestedPackages(model).stream()
+                .filter(e -> "jcip-annotations".equals(((ArtifactCoords) e.ref()).artifactId()))
                 .findFirst().orElse(null);
         assertNotNull(bundledEntry,
                 "bundled dep should be recorded even when owner is hash-identified");
-        assertEquals("nimbus", bundledEntry.parentId().artifactId(),
+        assertTrue(isNestedUnder(model, "jcip-annotations", "nimbus"),
                 "bundled dep parent should be the shaded JAR");
     }
 
@@ -416,23 +420,23 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of(warArtifact));
 
         String hash = SbomUtils.computeHash(digest, shadedJar);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("web/app/WEB-INF/lib/log4j-api-2.0.jar", hash));
+        List<FileEntry> entries = List.of(
+                new FileEntry("web/app/WEB-INF/lib/log4j-api-2.0.jar", hash));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertEquals(1, content.mavenEntries().size(), "WAR should be matched");
-        assertTrue(content.nestedEntries().stream()
-                .anyMatch(e -> "log4j-api".equals(e.artifactId().artifactId())),
+        assertEquals(1, extractPackageComponents(model).size(), "WAR should be matched");
+        assertTrue(extractNestedPackages(model).stream()
+                .anyMatch(e -> "log4j-api".equals(((ArtifactCoords) e.ref()).artifactId())),
                 "log4j-api should be identified as the owner");
-        var bundledEntry = content.nestedEntries().stream()
-                .filter(e -> "log4j".equals(e.artifactId().artifactId()))
+        var bundledEntry = extractNestedPackages(model).stream()
+                .filter(e -> "log4j".equals(((ArtifactCoords) e.ref()).artifactId()))
                 .findFirst().orElse(null);
         assertNotNull(bundledEntry, "log4j should be recorded as bundled dep");
-        assertEquals("log4j-api", bundledEntry.parentId().artifactId(),
+        assertTrue(isNestedUnder(model, "log4j", "log4j-api"),
                 "log4j should be nested under log4j-api");
-        assertEquals(0, content.unmatchedFiles().size());
+        assertEquals(0, extractFileComponents(model).size());
     }
 
     @Test
@@ -455,26 +459,31 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of(warArtifact));
 
         String hash = SbomUtils.computeHash(digest, shadedJar);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("web/myapp/WEB-INF/lib/ab-cd-1.0.jar", hash));
+        List<FileEntry> entries = List.of(
+                new FileEntry("web/myapp/WEB-INF/lib/ab-cd-1.0.jar", hash));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertEquals(1, content.mavenEntries().size(), "WAR should be matched");
-        assertEquals(0, content.nestedEntries().size(),
+        assertEquals(1, extractPackageComponents(model).size(), "WAR should be matched");
+        assertEquals(0, extractNestedPackages(model).size(),
                 "ambiguous match should not produce nested Maven entries");
-        assertEquals(1, content.unmatchedFiles().size(),
+        assertEquals(1, extractFileComponents(model).size(),
                 "JAR should be preserved as unmatched file");
-        assertEquals(2, content.fileNestedArtifacts().size(),
+        assertEquals(2, countFileNestedPackages(model),
                 "both artifacts should be nested under the file");
-        assertTrue(content.fileNestedArtifacts().stream()
-                .allMatch(e -> "web/myapp/WEB-INF/lib/ab-cd-1.0.jar".equals(e.archivePath())),
-                "all file-nested artifacts should reference the JAR path");
-        assertTrue(content.fileNestedArtifacts().stream()
-                .anyMatch(e -> "ab".equals(e.artifactId().artifactId())));
-        assertTrue(content.fileNestedArtifacts().stream()
-                .anyMatch(e -> "cd".equals(e.artifactId().artifactId())));
+        // Check that the file component for the JAR has nested packages
+        FileComponent jarFile = extractFileComponents(model).stream()
+                .filter(f -> "web/myapp/WEB-INF/lib/ab-cd-1.0.jar".equals(f.archivePath()))
+                .findFirst().orElse(null);
+        assertNotNull(jarFile, "JAR file component should exist");
+        assertEquals(2, jarFile.nested().size(), "file should have 2 nested packages");
+        assertTrue(jarFile.nested().stream()
+                .anyMatch(n -> n instanceof PackageComponent pkg
+                        && ((ArtifactCoords) pkg.ref()).artifactId().equals("ab")));
+        assertTrue(jarFile.nested().stream()
+                .anyMatch(n -> n instanceof PackageComponent pkg
+                        && ((ArtifactCoords) pkg.ref()).artifactId().equals("cd")));
     }
 
     @Test
@@ -496,22 +505,26 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of(warArtifact));
 
         String hash = SbomUtils.computeHash(digest, shadedJar);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("web/webapp/WEB-INF/lib/mystery-1.0.jar", hash));
+        List<FileEntry> entries = List.of(
+                new FileEntry("web/webapp/WEB-INF/lib/mystery-1.0.jar", hash));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertEquals(1, content.mavenEntries().size(), "WAR should be matched");
-        assertEquals(0, content.nestedEntries().size());
-        assertEquals(1, content.unmatchedFiles().size(),
+        assertEquals(1, extractPackageComponents(model).size(), "WAR should be matched");
+        assertEquals(0, extractNestedPackages(model).size());
+        assertEquals(1, extractFileComponents(model).size(),
                 "JAR should be preserved as unmatched file");
-        assertEquals(2, content.fileNestedArtifacts().size(),
+        assertEquals(2, countFileNestedPackages(model),
                 "both artifacts should be nested under the file");
-        assertTrue(content.fileNestedArtifacts().stream()
-                .anyMatch(e -> "alpha".equals(e.artifactId().artifactId())));
-        assertTrue(content.fileNestedArtifacts().stream()
-                .anyMatch(e -> "beta".equals(e.artifactId().artifactId())));
+        // Check file-nested packages
+        FileComponent jarFile = extractFileComponents(model).get(0);
+        assertTrue(jarFile.nested().stream()
+                .anyMatch(n -> n instanceof PackageComponent pkg
+                        && ((ArtifactCoords) pkg.ref()).artifactId().equals("alpha")));
+        assertTrue(jarFile.nested().stream()
+                .anyMatch(n -> n instanceof PackageComponent pkg
+                        && ((ArtifactCoords) pkg.ref()).artifactId().equals("beta")));
     }
 
     @Test
@@ -544,19 +557,21 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of(warArtifact));
 
         String hash = SbomUtils.computeHash(digest, shadedJar);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("web/app/WEB-INF/lib/shaded-1.0.jar", hash));
+        List<FileEntry> entries = List.of(
+                new FileEntry("web/app/WEB-INF/lib/shaded-1.0.jar", hash));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertEquals(1, content.mavenEntries().size(), "WAR should be matched");
+        assertEquals(1, extractPackageComponents(model).size(), "WAR should be matched");
         // Owner registration failed, so the JAR should be unmatched
-        assertEquals(1, content.unmatchedFiles().size(),
+        assertEquals(1, extractFileComponents(model).size(),
                 "shaded JAR should be preserved as unmatched file");
         // The bundled dep with valid coords must still be recorded
-        assertTrue(content.fileNestedArtifacts().stream()
-                .anyMatch(e -> "lib".equals(e.artifactId().artifactId())),
+        FileComponent jarFile = extractFileComponents(model).get(0);
+        assertTrue(jarFile.nested().stream()
+                .anyMatch(n -> n instanceof PackageComponent pkg
+                        && ((ArtifactCoords) pkg.ref()).artifactId().equals("lib")),
                 "bundled dep should be recorded as file-nested artifact");
     }
 
@@ -567,19 +582,19 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of());
 
         String hash = SbomUtils.computeHash(digest, jarFile);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("lib/external-lib-3.0.jar", hash, jarFile.toFile()));
+        List<FileEntry> entries = List.of(
+                new FileEntry("lib/external-lib-3.0.jar", hash, jarFile.toFile()));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertEquals(1, content.mavenEntries().size(),
+        assertEquals(1, extractPackageComponents(model).size(),
                 "non-dependency JAR with pom.properties should be detected as Maven");
-        assertEquals("com.external", content.mavenEntries().get(0).artifactId().groupId());
-        assertEquals("external-lib", content.mavenEntries().get(0).artifactId().artifactId());
-        assertEquals("3.0", content.mavenEntries().get(0).artifactId().version());
-        assertEquals("lib/external-lib-3.0.jar", content.mavenEntries().get(0).archivePath());
-        assertEquals(0, content.unmatchedFiles().size(),
+        assertEquals("com.external", ((ArtifactCoords) extractPackageComponents(model).get(0).ref()).groupId());
+        assertEquals("external-lib", ((ArtifactCoords) extractPackageComponents(model).get(0).ref()).artifactId());
+        assertEquals("3.0", ((ArtifactCoords) extractPackageComponents(model).get(0).ref()).version());
+        assertEquals("lib/external-lib-3.0.jar", extractPackageComponents(model).get(0).archivePath());
+        assertEquals(0, extractFileComponents(model).size(),
                 "identified JAR should not remain as unmatched file");
     }
 
@@ -592,26 +607,27 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of());
 
         String hash = SbomUtils.computeHash(digest, shadedJar);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("lib/nimbus-jose-jwt-10.0.jar", hash,
+        List<FileEntry> entries = List.of(
+                new FileEntry("lib/nimbus-jose-jwt-10.0.jar", hash,
                         shadedJar.toFile()));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertEquals(1, content.mavenEntries().size(),
+        assertEquals(1, extractPackageComponents(model).size(),
                 "shaded JAR owner should be detected as Maven entry");
-        assertEquals("nimbus-jose-jwt", content.mavenEntries().get(0).artifactId().artifactId());
-        assertEquals("com.nimbusds", content.mavenEntries().get(0).artifactId().groupId());
+        assertEquals("nimbus-jose-jwt", ((ArtifactCoords) extractPackageComponents(model).get(0).ref()).artifactId());
+        assertEquals("com.nimbusds", ((ArtifactCoords) extractPackageComponents(model).get(0).ref()).groupId());
 
-        assertEquals(1, content.nestedEntries().size(),
+        assertEquals(1, extractNestedPackages(model).size(),
                 "bundled dep should be recorded as nested entry");
-        assertEquals("gson", content.nestedEntries().get(0).artifactId().artifactId());
-        assertEquals("nimbus-jose-jwt",
-                content.nestedEntries().get(0).parentId().artifactId());
+        assertEquals("gson", ((ArtifactCoords) extractNestedPackages(model).get(0).ref()).artifactId());
+        assertTrue(isNestedUnder(model, "gson", "nimbus-jose-jwt"),
+                "gson should be nested under nimbus-jose-jwt");
 
-        assertEquals(0, content.unmatchedFiles().size());
-        assertEquals(0, content.fileNestedArtifacts().size());
+        assertEquals(0, extractFileComponents(model).size());
+        // File-nested artifacts are now PackageComponents nested under FileComponents
+        assertEquals(0, countFileNestedPackages(model));
     }
 
     @Test
@@ -623,26 +639,29 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of());
 
         String hash = SbomUtils.computeHash(digest, shadedJar);
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("lib/ab-cd-1.0.jar", hash,
+        List<FileEntry> entries = List.of(
+                new FileEntry("lib/ab-cd-1.0.jar", hash,
                         shadedJar.toFile()));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
-        assertEquals(0, content.mavenEntries().size(),
+        assertEquals(0, extractPackageComponents(model).size(),
                 "ambiguous shaded JAR should not produce a Maven entry");
-        assertEquals(0, content.nestedEntries().size());
-        assertEquals(1, content.unmatchedFiles().size(),
+        assertEquals(0, extractNestedPackages(model).size());
+        assertEquals(1, extractFileComponents(model).size(),
                 "JAR should remain as unmatched file");
-        assertEquals(2, content.fileNestedArtifacts().size(),
+        assertEquals(2, countFileNestedPackages(model),
                 "both artifacts should be recorded as file-nested");
-        assertTrue(content.fileNestedArtifacts().stream()
-                .anyMatch(e -> "ab".equals(e.artifactId().artifactId())));
-        assertTrue(content.fileNestedArtifacts().stream()
-                .anyMatch(e -> "cd".equals(e.artifactId().artifactId())));
-        assertTrue(content.fileNestedArtifacts().stream()
-                .allMatch(e -> "lib/ab-cd-1.0.jar".equals(e.archivePath())));
+        FileComponent jarFile = extractFileComponents(model).get(0);
+        assertTrue(jarFile.nested().stream()
+                .anyMatch(n -> n instanceof PackageComponent pkg
+                        && ((ArtifactCoords) pkg.ref()).artifactId().equals("ab")));
+        assertTrue(jarFile.nested().stream()
+                .anyMatch(n -> n instanceof PackageComponent pkg
+                        && ((ArtifactCoords) pkg.ref()).artifactId().equals("cd")));
+        // All file-nested packages should be under the same JAR file
+        assertEquals("lib/ab-cd-1.0.jar", jarFile.archivePath());
     }
 
     @Test
@@ -671,19 +690,19 @@ class ArchiveAnalyzerTest {
         String jarHash = SbomUtils.computeHash(digest, jarFile);
         // WAR is unpacked at root (empty archivePath prefix),
         // independent JAR is alongside it
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("root-entry.txt", entryHash),
-                new ArchiveContent.FileEntry("lib/independent-1.0.jar", jarHash));
+        List<FileEntry> entries = List.of(
+                new FileEntry("root-entry.txt", entryHash),
+                new FileEntry("lib/independent-1.0.jar", jarHash));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
         // Independent JAR should remain top-level, NOT reclassified under the WAR
-        assertTrue(content.mavenEntries().stream()
-                .anyMatch(e -> "independent".equals(e.artifactId().artifactId())),
+        assertTrue(extractPackageComponents(model).stream()
+                .anyMatch(e -> "independent".equals(((ArtifactCoords) e.ref()).artifactId())),
                 "independent JAR should remain as top-level maven entry");
-        assertFalse(content.nestedEntries().stream()
-                .anyMatch(e -> "independent".equals(e.artifactId().artifactId())),
+        assertFalse(extractNestedPackages(model).stream()
+                .anyMatch(e -> "independent".equals(((ArtifactCoords) e.ref()).artifactId())),
                 "independent JAR should NOT be reclassified as nested");
     }
 
@@ -717,19 +736,17 @@ class ArchiveAnalyzerTest {
         String innerHash = SbomUtils.computeHash(digest, innerJar);
         // Both WARs are unpacked: dist at "web/" and outer at "web/outer/"
         // inner JAR is at "web/outer/WEB-INF/lib/inner-1.0.jar"
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("web/outer/WEB-INF/lib/inner-1.0.jar", innerHash));
+        List<FileEntry> entries = List.of(
+                new FileEntry("web/outer/WEB-INF/lib/inner-1.0.jar", innerHash));
 
         ArchiveAnalyzer analyzer = createAnalyzer();
-        ArchiveContent content = analyzer.analyze(entries, null);
+        AssemblyComponents model = analyzer.analyze(entries, null);
 
         // inner JAR should be nested under outer (longer prefix), not dist
-        if (!content.nestedEntries().isEmpty()) {
-            assertTrue(content.nestedEntries().stream()
-                    .anyMatch(e -> "outer".equals(e.parentId().artifactId())),
+        if (!extractNestedPackages(model).isEmpty()) {
+            assertTrue(isNestedUnder(model, "inner", "outer"),
                     "inner JAR should be nested under outer (longest matching prefix)");
-            assertFalse(content.nestedEntries().stream()
-                    .anyMatch(e -> "dist".equals(e.parentId().artifactId())),
+            assertFalse(isNestedUnder(model, "inner", "dist"),
                     "inner JAR should NOT be nested under dist (shorter prefix)");
         }
     }
@@ -756,8 +773,8 @@ class ArchiveAnalyzerTest {
         extComp.setEvidence(evidence);
         externalBom.setComponents(new ArrayList<>(List.of(extComp)));
 
-        List<ArchiveContent.FileEntry> entries = List.of(
-                new ArchiveContent.FileEntry("lib/lib/main/com.h2database.h2-2.4.jar", hash));
+        List<FileEntry> entries = List.of(
+                new FileEntry("lib/lib/main/com.h2database.h2-2.4.jar", hash));
 
         ArchiveAnalyzer analyzer = new ArchiveAnalyzer(
                 effectiveModelResolver, repoSystem, project, session, digest,
@@ -845,5 +862,116 @@ class ArchiveAnalyzerTest {
                 new DefaultArtifactHandler(type));
         artifact.setFile(file);
         return artifact;
+    }
+
+    // Helper methods to extract components from AssemblyComponents model
+
+    private List<PackageComponent> extractPackageComponents(AssemblyComponents model) {
+        List<PackageComponent> result = new ArrayList<>();
+        for (AssemblyComponent comp : model.components()) {
+            if (comp instanceof PackageComponent pkg) {
+                result.add(pkg);
+            }
+        }
+        return result;
+    }
+
+    private List<FileComponent> extractFileComponents(AssemblyComponents model) {
+        List<FileComponent> result = new ArrayList<>();
+        for (AssemblyComponent comp : model.components()) {
+            if (comp instanceof FileComponent file) {
+                result.add(file);
+            }
+        }
+        return result;
+    }
+
+    private List<PackageComponent> extractNestedPackages(AssemblyComponents model) {
+        List<PackageComponent> result = new ArrayList<>();
+        for (AssemblyComponent comp : model.components()) {
+            collectNestedPackages(comp, result);
+        }
+        return result;
+    }
+
+    private void collectNestedPackages(AssemblyComponent comp,
+            List<PackageComponent> result) {
+        if (comp instanceof PackageComponent pkg) {
+            for (AssemblyComponent nested : pkg.nested()) {
+                if (nested instanceof PackageComponent nestedPkg) {
+                    result.add(nestedPkg);
+                }
+                collectNestedPackages(nested, result);
+            }
+        }
+        // FileComponent nested packages are file-nested artifacts, not nested Maven entries
+        // so we don't collect them here
+    }
+
+    /**
+     * Checks if a package component with the given artifactId is nested under
+     * a parent with the given parent artifactId.
+     */
+    private boolean isNestedUnder(AssemblyComponents model, String childArtifactId, String parentArtifactId) {
+        for (AssemblyComponent comp : model.components()) {
+            if (comp instanceof PackageComponent pkg) {
+                if (pkg.ref() instanceof ArtifactCoords coords
+                        && parentArtifactId.equals(coords.artifactId())) {
+                    // Check if this parent contains the child in its nested list
+                    return containsNestedWithArtifactId(pkg, childArtifactId);
+                }
+                // Recursively check nested components
+                if (checkNestedForParentChild(pkg, childArtifactId, parentArtifactId)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean checkNestedForParentChild(PackageComponent parent, String childArtifactId, String parentArtifactId) {
+        for (AssemblyComponent nested : parent.nested()) {
+            if (nested instanceof PackageComponent nestedPkg) {
+                if (nestedPkg.ref() instanceof ArtifactCoords coords
+                        && parentArtifactId.equals(coords.artifactId())) {
+                    if (containsNestedWithArtifactId(nestedPkg, childArtifactId)) {
+                        return true;
+                    }
+                }
+                if (checkNestedForParentChild(nestedPkg, childArtifactId, parentArtifactId)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean containsNestedWithArtifactId(PackageComponent parent, String childArtifactId) {
+        for (AssemblyComponent nested : parent.nested()) {
+            if (nested instanceof PackageComponent nestedPkg) {
+                if (nestedPkg.ref() instanceof ArtifactCoords coords
+                        && childArtifactId.equals(coords.artifactId())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Counts PackageComponents nested under FileComponents (file-nested artifacts).
+     */
+    private int countFileNestedPackages(AssemblyComponents model) {
+        int count = 0;
+        for (AssemblyComponent comp : model.components()) {
+            if (comp instanceof FileComponent file) {
+                for (AssemblyComponent nested : file.nested()) {
+                    if (nested instanceof PackageComponent) {
+                        count++;
+                    }
+                }
+            }
+        }
+        return count;
     }
 }

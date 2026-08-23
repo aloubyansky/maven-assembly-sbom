@@ -45,7 +45,7 @@ import org.cyclonedx.model.component.evidence.Occurrence;
  */
 public final class BomMerger {
 
-    private static final Comparator<Component> COMPONENT_ORDER = BomBuilder.COMPONENT_ORDER;
+    private static final Comparator<Component> COMPONENT_ORDER = BomRenderer.COMPONENT_ORDER;
 
     private BomMerger() {
     }
@@ -117,8 +117,7 @@ public final class BomMerger {
                 || targetBom.getMetadata().getComponent() == null) {
             return;
         }
-        String sourceMainRef = normalizeMavenPurl(
-                sourceBom.getMetadata().getComponent().getBomRef());
+        String sourceMainRef = canonicalPurl(sourceBom.getMetadata().getComponent().getBomRef());
         if (sourceMainRef == null) {
             return;
         }
@@ -136,7 +135,7 @@ public final class BomMerger {
         }
         DependencyList existingChildren = DependencyList.ofChildren(targetMainDep);
         for (Dependency child : sourceMainDep.getDependencies()) {
-            String normalizedRef = normalizeMavenPurl(child.getRef());
+            String normalizedRef = canonicalPurl(child.getRef());
             if (!existingChildren.containsRef(normalizedRef)) {
                 existingChildren.add(new Dependency(normalizedRef));
             }
@@ -369,6 +368,33 @@ public final class BomMerger {
     }
 
     /**
+     * Canonical dedup/index key for a purl or bom-ref string.
+     *
+     * <p>
+     * Composes the existing Maven {@code type=jar} stripping with full
+     * purl canonicalization (sorted qualifiers, lowercased npm name/type,
+     * canonical percent-encoding) so semantically-equal npm/generic purls
+     * that differ only in qualifier order or encoding dedup to one entry.
+     * Maven behavior is unchanged: {@link #normalizeMavenPurl} strips
+     * {@code type=jar} first, and {@link Purl#parse} is idempotent on the
+     * canonical purls this codebase emits (see {@code ArtifactCoords.toPurl},
+     * which omits {@code type=jar}). Unparseable strings fall back to the
+     * Maven-normalized raw value, matching prior use-as-is behavior.
+     * </p>
+     */
+    static String canonicalPurl(String purlOrRef) {
+        if (purlOrRef == null) {
+            return null;
+        }
+        String normalized = normalizeMavenPurl(purlOrRef);
+        try {
+            return Purl.parse(normalized).toString();
+        } catch (IllegalArgumentException | NullPointerException e) {
+            return normalized;
+        }
+    }
+
+    /**
      * Strips the redundant {@code type=jar} qualifier from a Maven PURL
      * since {@code jar} is the default type per the PURL spec. Handles
      * the qualifier in any position ({@code ?type=jar}, {@code ?type=jar&…},
@@ -408,12 +434,12 @@ public final class BomMerger {
             if (target.getComponents() != null) {
                 for (Component c : target.getComponents()) {
                     if (c.getPurl() != null) {
-                        existingPurls.add(normalizeMavenPurl(c.getPurl()));
+                        existingPurls.add(canonicalPurl(c.getPurl()));
                     }
                 }
             }
             for (Component nested : source.getComponents()) {
-                String np = normalizeMavenPurl(nested.getPurl());
+                String np = canonicalPurl(nested.getPurl());
                 if (np == null || existingPurls.add(np)) {
                     target.addComponent(nested);
                 }
@@ -630,7 +656,7 @@ public final class BomMerger {
 
     private static Dependency normalizeDependency(Dependency dep,
             String parentPathPrefix) {
-        String ref = prefixFileRef(normalizeMavenPurl(dep.getRef()), parentPathPrefix);
+        String ref = prefixFileRef(canonicalPurl(dep.getRef()), parentPathPrefix);
         Dependency result = new Dependency(ref);
         if (dep.getDependencies() != null) {
             for (Dependency child : dep.getDependencies()) {
@@ -665,10 +691,10 @@ public final class BomMerger {
         if (bomRef == null) {
             return null;
         }
-        String normalized = normalizeMavenPurl(bomRef);
+        String normalized = canonicalPurl(bomRef);
         if (bom.getMetadata() != null && bom.getMetadata().getComponent() != null) {
             Component main = bom.getMetadata().getComponent();
-            if (normalized.equals(normalizeMavenPurl(main.getBomRef()))) {
+            if (normalized.equals(canonicalPurl(main.getBomRef()))) {
                 return main;
             }
         }
@@ -684,7 +710,7 @@ public final class BomMerger {
             return null;
         }
         for (Component comp : components) {
-            if (bomRef.equals(normalizeMavenPurl(comp.getBomRef()))) {
+            if (bomRef.equals(canonicalPurl(comp.getBomRef()))) {
                 return comp;
             }
             Component nested = searchComponentTree(comp.getComponents(), bomRef);

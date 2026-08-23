@@ -60,6 +60,7 @@ public class SbomGenerator {
     private ProductInfo product;
     private MavenLicenseResolver licenseResolver;
     private List<org.eclipse.aether.graph.Dependency> cachedManagedDeps;
+    private ArchiveAnalyzer lastAnalyzer;
 
     SbomGenerator(MavenProject project, MavenSession session,
             RepositorySystem repoSystem,
@@ -120,7 +121,7 @@ public class SbomGenerator {
     private static String supportedVersionStrings() {
         StringBuilder sb = new StringBuilder();
         for (Version v : Version.values()) {
-            if (sb.length() > 0) {
+            if (!sb.isEmpty()) {
                 sb.append(", ");
             }
             sb.append(v.getVersionString());
@@ -146,7 +147,7 @@ public class SbomGenerator {
      * @param archiveType the archive type for the main component PURL, or {@code null}
      * @return the assembled BOM
      */
-    Bom generate(List<ArchiveContent.FileEntry> entries, String baseDirPrefix,
+    Bom generate(List<FileEntry> entries, String baseDirPrefix,
             List<Bom> externalBoms, String assemblyId, String classifier,
             String archiveType) {
         effectiveModelResolver.init(
@@ -157,26 +158,35 @@ public class SbomGenerator {
                 effectiveModelResolver, failOnMissingLicense);
         cachedManagedDeps = null;
 
-        ArchiveContent content = analyzeEntries(entries, baseDirPrefix, externalBoms);
+        AssemblyComponents model = analyzeEntries(entries, baseDirPrefix, externalBoms);
 
-        BomBuilder builder = new BomBuilder(
-                project.getGroupId(), project.getArtifactId(),
-                project.getVersion(), assemblyId,
-                SbomUtils.parseBuildTimestamp(getTimestamp()), bomHashAlgorithm,
-                schemaVersion);
-        builder.setProjectLicenses(licenseResolver.resolveLicenses(
-                project.getGroupId(), project.getArtifactId(),
-                project.getVersion()));
-        builder.setClassifier(classifier);
-        builder.setArchiveType(archiveType);
-        builder.setProduct(product);
-        populateToolMetadata(builder);
+        // Populate AssemblyMetadata
+        AssemblyMetadata metadata = new AssemblyMetadata();
+        metadata.setProjectGroupId(project.getGroupId());
+        metadata.setProjectArtifactId(project.getArtifactId());
+        metadata.setProjectVersion(project.getVersion());
+        metadata.setAssemblyId(assemblyId);
+        metadata.setTimestamp(SbomUtils.parseBuildTimestamp(getTimestamp()));
+        metadata.setHashAlgorithmSpec(bomHashAlgorithm.getSpec());
+        metadata.setSchemaVersion(schemaVersion.getVersionString());
+        metadata.setClassifier(classifier);
+        metadata.setArchiveType(archiveType);
+        metadata.setProjectLicenses(licenseResolver.resolveLicenseInfos(
+                project.getGroupId(), project.getArtifactId(), project.getVersion()));
+        metadata.setProduct(product);
+        populateToolMetadata(metadata);
+        model.setMetadata(metadata);
 
-        addToBom(content, builder);
+        // Enrich components with licenses and build dependency graph
+        enrichComponentsWithLicenses(model);
+        buildDependencyGraph(model);
 
-        Bom bom = builder.build();
+        // Render the neutral model to CycloneDX BOM
+        Bom bom = new BomRenderer().render(model);
+
+        // Post-processing (detected/external SBOMs, filtering, dedup)
         ArchiveIndex archiveIndex = ArchiveIndex.of(entries, baseDirPrefix, bomHashAlgorithm.getSpec());
-        processDetectedSboms(bom, content, builder, archiveIndex);
+        processDetectedSboms(bom, model, archiveIndex);
         processExternalBoms(bom, externalBoms, archiveIndex);
 
         String normalizedAlg = archiveIndex.normalizedAlg();
@@ -189,67 +199,71 @@ public class SbomGenerator {
         return bom;
     }
 
-    private ArchiveContent analyzeEntries(List<ArchiveContent.FileEntry> entries,
+    private AssemblyComponents analyzeEntries(List<FileEntry> entries,
             String baseDirPrefix, List<Bom> externalBoms) {
         boolean detectEmbeddedSboms = !"ignore".equalsIgnoreCase(embeddedSboms);
-        ArchiveAnalyzer analyzer = new ArchiveAnalyzer(
+        lastAnalyzer = new ArchiveAnalyzer(
                 effectiveModelResolver, repoSystem,
                 project, session, messageDigest, failOnDuplicateHash,
                 externalBoms, detectEmbeddedSboms);
-        return analyzer.analyze(entries, baseDirPrefix);
+        return lastAnalyzer.analyze(entries, baseDirPrefix);
     }
 
-    private void addToBom(ArchiveContent content, BomBuilder builder) {
-        for (var e : content.mavenEntries()) {
-            ArtifactCoords id = e.artifactId();
-            builder.addMavenArtifact(id, e.archivePath(), e.hash(),
-                    licenseResolver.resolveLicenses(
-                            id.groupId(), id.artifactId(), id.version()));
+    /**
+     * Enriches all {@link PackageComponent}s in the model with resolved license
+     * information. Since {@link PackageComponent} is immutable, this rebuilds
+     * components with licenses attached, preserving order and nesting.
+     *
+     * <p>
+     * License resolution uses {@link MavenLicenseResolver#resolveLicenseInfos},
+     * which shares the same cache and {@code failOnMissingLicense} behavior as
+     * the legacy {@code resolveLicenses}, ensuring identical resolution for the
+     * same GAVs.
+     * </p>
+     *
+     * @param model the model to enrich; mutated in place
+     */
+    private void enrichComponentsWithLicenses(AssemblyComponents model) {
+        List<AssemblyComponent> enriched = new ArrayList<>(model.components().size());
+        for (AssemblyComponent comp : model.components()) {
+            enriched.add(enrichComponentRecursively(comp));
         }
-        for (var e : content.nestedEntries()) {
-            ArtifactCoords id = e.artifactId();
-            builder.addNestedMavenArtifact(e.parentId(), id, e.archivePath(), e.hash(),
-                    licenseResolver.resolveLicenses(
-                            id.groupId(), id.artifactId(), id.version()));
-        }
-        for (var edge : content.explicitDependencies()) {
-            builder.addExplicitDependency(edge.parent(), edge.child());
-        }
-        for (var e : content.unmatchedFiles()) {
-            builder.addFile(e.archivePath(), e.hash());
-        }
-        for (var e : content.fileNestedArtifacts()) {
-            ArtifactCoords id = e.artifactId();
-            builder.addNestedArtifactUnderFile(e.archivePath(), id,
-                    licenseResolver.resolveLicenses(
-                            id.groupId(), id.artifactId(), id.version()));
-        }
-        buildDependencyGraph(builder, content);
+        model.setComponents(enriched);
     }
 
-    private void processDetectedSboms(Bom bom, ArchiveContent content, BomBuilder builder, ArchiveIndex archiveIndex) {
-        if ("ignore".equalsIgnoreCase(embeddedSboms)) {
-            return;
-        }
-        for (ArchiveContent.DetectedSbom detected : content.detectedSboms()) {
-            String parentRef = resolveParentBomRef(detected.parentArtifact(),
-                    bom, builder);
-            if ("link".equalsIgnoreCase(embeddedSboms)) {
-                BomMerger.addBomReference(bom, parentRef, detected.archivePath());
-            } else {
-                Component parent = BomMerger.findComponentByBomRef(
-                        bom, parentRef);
-                String parentPrefix = parent != null
-                        ? BomMerger.getParentPathPrefix(parent)
-                        : null;
-                Bom filtered = filterSbomByArchive(detected.parsedBom(), archiveIndex, parentPrefix);
-                if (parent != null) {
-                    BomMerger.mergeUnder(bom, parentRef, filtered);
-                } else {
-                    BomMerger.mergeFlat(bom, filtered);
-                }
+    /**
+     * Recursively enriches a component and its nested children with licenses.
+     */
+    private AssemblyComponent enrichComponentRecursively(
+            AssemblyComponent comp) {
+        if (comp instanceof PackageComponent pkg) {
+            List<LicenseInfo> licenses = List.of();
+            if (pkg.ref() instanceof ArtifactCoords coords) {
+                licenses = licenseResolver.resolveLicenseInfos(
+                        coords.groupId(), coords.artifactId(), coords.version());
             }
+            // Enrich nested components recursively
+            List<AssemblyComponent> enrichedNested = new ArrayList<>();
+            for (AssemblyComponent nested : pkg.nested()) {
+                enrichedNested.add(enrichComponentRecursively(nested));
+            }
+            return new PackageComponent(pkg.ref(), pkg.archivePath(), pkg.hash(),
+                    licenses, enrichedNested);
+        } else if (comp instanceof FileComponent file) {
+            // Enrich nested components recursively
+            List<AssemblyComponent> enrichedNested = new ArrayList<>();
+            for (AssemblyComponent nested : file.nested()) {
+                enrichedNested.add(enrichComponentRecursively(nested));
+            }
+            return new FileComponent(file.archivePath(), file.hash(), enrichedNested);
         }
+        return comp;
+    }
+
+    private void processDetectedSboms(Bom bom, AssemblyComponents model, ArchiveIndex archiveIndex) {
+        EmbeddedSbomMergeTransform transform = new EmbeddedSbomMergeTransform(
+                embeddedSboms, archiveIndex);
+        transform.apply(bom, model, owner -> resolveParentBomRef(owner, bom, model));
     }
 
     static Bom filterSbomByArchive(Bom sbom, ArchiveIndex archiveIndex, String parentPathPrefix) {
@@ -710,15 +724,62 @@ public class SbomGenerator {
         }
     }
 
-    private String resolveParentBomRef(ArtifactCoords parentArtifact,
-            Bom bom, BomBuilder builder) {
-        if (parentArtifact != null) {
-            String ref = builder.bomRefOf(parentArtifact);
-            if (ref != null) {
-                return ref;
+    /**
+     * Resolves the bom-ref for a detected SBOM's parent artifact.
+     *
+     * <p>
+     * Returns {@code coords.toPurl().toString()} if {@code coords} is a known
+     * model component (a top-level or nested {@link PackageComponent} ref),
+     * else falls back to the main component bomRef.
+     * </p>
+     */
+    private String resolveParentBomRef(PackageRef parentRef,
+            Bom bom, AssemblyComponents model) {
+        if (parentRef != null) {
+            String purl = parentRef.toPurl().toString();
+            // Check if this purl exists in the model
+            if (isKnownPackageRef(parentRef, model)) {
+                return purl;
             }
         }
         return bom.getMetadata().getComponent().getBomRef();
+    }
+
+    /**
+     * Checks if a {@link PackageRef} is present in the model as a
+     * {@link PackageComponent}.
+     */
+    private boolean isKnownPackageRef(PackageRef ref, AssemblyComponents model) {
+        for (AssemblyComponent comp : model.components()) {
+            if (containsPackageRef(comp, ref)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Recursively searches for a {@link PackageRef} in a component tree.
+     */
+    private boolean containsPackageRef(AssemblyComponent comp,
+            PackageRef ref) {
+        if (comp instanceof PackageComponent pkg) {
+            if (pkg.ref().toPurl().toString().equals(ref.toPurl().toString())) {
+                return true;
+            }
+            for (AssemblyComponent nested : pkg.nested()) {
+                if (containsPackageRef(nested, ref)) {
+                    return true;
+                }
+            }
+        } else if (comp instanceof FileComponent file) {
+            for (AssemblyComponent nested : file.nested()) {
+                if (containsPackageRef(nested, ref)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -763,18 +824,21 @@ public class SbomGenerator {
                 : null;
     }
 
-    private void populateToolMetadata(BomBuilder builder) {
+    private void populateToolMetadata(AssemblyMetadata metadata) {
+        metadata.setToolGroupId(ToolInfo.GROUP_ID);
+        metadata.setToolArtifactId(ToolInfo.ARTIFACT_ID);
+        metadata.setToolVersion(ToolInfo.VERSION);
         try {
-            builder.setToolLicenses(licenseResolver.resolveLicenses(
+            metadata.setToolLicenses(licenseResolver.resolveLicenseInfos(
                     ToolInfo.GROUP_ID, ToolInfo.ARTIFACT_ID, ToolInfo.VERSION));
         } catch (Exception e) {
             log.debug("Could not resolve tool licenses for {}:{}:{}",
                     ToolInfo.GROUP_ID, ToolInfo.ARTIFACT_ID, ToolInfo.VERSION, e);
         }
-        resolveToolHash(builder);
+        resolveToolHash(metadata);
     }
 
-    private void resolveToolHash(BomBuilder builder) {
+    private void resolveToolHash(AssemblyMetadata metadata) {
         try {
             DefaultArtifact toolArtifact = new DefaultArtifact(
                     ToolInfo.GROUP_ID, ToolInfo.ARTIFACT_ID, "jar", ToolInfo.VERSION);
@@ -784,7 +848,7 @@ public class SbomGenerator {
                     session.getRepositorySession(), request);
             File jarFile = result.getArtifact().getFile();
             if (jarFile != null && jarFile.isFile()) {
-                builder.setToolHash(SbomUtils.computeHash(messageDigest, jarFile.toPath()));
+                metadata.setToolHash(SbomUtils.computeHash(messageDigest, jarFile.toPath()));
             }
         } catch (Exception e) {
             log.debug("Could not resolve tool artifact {}:{}:{}",
@@ -792,15 +856,68 @@ public class SbomGenerator {
         }
     }
 
-    private void buildDependencyGraph(BomBuilder builder, ArchiveContent content) {
+    /**
+     * Builds the inferred dependency graph from Maven dependency resolution
+     * and adds the edges to the model as {@link DependencyEdge}s with
+     * {@code explicit=false}.
+     *
+     * <p>
+     * Reads {@code nestedDepsByParent} from the analyzer's side-data getter
+     * (Ruling C2-C: Aether confinement) and {@code knownIds} from the model.
+     * Preserves the try/catch warn-and-continue behavior from the legacy
+     * implementation.
+     * </p>
+     */
+    private void buildDependencyGraph(AssemblyComponents model) {
         try {
-            Map<ArtifactCoords, Set<ArtifactCoords>> collectedEdges = collectDependencyEdges(content.nestedDepsByParent());
-            Set<ArtifactCoords> knownIds = content.collectKnownArtifactCoords();
+            Map<ArtifactCoords, List<org.eclipse.aether.graph.Dependency>> nestedDepsByParent = lastAnalyzer
+                    .nestedDepsByParent();
+            if (nestedDepsByParent == null) {
+                nestedDepsByParent = Map.of();
+            }
+            Map<ArtifactCoords, Set<ArtifactCoords>> collectedEdges = collectDependencyEdges(nestedDepsByParent);
+            Set<ArtifactCoords> knownIds = collectKnownArtifactCoords(model);
             Map<ArtifactCoords, List<ArtifactCoords>> graph = filterEdges(collectedEdges, knownIds);
-            builder.setDependencyGraph(graph);
+            // Add inferred edges to the model with explicit=false
+            for (Map.Entry<ArtifactCoords, List<ArtifactCoords>> entry : graph.entrySet()) {
+                for (ArtifactCoords child : entry.getValue()) {
+                    model.addDependencyEdge(new DependencyEdge(entry.getKey(), child, false));
+                }
+            }
         } catch (Exception e) {
             log.warn("Failed to build dependency graph,"
                     + " SBOM will omit dependency information", e);
+        }
+    }
+
+    /**
+     * Collects all known artifact coordinates from the model (top-level and
+     * nested {@link PackageComponent}s), for use in dependency graph filtering.
+     */
+    private Set<ArtifactCoords> collectKnownArtifactCoords(AssemblyComponents model) {
+        Set<ArtifactCoords> ids = new HashSet<>();
+        for (AssemblyComponent comp : model.components()) {
+            collectPackageRefs(comp, ids);
+        }
+        return ids;
+    }
+
+    /**
+     * Recursively collects {@link ArtifactCoords} from {@link PackageComponent}s.
+     */
+    private void collectPackageRefs(AssemblyComponent comp,
+            Set<ArtifactCoords> ids) {
+        if (comp instanceof PackageComponent pkg) {
+            if (pkg.ref() instanceof ArtifactCoords coords) {
+                ids.add(coords);
+            }
+            for (AssemblyComponent nested : pkg.nested()) {
+                collectPackageRefs(nested, ids);
+            }
+        } else if (comp instanceof FileComponent file) {
+            for (AssemblyComponent nested : file.nested()) {
+                collectPackageRefs(nested, ids);
+            }
         }
     }
 

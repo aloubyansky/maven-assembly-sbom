@@ -139,7 +139,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                     externalSboms,
                     project.getBasedir() != null ? project.getBasedir().toPath() : null);
 
-            List<ArchiveContent.FileEntry> entries = collectArchiveEntries(archiver);
+            List<FileEntry> entries = collectArchiveEntries(archiver);
             String baseDirPrefix = detectBaseDirPrefix(entries);
 
             SbomGenerator generator = new SbomGenerator(
@@ -252,10 +252,10 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     /**
      * Iterates all file entries in the archiver and computes their hashes.
      */
-    private List<ArchiveContent.FileEntry> collectArchiveEntries(Archiver archiver)
+    private List<FileEntry> collectArchiveEntries(Archiver archiver)
             throws IOException {
         boolean filterSboms = "merge".equalsIgnoreCase(embeddedSboms);
-        List<ArchiveContent.FileEntry> entries = new ArrayList<>();
+        List<FileEntry> entries = new ArrayList<>();
         for (ResourceIterator it = archiver.getResources(); it.hasNext();) {
             ArchiveEntry ae = it.next();
             if (ae.getType() != ArchiveEntry.FILE) {
@@ -265,7 +265,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                 continue;
             }
             try (InputStream is = ae.getInputStream()) {
-                entries.add(new ArchiveContent.FileEntry(ae.getName(),
+                entries.add(new FileEntry(ae.getName(),
                         SbomUtils.computeHash(messageDigest, is), ae.getFile()));
             }
         }
@@ -284,7 +284,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
      *
      * @return the prefix including trailing slash, or {@code null}
      */
-    private String detectBaseDirPrefix(List<ArchiveContent.FileEntry> entries) {
+    private String detectBaseDirPrefix(List<FileEntry> entries) {
         if (!includeBaseDir || entries.isEmpty()) {
             return null;
         }
@@ -348,11 +348,9 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                 solePluginAttach = pluginAttach;
                 String defaultFinalName = resolveFinalName(plugin.getConfiguration());
                 for (org.apache.maven.model.PluginExecution exec : plugin.getExecutions()) {
-                    boolean execAttach = resolveAssemblyAttach(
-                            exec.getConfiguration(), pluginAttach);
+                    boolean execAttach = resolveAssemblyAttach(exec.getConfiguration(), pluginAttach);
                     List<Assembly> descriptors = findAllDescriptors(exec);
-                    Assembly match = matchDescriptorByFilename(
-                            exec, destName, defaultFinalName, descriptors);
+                    Assembly match = matchDescriptorByFilename(exec, destName, defaultFinalName, descriptors);
                     if (match != null) {
                         String classifier = resolveClassifier(exec, match.getId());
                         return new AssemblyConfig(match, classifier, execAttach);
@@ -361,7 +359,6 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                         candidateCount++;
                         soleExec = exec;
                         soleAssembly = candidate;
-                        solePluginAttach = pluginAttach;
                     }
                 }
             }

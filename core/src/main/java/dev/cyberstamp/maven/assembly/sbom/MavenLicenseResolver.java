@@ -1,31 +1,25 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
-import org.apache.maven.model.Model;
-import org.cyclonedx.model.License;
 import org.cyclonedx.model.LicenseChoice;
-import org.cyclonedx.util.LicenseResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Resolves CycloneDX {@link LicenseChoice} for Maven artifacts by reading
- * license declarations from each artifact's effective POM and mapping them
- * to SPDX license identifiers.
+ * Resolves CycloneDX {@link LicenseChoice} for Maven artifacts by delegating
+ * to a {@link LicenseSource} and {@link SpdxLicenseMapper}.
  *
  * <p>
- * The resolution strategy for each Maven license entry is:
+ * This resolver wraps an {@link EffectiveModelLicenseSource} (which extracts
+ * raw license declarations from Maven effective POMs) and an
+ * {@link SpdxLicenseMapper} (which maps those declarations to SPDX identifiers).
+ * The mapped licenses are then converted to CycloneDX format via
+ * {@link CycloneDxLicenses#toLicenseChoice(List)}.
  * </p>
- * <ol>
- * <li>Try resolving the license URL via the CycloneDX
- * {@link LicenseResolver}, since URLs point to a specific license text
- * and are more reliable than names</li>
- * <li>If the URL does not resolve, try the license name</li>
- * <li>If neither resolves to an SPDX identifier, create a raw
- * {@link License} preserving the original name and URL</li>
- * </ol>
  *
  * <p>
  * Behavior when an artifact has no license information is controlled by the
@@ -38,9 +32,18 @@ class MavenLicenseResolver {
 
     private static final Logger log = LoggerFactory.getLogger(MavenLicenseResolver.class);
 
-    private final EffectiveModelResolver modelResolver;
+    private final SpdxLicenseMapper mapper;
+    private final EffectiveModelLicenseSource licenseSource;
     private final boolean failOnMissingLicense;
-    private final Map<ArtifactCoords, LicenseChoice> cache = new HashMap<>();
+    /**
+     * Per-GAV resolution cache keyed by coordinates. A stored {@code null}
+     * value marks a GAV that resolved to no license information (the
+     * missing-license policy already applied on first resolution); a non-null
+     * list holds the resolved licenses. {@link #resolveLicenses} derives its
+     * {@link LicenseChoice} from the same cached list, so both entry points
+     * resolve each GAV exactly once.
+     */
+    private final Map<ArtifactCoords, List<LicenseInfo>> cache = new HashMap<>();
 
     /**
      * Creates a license resolver backed by the given model resolver.
@@ -51,8 +54,35 @@ class MavenLicenseResolver {
      *        logs a warning and returns {@code null}
      */
     MavenLicenseResolver(EffectiveModelResolver modelResolver, boolean failOnMissingLicense) {
-        this.modelResolver = modelResolver;
+        this.mapper = new SpdxLicenseMapper();
+        this.licenseSource = new EffectiveModelLicenseSource(modelResolver);
         this.failOnMissingLicense = failOnMissingLicense;
+    }
+
+    /**
+     * Resolves license information for the given Maven artifact as a
+     * neutral {@link LicenseInfo} list.
+     *
+     * <p>
+     * Builds the artifact's effective POM model, extracts its
+     * {@code <licenses>} declarations, and maps each to a neutral
+     * {@link LicenseInfo} record. This method shares the same cache and
+     * {@code failOnMissingLicense} behavior as {@link #resolveLicenses}, and
+     * resolves identically for the same GAV.
+     * </p>
+     *
+     * @param groupId the Maven groupId
+     * @param artifactId the Maven artifactId
+     * @param version the artifact version
+     * @return the resolved license information, or an empty list if no
+     *         licenses are declared in the effective model
+     * @throws LicenseResolutionException if {@code failOnMissingLicense} is
+     *         {@code true} and no license information is available
+     */
+    List<LicenseInfo> resolveLicenseInfos(String groupId, String artifactId, String version) {
+        ArtifactCoords id = ArtifactCoords.of(groupId, artifactId, version);
+        List<LicenseInfo> infos = resolveInfosCached(id, groupId, artifactId, version);
+        return infos == null ? List.of() : infos;
     }
 
     /**
@@ -74,116 +104,40 @@ class MavenLicenseResolver {
      */
     LicenseChoice resolveLicenses(String groupId, String artifactId, String version) {
         ArtifactCoords id = ArtifactCoords.of(groupId, artifactId, version);
+        List<LicenseInfo> infos = resolveInfosCached(id, groupId, artifactId, version);
+        return infos == null ? null : CycloneDxLicenses.toLicenseChoice(infos);
+    }
+
+    /**
+     * Resolves the neutral license list for a GAV, caching the result so
+     * that both {@link #resolveLicenseInfos} and {@link #resolveLicenses}
+     * resolve each GAV exactly once and apply the missing-license policy
+     * only on first resolution.
+     *
+     * @return the resolved licenses, or {@code null} if none are declared
+     * @throws LicenseResolutionException if {@code failOnMissingLicense} is
+     *         {@code true} and no license information is available
+     */
+    private List<LicenseInfo> resolveInfosCached(ArtifactCoords id,
+            String groupId, String artifactId, String version) {
         if (cache.containsKey(id)) {
             return cache.get(id);
         }
-
-        LicenseChoice result = doResolveLicenses(id, groupId, artifactId, version);
-        cache.put(id, result);
-        return result;
-    }
-
-    /**
-     * Performs the actual license resolution without caching.
-     */
-    private LicenseChoice doResolveLicenses(ArtifactCoords id,
-            String groupId, String artifactId, String version) {
-        Model model = modelResolver.resolveEffectiveModel(groupId, artifactId, version);
-        if (model == null) {
-            return handleMissingLicenses(groupId, artifactId, version,
-                    "effective model could not be resolved");
-        }
-
-        var mavenLicenses = model.getLicenses();
-        if (mavenLicenses == null || mavenLicenses.isEmpty()) {
-            return handleMissingLicenses(groupId, artifactId, version,
-                    "no <licenses> declared in the effective POM");
-        }
-
-        LicenseChoice result = new LicenseChoice();
-        for (var mavenLicense : mavenLicenses) {
-            LicenseChoice resolved = resolveToSpdx(mavenLicense.getUrl(), mavenLicense.getName());
-            if (resolved != null) {
-                if (resolved.getExpression() != null) {
-                    result.setExpression(resolved.getExpression());
-                } else if (resolved.getLicenses() != null && !resolved.getLicenses().isEmpty()) {
-                    result.addLicense(resolved.getLicenses().get(0));
-                }
-            } else {
-                result.addLicense(createRawLicense(mavenLicense.getName(), mavenLicense.getUrl()));
-            }
-        }
-        return result;
-    }
-
-    /**
-     * Attempts to resolve a single Maven license to an SPDX identifier
-     * or expression, trying the URL first and falling back to the name.
-     *
-     * <p>
-     * URLs are preferred because they point to a specific license
-     * text, while POM license names are often ambiguous (e.g.,
-     * "The BSD License" could mean BSD-3-Clause or BSD-4-Clause).
-     * </p>
-     *
-     * @param url the license URL, or {@code null}
-     * @param name the license name, or {@code null}
-     * @return a {@link LicenseChoice} containing either an SPDX license
-     *         or expression, or {@code null} if no SPDX match was found
-     */
-    private LicenseChoice resolveToSpdx(String url, String name) {
-        LicenseChoice fromUrl = tryResolve(url);
-        if (fromUrl != null) {
-            return fromUrl;
-        }
-        return tryResolve(name);
-    }
-
-    /**
-     * Attempts to resolve the given string (a license name or URL) to
-     * an SPDX license or expression via the CycloneDX
-     * {@link LicenseResolver}.
-     *
-     * @param licenseString the string to resolve, or {@code null}
-     * @return the resolved {@link LicenseChoice}, or {@code null} if
-     *         the string is {@code null}, blank, or does not match any
-     *         SPDX entry
-     */
-    private LicenseChoice tryResolve(String licenseString) {
-        if (licenseString == null || licenseString.isBlank()) {
+        List<RawLicense> raws = licenseSource.licensesFor(groupId, artifactId, version);
+        if (raws.isEmpty()) {
+            // Distinguish "no model" vs "model without <licenses>" only for the
+            // warning/throw message; both map to the missing-license policy.
+            handleMissingLicenses(groupId, artifactId, version,
+                    "no license information in the effective model");
+            cache.put(id, null);
             return null;
         }
-        LicenseChoice choice = LicenseResolver.resolve(licenseString, false);
-        if (choice == null) {
-            return null;
+        List<LicenseInfo> infos = new ArrayList<>(raws.size());
+        for (RawLicense raw : raws) {
+            infos.add(mapper.map(raw));
         }
-        if (choice.getLicenses() != null && !choice.getLicenses().isEmpty()
-                && choice.getLicenses().get(0).getId() != null) {
-            return choice;
-        }
-        if (choice.getExpression() != null && choice.getExpression().getValue() != null) {
-            return choice;
-        }
-        return null;
-    }
-
-    /**
-     * Creates a raw CycloneDX {@link License} when SPDX resolution fails,
-     * preserving the original name and URL.
-     *
-     * @param name the license name, or {@code null}
-     * @param url the license URL, or {@code null}
-     * @return a license with name and/or URL set (no SPDX id)
-     */
-    private License createRawLicense(String name, String url) {
-        License license = new License();
-        if (name != null) {
-            license.setName(name.trim());
-        }
-        if (url != null) {
-            license.setUrl(url.trim());
-        }
-        return license;
+        cache.put(id, infos);
+        return infos;
     }
 
     /**

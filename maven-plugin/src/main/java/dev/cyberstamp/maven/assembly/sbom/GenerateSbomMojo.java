@@ -186,7 +186,7 @@ public class GenerateSbomMojo extends AbstractMojo {
             }
         }
 
-        List<ArchiveContent.FileEntry> entries;
+        List<FileEntry> entries;
         try {
             entries = collectDirectoryEntries(inputDirectory.toPath(), messageDigest);
         } catch (IOException e) {
@@ -229,16 +229,15 @@ public class GenerateSbomMojo extends AbstractMojo {
         }
     }
 
-    private List<ArchiveContent.FileEntry> collectDirectoryEntries(
-            Path dir, MessageDigest digest) throws IOException {
-        List<ArchiveContent.FileEntry> entries = new ArrayList<>();
+    private List<FileEntry> collectDirectoryEntries(Path dir, MessageDigest digest) throws IOException {
+        List<FileEntry> entries = new ArrayList<>();
         Files.walkFileTree(dir, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
                     throws IOException {
                 String relativePath = dir.relativize(file).toString().replace('\\', '/');
                 String hash = SbomUtils.computeHash(digest, file);
-                entries.add(new ArchiveContent.FileEntry(
+                entries.add(new FileEntry(
                         relativePath, hash, file.toFile()));
                 return FileVisitResult.CONTINUE;
             }
