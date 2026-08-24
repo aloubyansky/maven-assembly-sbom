@@ -205,7 +205,17 @@ public final class BomMerger {
 
         for (Component comp : sorted) {
             normalizePurls(comp);
+            // FILE components additionally need their file: bom-ref rewritten.
             prefixFileBomRef(comp, parentPathPrefix);
+            // Every component merged from an embedded SBOM carries occurrence
+            // locations relative to the containing archive; prefix them so they
+            // resolve from the assembly root. Idempotent (already-prefixed
+            // locations are skipped), so it is safe for FILE components (whose
+            // occurrences prefixFileBomRef already prefixed) and on every merge
+            // branch (new, existing-nested, or top-level counterpart).
+            if (parentPathPrefix != null) {
+                prefixScopeRelativeOccurrences(comp, parentPathPrefix);
+            }
             String purl = comp.getPurl();
 
             if (purl != null) {
@@ -317,6 +327,27 @@ public final class BomMerger {
         for (Occurrence occ : evidence.getOccurrences()) {
             String location = occ.getLocation();
             if (location != null && !location.isEmpty()) {
+                occ.setLocation(parentPathPrefix + location);
+            }
+        }
+    }
+
+    /**
+     * Prefixes a component's own occurrence locations with the parent path
+     * prefix, skipping empty locations and any that already start with the
+     * prefix (so it is safe to call after occurrences were already prefixed or
+     * migrated). Does not recurse into nested components.
+     */
+    private static void prefixScopeRelativeOccurrences(Component comp,
+            String parentPathPrefix) {
+        Evidence evidence = comp.getEvidence();
+        if (evidence == null || evidence.getOccurrences() == null) {
+            return;
+        }
+        for (Occurrence occ : evidence.getOccurrences()) {
+            String location = occ.getLocation();
+            if (location != null && !location.isEmpty()
+                    && !location.startsWith(parentPathPrefix)) {
                 occ.setLocation(parentPathPrefix + location);
             }
         }

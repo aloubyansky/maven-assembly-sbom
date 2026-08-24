@@ -22,11 +22,15 @@ import java.util.List;
 public sealed interface AssemblyComponent permits PackageComponent, FileComponent {
 
     /**
+     * Returns the licenses attached to this component.
+     *
      * @return the licenses attached to this component; never {@code null}
      */
     List<LicenseInfo> licenses();
 
     /**
+     * Returns the components nested under this one.
+     *
      * @return the components nested under this one (shaded/bundled
      *         dependencies, assembled-jar contents); never {@code null}
      */

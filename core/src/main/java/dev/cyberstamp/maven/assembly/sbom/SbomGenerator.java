@@ -21,6 +21,8 @@ import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Dependency;
 import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.Hash;
+import org.cyclonedx.model.component.evidence.Identity;
+import org.cyclonedx.model.component.evidence.Method;
 import org.cyclonedx.model.component.evidence.Occurrence;
 import org.eclipse.aether.DefaultRepositorySystemSession;
 import org.eclipse.aether.RepositorySystem;
@@ -58,7 +60,7 @@ public class SbomGenerator {
     private final Version schemaVersion;
 
     private ProductInfo product;
-    private MavenLicenseResolver licenseResolver;
+    private LicenseEnrichment licenseEnrichment;
     private List<org.eclipse.aether.graph.Dependency> cachedManagedDeps;
     private ArchiveAnalyzer lastAnalyzer;
 
@@ -154,8 +156,8 @@ public class SbomGenerator {
                 session.getRepositorySession(),
                 project.getRemoteProjectRepositories(),
                 session.getProjects());
-        licenseResolver = new MavenLicenseResolver(
-                effectiveModelResolver, failOnMissingLicense);
+        licenseEnrichment = new LicenseEnrichment(
+                new EffectiveModelLicenseSource(effectiveModelResolver), failOnMissingLicense);
         cachedManagedDeps = null;
 
         AssemblyComponents model = analyzeEntries(entries, baseDirPrefix, externalBoms);
@@ -171,18 +173,20 @@ public class SbomGenerator {
         metadata.setSchemaVersion(schemaVersion.getVersionString());
         metadata.setClassifier(classifier);
         metadata.setArchiveType(archiveType);
-        metadata.setProjectLicenses(licenseResolver.resolveLicenseInfos(
+        metadata.setProjectLicenses(licenseEnrichment.resolve(
                 project.getGroupId(), project.getArtifactId(), project.getVersion()));
         metadata.setProduct(product);
         populateToolMetadata(metadata);
         model.setMetadata(metadata);
 
-        // Enrich components with licenses and build dependency graph
-        enrichComponentsWithLicenses(model);
+        // Build the dependency graph, then enrich + render through the shared
+        // pipeline. No jar locator is supplied: the analyzer already performed
+        // shaded detection, so only license enrichment runs here.
         buildDependencyGraph(model);
-
-        // Render the neutral model to CycloneDX BOM
-        Bom bom = new BomRenderer().render(model);
+        Bom bom = SbomPipeline.forModel(model)
+                .licenseSource(new EffectiveModelLicenseSource(effectiveModelResolver))
+                .failOnMissingLicense(failOnMissingLicense)
+                .render();
 
         // Post-processing (detected/external SBOMs, filtering, dedup)
         ArchiveIndex archiveIndex = ArchiveIndex.of(entries, baseDirPrefix, bomHashAlgorithm.getSpec());
@@ -209,57 +213,6 @@ public class SbomGenerator {
         return lastAnalyzer.analyze(entries, baseDirPrefix);
     }
 
-    /**
-     * Enriches all {@link PackageComponent}s in the model with resolved license
-     * information. Since {@link PackageComponent} is immutable, this rebuilds
-     * components with licenses attached, preserving order and nesting.
-     *
-     * <p>
-     * License resolution uses {@link MavenLicenseResolver#resolveLicenseInfos},
-     * which shares the same cache and {@code failOnMissingLicense} behavior as
-     * the legacy {@code resolveLicenses}, ensuring identical resolution for the
-     * same GAVs.
-     * </p>
-     *
-     * @param model the model to enrich; mutated in place
-     */
-    private void enrichComponentsWithLicenses(AssemblyComponents model) {
-        List<AssemblyComponent> enriched = new ArrayList<>(model.components().size());
-        for (AssemblyComponent comp : model.components()) {
-            enriched.add(enrichComponentRecursively(comp));
-        }
-        model.setComponents(enriched);
-    }
-
-    /**
-     * Recursively enriches a component and its nested children with licenses.
-     */
-    private AssemblyComponent enrichComponentRecursively(
-            AssemblyComponent comp) {
-        if (comp instanceof PackageComponent pkg) {
-            List<LicenseInfo> licenses = List.of();
-            if (pkg.ref() instanceof ArtifactCoords coords) {
-                licenses = licenseResolver.resolveLicenseInfos(
-                        coords.groupId(), coords.artifactId(), coords.version());
-            }
-            // Enrich nested components recursively
-            List<AssemblyComponent> enrichedNested = new ArrayList<>();
-            for (AssemblyComponent nested : pkg.nested()) {
-                enrichedNested.add(enrichComponentRecursively(nested));
-            }
-            return new PackageComponent(pkg.ref(), pkg.archivePath(), pkg.hash(),
-                    licenses, enrichedNested);
-        } else if (comp instanceof FileComponent file) {
-            // Enrich nested components recursively
-            List<AssemblyComponent> enrichedNested = new ArrayList<>();
-            for (AssemblyComponent nested : file.nested()) {
-                enrichedNested.add(enrichComponentRecursively(nested));
-            }
-            return new FileComponent(file.archivePath(), file.hash(), enrichedNested);
-        }
-        return comp;
-    }
-
     private void processDiscoveredSboms(Bom bom, AssemblyComponents model, ArchiveIndex archiveIndex) {
         EmbeddedSbomMergeTransform transform = new EmbeddedSbomMergeTransform(
                 embeddedSboms, archiveIndex);
@@ -277,6 +230,7 @@ public class SbomGenerator {
             ComponentView cv = new ComponentView(comp, index.normalizedAlg());
             if (matchesArchive(cv, index)) {
                 correctOccurrences(cv, index);
+                ensureMavenManifestIdentity(comp);
                 filtered.add(comp);
                 collectBomRefs(comp, survivingRefs);
             } else {
@@ -376,6 +330,43 @@ public class SbomGenerator {
             }
         }
         return false;
+    }
+
+    /**
+     * Adds a {@code manifest-analysis} identity to a Maven component from an
+     * external/embedded SBOM that survived archive filtering (i.e. was verified
+     * present in the distribution) but carries no identity of its own — for
+     * example a Quarkus-generated SBOM component, which brings a rich
+     * description/publisher but no evidence identity. This restores the same
+     * provenance the analyzer records for components it identifies directly.
+     *
+     * <p>
+     * Only Maven components are affected; components already carrying an
+     * identity, and non-Maven (e.g. npm) components, are left untouched.
+     * </p>
+     */
+    private static void ensureMavenManifestIdentity(Component comp) {
+        String purl = comp.getPurl();
+        if (purl == null || !purl.startsWith("pkg:maven/")) {
+            return;
+        }
+        Evidence evidence = comp.getEvidence();
+        if (evidence != null && evidence.getIdentities() != null
+                && !evidence.getIdentities().isEmpty()) {
+            return;
+        }
+        if (evidence == null) {
+            evidence = new Evidence();
+            comp.setEvidence(evidence);
+        }
+        Identity identity = new Identity();
+        identity.setField(Identity.Field.PURL);
+        identity.setConfidence(1.0);
+        Method method = new Method();
+        method.setTechnique(Method.Technique.MANIFEST_ANALYSIS);
+        method.setValue("maven-pom-analysis");
+        identity.setMethods(List.of(method));
+        evidence.setIdentities(List.of(identity));
     }
 
     /**
@@ -829,7 +820,7 @@ public class SbomGenerator {
         metadata.setToolArtifactId(ToolInfo.ARTIFACT_ID);
         metadata.setToolVersion(ToolInfo.VERSION);
         try {
-            metadata.setToolLicenses(licenseResolver.resolveLicenseInfos(
+            metadata.setToolLicenses(licenseEnrichment.resolve(
                     ToolInfo.GROUP_ID, ToolInfo.ARTIFACT_ID, ToolInfo.VERSION));
         } catch (Exception e) {
             log.debug("Could not resolve tool licenses for {}:{}:{}",

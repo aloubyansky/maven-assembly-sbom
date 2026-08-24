@@ -176,9 +176,16 @@ public class BomRenderer {
         if (pkg.ref() instanceof ArtifactCoords coords) {
             comp = createMavenComponent(coords);
         } else {
-            // Generic package component
+            // Non-Maven package component (generic assembled jar, npm, ...).
             comp = new Component();
             comp.setType(Component.Type.LIBRARY);
+            if (pkg.ref() instanceof GenericPackageRef generic) {
+                comp.setName(generic.name());
+                comp.setVersion(generic.version());
+            } else if (pkg.ref() instanceof NpmPackageRef npm) {
+                comp.setName(npm.name());
+                comp.setVersion(npm.version());
+            }
             String purl = pkg.ref().toPurl().toString();
             comp.setBomRef(purl);
             comp.setPurl(purl);

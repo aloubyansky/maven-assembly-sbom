@@ -55,6 +55,8 @@ public final class AssemblyComponents {
     }
 
     /**
+     * Returns the top-level components.
+     *
      * @return an unmodifiable view of the top-level components
      */
     public List<AssemblyComponent> components() {
@@ -71,6 +73,8 @@ public final class AssemblyComponents {
     }
 
     /**
+     * Returns the dependency edges.
+     *
      * @return an unmodifiable view of the dependency edges
      */
     public List<DependencyEdge> dependencyEdges() {
@@ -87,6 +91,8 @@ public final class AssemblyComponents {
     }
 
     /**
+     * Returns the discovered embedded SBOMs.
+     *
      * @return an unmodifiable view of the discovered embedded SBOMs
      */
     public List<DiscoveredSbom> discoveredSboms() {

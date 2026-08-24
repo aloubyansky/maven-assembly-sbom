@@ -22,6 +22,10 @@ public record FileComponent(String archivePath, String hash, List<AssemblyCompon
         implements
             AssemblyComponent {
 
+    /**
+     * Requires a non-null {@code archivePath} and defensively copies the
+     * nested list (a {@code null} list becomes empty).
+     */
     public FileComponent {
         Objects.requireNonNull(archivePath, "archivePath");
         nested = nested == null ? List.of() : List.copyOf(nested);

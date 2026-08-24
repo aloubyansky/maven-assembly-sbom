@@ -58,6 +58,13 @@ public record ArtifactCoords(String groupId, String artifactId, String version, 
             "sources", "java-source",
             "javadoc", "javadoc");
 
+    /**
+     * Canonicalizes the coordinates: requires non-null g/a/v, defaults a
+     * null/empty {@code type} to {@code jar}, normalizes an empty
+     * {@code classifier} to {@code null}, and maps Aether extension+classifier
+     * pairs to the equivalent Maven type (e.g. {@code jar}+{@code tests} →
+     * {@code test-jar}).
+     */
     public ArtifactCoords {
         Objects.requireNonNull(groupId, "groupId");
         Objects.requireNonNull(artifactId, "artifactId");
@@ -83,6 +90,11 @@ public record ArtifactCoords(String groupId, String artifactId, String version, 
 
     /**
      * Creates an {@link ArtifactCoords} without type or classifier.
+     *
+     * @param groupId the Maven groupId
+     * @param artifactId the Maven artifactId
+     * @param version the artifact version
+     * @return the coordinates with a default {@code jar} type and no classifier
      */
     public static ArtifactCoords of(String groupId, String artifactId, String version) {
         return new ArtifactCoords(groupId, artifactId, version, null, null);

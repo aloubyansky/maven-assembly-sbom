@@ -20,6 +20,10 @@ import java.util.Objects;
  */
 public record NpmPackageRef(String scope, String name, String version) implements PackageRef {
 
+    /**
+     * Requires a non-null {@code name} and {@code version}, and normalizes an
+     * empty {@code scope} to {@code null}.
+     */
     public NpmPackageRef {
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(version, "version");

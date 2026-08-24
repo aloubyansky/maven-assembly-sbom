@@ -16,6 +16,9 @@ import java.util.Objects;
  */
 public record GenericPackageRef(String name, String version) implements PackageRef {
 
+    /**
+     * Requires a non-null {@code name} and {@code version}.
+     */
     public GenericPackageRef {
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(version, "version");

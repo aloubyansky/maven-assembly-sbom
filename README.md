@@ -94,14 +94,14 @@ The generated SBOM describes every file in the archive. Maven artifacts are iden
 ```json
 {
   "bomFormat": "CycloneDX",
-  "specVersion": "1.6",
+  "specVersion": "1.7",
   "metadata": {
     "component": {
       "type": "application",
       "group": "com.example",
       "name": "my-app",
       "version": "1.0",
-      "purl": "pkg:maven/com.example/my-app@1.0?type=zip&classifier=dist",
+      "purl": "pkg:maven/com.example/my-app@1.0?classifier=dist&type=zip",
       "hashes": [{ "alg": "SHA-256", "content": "e4f90..." }]
     }
   },
@@ -111,12 +111,12 @@ The generated SBOM describes every file in the archive. Maven artifacts are iden
       "group": "org.apache.commons",
       "name": "commons-lang3",
       "version": "3.17.0",
-      "purl": "pkg:maven/org.apache.commons/commons-lang3@3.17.0?type=jar",
+      "purl": "pkg:maven/org.apache.commons/commons-lang3@3.17.0",
       "licenses": [{ "license": { "id": "Apache-2.0" } }],
       "hashes": [{ "alg": "SHA-256", "content": "dfc18..." }],
       "evidence": {
         "occurrences": [{ "location": "lib/commons-lang3-3.17.0.jar" }],
-        "identity": [{ "field": "purl", "confidence": 1, "methods": [{ "technique": "manifest-analysis" }] }]
+        "identity": [{ "field": "purl", "confidence": 1.0, "methods": [{ "technique": "manifest-analysis" }] }]
       }
     },
     {
@@ -314,10 +314,11 @@ Every file in the assembly is inspected and classified as either a **library** (
 - **Content hash matching** — each archive entry's content hash is computed and looked up against a pre-built index of the project's resolved Maven artifacts. This identifies artifacts reliably regardless of filename (e.g., custom `outputFileNameMapping` in the assembly descriptor).
 - **Deduplication** — if the same artifact appears at multiple locations in the archive, it is represented as a single component with multiple `evidence/occurrence` entries.
 
-Library components include full [Package URL](https://github.com/package-url/purl-spec) (PURL) identifiers:
+Library components include full [Package URL](https://github.com/package-url/purl-spec) (PURL) identifiers. The default `jar` type is omitted (per the purl spec, `type` is a known but optional Maven qualifier), and any qualifiers are emitted in canonical alphabetical order:
 
 ```
-pkg:maven/org.apache.commons/commons-io@2.22.0?type=jar
+pkg:maven/org.apache.commons/commons-io@2.22.0
+pkg:maven/org.example/native-lib@1.0?classifier=linux-x86_64&type=so
 ```
 
 ### License Resolution
@@ -382,7 +383,7 @@ The `embeddedSboms` option controls what happens with detected SBOMs:
 The `externalSboms` option accepts a comma-separated list of file paths to CycloneDX SBOMs generated outside the Maven build (e.g., by `cdxgen`, `@cyclonedx/cyclonedx-npm`, or pnpm). These SBOMs are:
 
 1. **Used for archive entry matching** — component hashes from external SBOMs are checked against unmatched archive entries. If a match is found, the entry is identified from the external SBOM rather than appearing as an unidentified FILE component.
-2. **Merged under the main component** — all external SBOM components are nested under the distribution's main component.
+2. **Merged flat as top-level components** — external SBOM components are added as peers of the distribution's own components (not nested under the main component). Their dependency entries are imported into the BOM's dependency section, and the external SBOM's top-level dependencies are linked under the distribution's main component. A Maven component from an external SBOM that is verified present in the archive also gains a `manifest-analysis` identity (see [Evidence](#evidence)).
 
 Example configuration:
 
@@ -425,7 +426,7 @@ The main `application` component's PURL includes the archive type derived from t
 
 ### Evidence
 
-Each component includes CycloneDX `evidence` with `occurrence` entries recording where it appears in the archive. Library components include an `identity` with technique `manifest-analysis` indicating they were identified through Maven artifact metadata.
+Each component includes CycloneDX `evidence` with `occurrence` entries recording where it appears in the archive. Maven `library` components carry an `identity` with technique `manifest-analysis`, asserting the component was confirmed present in the assembly through Maven artifact metadata — whether identified directly by content-hash/`pom.properties` analysis or adopted from an external/embedded SBOM and then verified against the archive contents.
 
 ## Requirements
 
