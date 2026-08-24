@@ -102,9 +102,9 @@ class GoldenBomTest {
         metadata.setArchiveType("zip");
         metadata.setProjectLicenses(List.of(
                 LicenseInfo.spdx("Apache-2.0", "https://www.apache.org/licenses/LICENSE-2.0")));
-        metadata.setToolGroupId(ToolInfo.GROUP_ID);
-        metadata.setToolArtifactId(ToolInfo.ARTIFACT_ID);
-        metadata.setToolVersion(ToolInfo.VERSION);
+        metadata.setToolGroupId("dev.cyberstamp.maven.assembly.sbom");
+        metadata.setToolArtifactId("assembly-sbom-core");
+        metadata.setToolVersion("0.0.0-golden");
         metadata.setToolLicenses(List.of(LicenseInfo.spdx("Apache-2.0", null)));
         metadata.setToolHash("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
         model.setMetadata(metadata);
