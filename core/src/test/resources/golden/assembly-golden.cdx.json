@@ -1,7 +1,7 @@
 {
   "bomFormat" : "CycloneDX",
   "specVersion" : "1.6",
-  "serialNumber" : "urn:uuid:71d799cf-bdf5-3c5d-9bc7-670fd48041f9",
+  "serialNumber" : "urn:uuid:a6fd078f-53ca-3b74-9005-dfdbd7c2af9a",
   "version" : 1,
   "metadata" : {
     "timestamp" : "2023-11-14T22:13:20Z",
@@ -11,7 +11,7 @@
           "type" : "application",
           "group" : "dev.cyberstamp.maven.assembly.sbom",
           "name" : "assembly-sbom-core",
-          "version" : "0.1.3-SNAPSHOT",
+          "version" : "0.0.0-golden",
           "hashes" : [
             {
               "alg" : "SHA-256",
@@ -25,7 +25,7 @@
               }
             }
           ],
-          "purl" : "pkg:maven/dev.cyberstamp.maven.assembly.sbom/assembly-sbom-core@0.1.3-SNAPSHOT"
+          "purl" : "pkg:maven/dev.cyberstamp.maven.assembly.sbom/assembly-sbom-core@0.0.0-golden"
         }
       ]
     },
