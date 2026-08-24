@@ -8,7 +8,7 @@ import org.cyclonedx.model.Component;
 /**
  * Merges embedded (discovered) SBOMs into the assembly BOM according to the
  * configured mode ("ignore" | "link" | merge). Extracted verbatim from
- * SbomGenerator.processDetectedSboms so the merge policy lives in one
+ * SbomGenerator.processDiscoveredSboms so the merge policy lives in one
  * transform; SbomGenerator delegates to it with no behavior change.
  */
 final class EmbeddedSbomMergeTransform {

@@ -186,7 +186,7 @@ public class SbomGenerator {
 
         // Post-processing (detected/external SBOMs, filtering, dedup)
         ArchiveIndex archiveIndex = ArchiveIndex.of(entries, baseDirPrefix, bomHashAlgorithm.getSpec());
-        processDetectedSboms(bom, model, archiveIndex);
+        processDiscoveredSboms(bom, model, archiveIndex);
         processExternalBoms(bom, externalBoms, archiveIndex);
 
         String normalizedAlg = archiveIndex.normalizedAlg();
@@ -260,7 +260,7 @@ public class SbomGenerator {
         return comp;
     }
 
-    private void processDetectedSboms(Bom bom, AssemblyComponents model, ArchiveIndex archiveIndex) {
+    private void processDiscoveredSboms(Bom bom, AssemblyComponents model, ArchiveIndex archiveIndex) {
         EmbeddedSbomMergeTransform transform = new EmbeddedSbomMergeTransform(
                 embeddedSboms, archiveIndex);
         transform.apply(bom, model, owner -> resolveParentBomRef(owner, bom, model));
@@ -725,7 +725,7 @@ public class SbomGenerator {
     }
 
     /**
-     * Resolves the bom-ref for a detected SBOM's parent artifact.
+     * Resolves the bom-ref for a discovered SBOM's parent artifact.
      *
      * <p>
      * Returns {@code coords.toPurl().toString()} if {@code coords} is a known
