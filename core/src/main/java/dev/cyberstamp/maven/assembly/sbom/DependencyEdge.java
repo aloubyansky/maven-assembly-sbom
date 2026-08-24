@@ -22,6 +22,9 @@ import java.util.Objects;
  */
 public record DependencyEdge(PackageRef parent, PackageRef child, boolean explicit) {
 
+    /**
+     * Requires non-null {@code parent} and {@code child}.
+     */
     public DependencyEdge {
         Objects.requireNonNull(parent, "parent");
         Objects.requireNonNull(child, "child");

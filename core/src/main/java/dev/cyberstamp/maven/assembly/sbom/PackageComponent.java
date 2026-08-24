@@ -18,6 +18,10 @@ import java.util.Objects;
 public record PackageComponent(PackageRef ref, String archivePath, String hash,
         List<LicenseInfo> licenses, List<AssemblyComponent> nested) implements AssemblyComponent {
 
+    /**
+     * Requires a non-null {@code ref} and defensively copies the license and
+     * nested lists (a {@code null} list becomes empty).
+     */
     public PackageComponent {
         Objects.requireNonNull(ref, "ref");
         licenses = licenses == null ? List.of() : List.copyOf(licenses);

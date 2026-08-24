@@ -238,6 +238,45 @@ class BomRendererTest {
     }
 
     /**
+     * A generic (non-Maven) package component — e.g. a Galleon-assembled shaded
+     * JAR — must render with its name and version, a {@code pkg:generic} purl,
+     * and its nested dependencies.
+     */
+    @Test
+    void testGenericPackageComponent() {
+        AssemblyComponents model = new AssemblyComponents();
+        AssemblyMetadata metadata = new AssemblyMetadata();
+        metadata.setProjectGroupId("org.example");
+        metadata.setProjectArtifactId("my-app");
+        metadata.setProjectVersion("1.0.0");
+        metadata.setHashAlgorithmSpec("SHA-256");
+        metadata.setSchemaVersion("1.6");
+        model.setMetadata(metadata);
+
+        PackageComponent nested = PackageComponent.of(
+                ArtifactCoords.of("org.jboss", "dep-a", "1.0"), null, null);
+        PackageComponent shaded = new PackageComponent(
+                new GenericPackageRef("jboss-cli-client", "31.0.0.Final"),
+                "bin/client/jboss-cli-client.jar", null,
+                List.of(), List.of(nested));
+        model.addComponent(shaded);
+
+        Bom bom = new BomRenderer().render(model);
+
+        org.cyclonedx.model.Component comp = bom.getComponents().stream()
+                .filter(c -> "jboss-cli-client".equals(c.getName()))
+                .findFirst().orElse(null);
+        assertNotNull(comp);
+        assertEquals(org.cyclonedx.model.Component.Type.LIBRARY, comp.getType());
+        assertEquals("31.0.0.Final", comp.getVersion());
+        assertEquals("pkg:generic/jboss-cli-client@31.0.0.Final", comp.getPurl());
+        assertEquals("pkg:generic/jboss-cli-client@31.0.0.Final", comp.getBomRef());
+        assertNotNull(comp.getComponents());
+        assertEquals(1, comp.getComponents().size());
+        assertEquals("dep-a", comp.getComponents().get(0).getName());
+    }
+
+    /**
      * (e) A small dependency graph → sorted dependency tree + main dep filtering.
      */
     @Test

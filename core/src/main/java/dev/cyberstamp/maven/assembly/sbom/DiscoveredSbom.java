@@ -27,6 +27,9 @@ import org.cyclonedx.model.Bom;
  */
 public record DiscoveredSbom(String archivePath, Bom parsedBom, PackageRef owner) {
 
+    /**
+     * Requires a non-null {@code archivePath} and {@code parsedBom}.
+     */
     public DiscoveredSbom {
         Objects.requireNonNull(archivePath, "archivePath");
         Objects.requireNonNull(parsedBom, "parsedBom");

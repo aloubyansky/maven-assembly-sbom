@@ -606,14 +606,13 @@ class ArchiveAnalyzer {
      */
     private void detectBundledDepsInArtifactFile(Artifact artifact, AssemblyComponentsBuilder content) {
         File file = artifact.getFile();
-        if (file == null || !file.isFile()) {
+        if (file == null) {
             return;
         }
-        try (ZipFile zf = new ZipFile(file)) {
-            List<Properties> allProps = readPomPropertiesFromZip(zf);
-            registerBundledDependencies(MavenArtifactCoords.of(artifact), allProps, content);
-        } catch (IOException e) {
-            log.debug("Could not scan {} for bundled dependencies", file, e);
+        ArtifactCoords owner = MavenArtifactCoords.of(artifact);
+        for (ArtifactCoords bundled : BundledArtifactScanner.bundledNonOwner(file.toPath(), owner)) {
+            content.addNestedEntry(new AssemblyComponentsBuilder.NestedMavenEntry(
+                    owner, bundled, null, null, false));
         }
     }
 
@@ -631,29 +630,32 @@ class ArchiveAnalyzer {
         if (zipEntryNames == null) {
             return;
         }
-        List<Properties> allProps = readAllPomProperties(parentZip, zipEntryNames.get(0));
-        registerBundledDependencies(ownerCoords, allProps, content);
+        ZipEntry nested = parentZip.getEntry(zipEntryNames.get(0));
+        if (nested == null) {
+            return;
+        }
+        try (InputStream is = parentZip.getInputStream(nested)) {
+            registerBundled(ownerCoords, BundledArtifactScanner.bundledNonOwner(is, ownerCoords), content);
+        } catch (IOException e) {
+            log.debug("Could not scan nested JAR {} for bundled dependencies",
+                    zipEntryNames.get(0), e);
+        }
     }
 
     /**
-     * Registers non-owner pom.properties entries as bundled nested components.
+     * Registers already-read descriptors' non-owner entries as bundled nested
+     * components, reusing the shared {@link BundledArtifactScanner} filter.
      */
     private static void registerBundledDependencies(ArtifactCoords ownerCoords, List<Properties> allProps,
             AssemblyComponentsBuilder content) {
-        if (allProps.size() <= 1) {
-            return;
-        }
-        for (Properties bp : allProps) {
-            String gId = bp.getProperty("groupId");
-            String aId = bp.getProperty("artifactId");
-            String ver = bp.getProperty("version");
-            if (gId != null && aId != null && ver != null
-                    && !(gId.equals(ownerCoords.groupId())
-                            && aId.equals(ownerCoords.artifactId())
-                            && ver.equals(ownerCoords.version()))) {
-                content.addNestedEntry(new AssemblyComponentsBuilder.NestedMavenEntry(
-                        ownerCoords, ArtifactCoords.of(gId, aId, ver), null, null, false));
-            }
+        registerBundled(ownerCoords, BundledArtifactScanner.nonOwner(allProps, ownerCoords), content);
+    }
+
+    private static void registerBundled(ArtifactCoords ownerCoords, List<ArtifactCoords> bundled,
+            AssemblyComponentsBuilder content) {
+        for (ArtifactCoords coords : bundled) {
+            content.addNestedEntry(new AssemblyComponentsBuilder.NestedMavenEntry(
+                    ownerCoords, coords, null, null, false));
         }
     }
 

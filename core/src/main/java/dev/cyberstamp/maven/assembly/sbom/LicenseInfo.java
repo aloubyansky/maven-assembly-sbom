@@ -71,6 +71,8 @@ public record LicenseInfo(String spdxId, String expression, String name, String 
     }
 
     /**
+     * Indicates whether this license is identified by an SPDX id.
+     *
      * @return {@code true} if this is an SPDX-id license
      */
     public boolean isSpdx() {
@@ -78,6 +80,8 @@ public record LicenseInfo(String spdxId, String expression, String name, String 
     }
 
     /**
+     * Indicates whether this license is an SPDX expression.
+     *
      * @return {@code true} if this is an SPDX-expression license
      */
     public boolean isExpression() {
@@ -85,6 +89,8 @@ public record LicenseInfo(String spdxId, String expression, String name, String 
     }
 
     /**
+     * Indicates whether this license is a raw (non-SPDX) descriptor.
+     *
      * @return {@code true} if this is a raw (non-SPDX) license
      */
     public boolean isRaw() {
