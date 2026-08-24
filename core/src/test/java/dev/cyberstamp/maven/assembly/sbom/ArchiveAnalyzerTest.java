@@ -752,6 +752,52 @@ class ArchiveAnalyzerTest {
     }
 
     @Test
+    void reclassifiedUnpackedChildDoesNotCreateDependencyEdge() throws Exception {
+        // A resource that lives inside the WAR, so the WAR is detected as
+        // unpacked at prefix "web/app/".
+        Path resFile = createTestFile("res.txt", "war-marker-content");
+        byte[] resBytes = Files.readAllBytes(resFile);
+        Path warFile = tempDir.resolve("app-1.0.war");
+        try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(warFile))) {
+            jos.putNextEntry(new JarEntry("res.txt"));
+            jos.write(resBytes);
+            jos.closeEntry();
+        }
+        Artifact warArtifact = createArtifact("org.example", "app", "1.0", "war",
+                warFile.toFile());
+
+        // An independent JAR artifact that is hash-matched as a top-level
+        // component but physically sits under the WAR's unpack directory.
+        // It is NOT contained in the WAR, so it is reachable only via the
+        // reclassification pass (not via nested-artifact identification).
+        Path extraJar = createTestJar("extra-1.0.jar", "extra-content");
+        Artifact extraArtifact = createArtifact("org.example", "extra", "1.0", "jar",
+                extraJar.toFile());
+
+        when(project.getArtifacts()).thenReturn(Set.of(warArtifact, extraArtifact));
+
+        String resHash = SbomUtils.computeHash(digest, resFile);
+        String extraHash = SbomUtils.computeHash(digest, extraJar);
+        List<FileEntry> entries = List.of(
+                new FileEntry("web/app/res.txt", resHash),
+                new FileEntry("web/app/extra-1.0.jar", extraHash));
+
+        ArchiveAnalyzer analyzer = createAnalyzer();
+        AssemblyComponents model = analyzer.analyze(entries, null);
+
+        // The extra JAR is reclassified as nested under the unpacked WAR ...
+        assertTrue(isNestedUnder(model, "extra", "app"),
+                "extra JAR should be reclassified as nested under the unpacked WAR");
+        // ... but reclassification expresses containment via nesting only and
+        // must NOT emit a dependency edge (matches pre-refactor behavior and
+        // the DependencyEdge contract that containment is not a dependency).
+        assertTrue(model.dependencyEdges().stream()
+                .noneMatch(e -> e.child() instanceof ArtifactCoords coords
+                        && "extra".equals(coords.artifactId())),
+                "reclassified unpacked child must not have a dependency edge");
+    }
+
+    @Test
     void matchAgainstExternalSbomsReplacesStaleOccurrences() throws Exception {
         // An archive entry that doesn't match any Maven artifact
         Path jarFile = createTestJar("h2-2.4.jar", "h2-content");

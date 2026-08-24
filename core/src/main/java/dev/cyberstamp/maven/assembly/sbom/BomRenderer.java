@@ -662,9 +662,11 @@ public class BomRenderer {
      * (replicates BomBuilder's nestedIdsByParent role).
      *
      * <p>
-     * {@link #collectNestedRefs} recurses through the component tree, so the
-     * resulting set for each parent includes all nested {@code PackageComponent}
-     * refs at any depth (children, grandchildren, and deeper).
+     * {@link #collectNestedRefs} recurses through the component tree so that
+     * every parent at any depth gets its own entry, but each entry's set holds
+     * only that parent's <em>direct</em> nested {@code PackageComponent} refs
+     * (grandchildren appear under their own immediate parent, not here). This
+     * mirrors {@code BomBuilder}'s direct-only {@code nestedIdsByParent}.
      * </p>
      */
     private Map<String, Set<String>> buildNestedRefsLookup(AssemblyComponents model) {

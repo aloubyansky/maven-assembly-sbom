@@ -1,0 +1,216 @@
+{
+  "bomFormat" : "CycloneDX",
+  "specVersion" : "1.6",
+  "serialNumber" : "urn:uuid:71d799cf-bdf5-3c5d-9bc7-670fd48041f9",
+  "version" : 1,
+  "metadata" : {
+    "timestamp" : "2023-11-14T22:13:20Z",
+    "tools" : {
+      "components" : [
+        {
+          "type" : "application",
+          "group" : "dev.cyberstamp.maven.assembly.sbom",
+          "name" : "assembly-sbom-core",
+          "version" : "0.1.3-SNAPSHOT",
+          "hashes" : [
+            {
+              "alg" : "SHA-256",
+              "content" : "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }
+          ],
+          "licenses" : [
+            {
+              "license" : {
+                "id" : "Apache-2.0"
+              }
+            }
+          ],
+          "purl" : "pkg:maven/dev.cyberstamp.maven.assembly.sbom/assembly-sbom-core@0.1.3-SNAPSHOT"
+        }
+      ]
+    },
+    "component" : {
+      "type" : "application",
+      "bom-ref" : "pkg:maven/org.example/demo-dist@1.0.0?classifier=dist&type=zip",
+      "group" : "org.example",
+      "name" : "demo-dist",
+      "version" : "1.0.0",
+      "licenses" : [
+        {
+          "license" : {
+            "id" : "Apache-2.0",
+            "url" : "https://www.apache.org/licenses/LICENSE-2.0"
+          }
+        }
+      ],
+      "purl" : "pkg:maven/org.example/demo-dist@1.0.0?classifier=dist&type=zip"
+    }
+  },
+  "components" : [
+    {
+      "type" : "file",
+      "bom-ref" : "file:bin/launcher.sh",
+      "name" : "launcher.sh",
+      "hashes" : [
+        {
+          "alg" : "SHA-256",
+          "content" : "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "licenses" : [
+        {
+          "license" : {
+            "id" : "Apache-2.0",
+            "url" : "https://www.apache.org/licenses/LICENSE-2.0"
+          }
+        }
+      ],
+      "purl" : "pkg:generic/launcher.sh?checksum=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "evidence" : {
+        "occurrences" : [
+          {
+            "location" : "bin/launcher.sh"
+          }
+        ]
+      }
+    },
+    {
+      "type" : "library",
+      "bom-ref" : "pkg:maven/org.example/alpha@1.0",
+      "group" : "org.example",
+      "name" : "alpha",
+      "version" : "1.0",
+      "hashes" : [
+        {
+          "alg" : "SHA-256",
+          "content" : "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "licenses" : [
+        {
+          "license" : {
+            "id" : "Apache-2.0",
+            "url" : "https://www.apache.org/licenses/LICENSE-2.0"
+          }
+        }
+      ],
+      "purl" : "pkg:maven/org.example/alpha@1.0",
+      "components" : [
+        {
+          "type" : "library",
+          "bom-ref" : "pkg:maven/com.bundled/shaded-dep@3.1",
+          "group" : "com.bundled",
+          "name" : "shaded-dep",
+          "version" : "3.1",
+          "purl" : "pkg:maven/com.bundled/shaded-dep@3.1",
+          "evidence" : {
+            "identity" : [
+              {
+                "field" : "purl",
+                "confidence" : 1.0,
+                "methods" : [
+                  {
+                    "technique" : "manifest-analysis",
+                    "value" : "maven-pom-analysis"
+                  }
+                ]
+              }
+            ],
+            "occurrences" : [
+              {
+                "location" : "lib/alpha.jar"
+              }
+            ]
+          }
+        }
+      ],
+      "evidence" : {
+        "identity" : [
+          {
+            "field" : "purl",
+            "confidence" : 1.0,
+            "methods" : [
+              {
+                "technique" : "manifest-analysis",
+                "value" : "maven-pom-analysis"
+              }
+            ]
+          }
+        ],
+        "occurrences" : [
+          {
+            "location" : "lib/alpha.jar"
+          },
+          {
+            "location" : "other/alpha.jar"
+          }
+        ]
+      }
+    },
+    {
+      "type" : "library",
+      "bom-ref" : "pkg:maven/org.example/beta@2.0",
+      "group" : "org.example",
+      "name" : "beta",
+      "version" : "2.0",
+      "hashes" : [
+        {
+          "alg" : "SHA-256",
+          "content" : "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "licenses" : [
+        {
+          "expression" : "(MIT OR Apache-2.0)"
+        }
+      ],
+      "purl" : "pkg:maven/org.example/beta@2.0",
+      "evidence" : {
+        "identity" : [
+          {
+            "field" : "purl",
+            "confidence" : 1.0,
+            "methods" : [
+              {
+                "technique" : "manifest-analysis",
+                "value" : "maven-pom-analysis"
+              }
+            ]
+          }
+        ],
+        "occurrences" : [
+          {
+            "location" : "lib/beta.jar"
+          }
+        ]
+      }
+    }
+  ],
+  "dependencies" : [
+    {
+      "ref" : "file:bin/launcher.sh",
+      "dependsOn" : [ ]
+    },
+    {
+      "ref" : "pkg:maven/com.bundled/shaded-dep@3.1",
+      "dependsOn" : [ ]
+    },
+    {
+      "ref" : "pkg:maven/org.example/alpha@1.0",
+      "dependsOn" : [
+        "pkg:maven/org.example/beta@2.0"
+      ]
+    },
+    {
+      "ref" : "pkg:maven/org.example/beta@2.0",
+      "dependsOn" : [ ]
+    },
+    {
+      "ref" : "pkg:maven/org.example/demo-dist@1.0.0?classifier=dist&type=zip",
+      "dependsOn" : [
+        "file:bin/launcher.sh",
+        "pkg:maven/org.example/alpha@1.0"
+      ]
+    }
+  ]
+}
