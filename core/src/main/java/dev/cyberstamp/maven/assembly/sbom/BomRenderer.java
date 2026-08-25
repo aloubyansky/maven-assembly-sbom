@@ -428,7 +428,12 @@ public class BomRenderer {
         main.setGroup(metadata.getProjectGroupId());
         main.setName(metadata.getProjectArtifactId());
         main.setVersion(metadata.getProjectVersion());
-        String purl = buildMainPurl(metadata);
+        // A producer whose main component is not a Maven artifact (e.g. a
+        // provisioned distribution) can supply a synthetic purl; otherwise a
+        // Maven purl is derived from the project coordinates.
+        String purl = metadata.getMainComponentPurl() != null
+                ? metadata.getMainComponentPurl()
+                : buildMainPurl(metadata);
         main.setBomRef(purl);
         main.setPurl(purl);
         LicenseChoice projectLicenses = CycloneDxLicenses.toLicenseChoice(

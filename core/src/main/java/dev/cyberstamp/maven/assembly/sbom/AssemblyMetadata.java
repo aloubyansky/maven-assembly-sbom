@@ -32,6 +32,7 @@ public final class AssemblyMetadata {
     private String schemaVersion;
     private String classifier;
     private String archiveType;
+    private String mainComponentPurl;
     private List<LicenseInfo> projectLicenses = Collections.emptyList();
     private String toolGroupId;
     private String toolArtifactId;
@@ -216,6 +217,34 @@ public final class AssemblyMetadata {
      */
     public void setArchiveType(String archiveType) {
         this.archiveType = archiveType;
+    }
+
+    /**
+     * Returns the explicit Package URL to use for the main component, or
+     * {@code null} to derive a Maven purl from the project coordinates.
+     *
+     * <p>
+     * Producers whose main component is not a Maven artifact (e.g. a
+     * provisioned server distribution) set this to a synthetic identity such
+     * as {@code pkg:generic/jboss-eap@8.1-update-7.1}. When set, the renderer
+     * uses it for both the main component's {@code purl} and its
+     * {@code bom-ref} (the dependency-graph root).
+     * </p>
+     *
+     * @return the main component purl override, or {@code null}
+     */
+    public String getMainComponentPurl() {
+        return mainComponentPurl;
+    }
+
+    /**
+     * Sets an explicit Package URL for the main component.
+     *
+     * @param mainComponentPurl the main component purl, or {@code null} to
+     *        derive a Maven purl from the project coordinates
+     */
+    public void setMainComponentPurl(String mainComponentPurl) {
+        this.mainComponentPurl = mainComponentPurl;
     }
 
     /**

@@ -277,6 +277,38 @@ class BomRendererTest {
     }
 
     /**
+     * When {@code mainComponentPurl} is set, the main component uses it verbatim
+     * for both {@code purl} and {@code bom-ref} (rather than a derived Maven
+     * purl), and the dependency-graph root references that same bom-ref. This
+     * lets non-Maven producers (e.g. a provisioned distribution) give the main
+     * component a synthetic identity.
+     */
+    @Test
+    void testMainComponentSyntheticPurlOverride() {
+        AssemblyComponents model = new AssemblyComponents();
+        AssemblyMetadata metadata = new AssemblyMetadata();
+        metadata.setProjectArtifactId("JBoss EAP");
+        metadata.setProjectVersion("8.1 Update 7.1");
+        metadata.setHashAlgorithmSpec("SHA-256");
+        metadata.setSchemaVersion("1.6");
+        metadata.setMainComponentPurl("pkg:generic/jboss-eap@8.1-update-7.1");
+        model.setMetadata(metadata);
+        model.addComponent(PackageComponent.of(
+                ArtifactCoords.of("org.example", "lib", "1.0"), "lib/lib-1.0.jar", "h"));
+
+        Bom bom = new BomRenderer().render(model);
+
+        org.cyclonedx.model.Component main = bom.getMetadata().getComponent();
+        assertEquals("JBoss EAP", main.getName());
+        assertEquals("8.1 Update 7.1", main.getVersion());
+        assertEquals("pkg:generic/jboss-eap@8.1-update-7.1", main.getPurl());
+        assertEquals("pkg:generic/jboss-eap@8.1-update-7.1", main.getBomRef());
+        assertTrue(bom.getDependencies().stream()
+                .anyMatch(d -> "pkg:generic/jboss-eap@8.1-update-7.1".equals(d.getRef())),
+                "dependency-graph root must reference the synthetic bom-ref");
+    }
+
+    /**
      * (e) A small dependency graph → sorted dependency tree + main dep filtering.
      */
     @Test
