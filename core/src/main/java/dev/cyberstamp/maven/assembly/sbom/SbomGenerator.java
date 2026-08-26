@@ -129,7 +129,6 @@ public class SbomGenerator {
         metadata.setAssemblyId(assemblyId);
         metadata.setTimestamp(SbomUtils.parseBuildTimestamp(getTimestamp()));
         metadata.setHashAlgorithmSpec(bomHashAlgorithm.getSpec());
-        metadata.setSchemaVersion(schemaVersion.getVersionString());
         metadata.setClassifier(classifier);
         metadata.setArchiveType(archiveType);
         metadata.setProjectLicenses(licenseEnrichment.resolve(

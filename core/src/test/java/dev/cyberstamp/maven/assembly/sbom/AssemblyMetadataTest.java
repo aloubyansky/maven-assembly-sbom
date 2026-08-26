@@ -45,13 +45,6 @@ class AssemblyMetadataTest {
     }
 
     @Test
-    void roundTripsSchemaVersion() {
-        AssemblyMetadata metadata = new AssemblyMetadata();
-        metadata.setSchemaVersion("1.6");
-        assertEquals("1.6", metadata.getSchemaVersion());
-    }
-
-    @Test
     void roundTripsClassifier() {
         AssemblyMetadata metadata = new AssemblyMetadata();
         metadata.setClassifier("bin");

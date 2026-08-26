@@ -100,7 +100,6 @@ class GoldenBomTest {
         // Fixed instant so the metadata timestamp never varies.
         metadata.setTimestamp(new Date(1_700_000_000_000L));
         metadata.setHashAlgorithmSpec("SHA-256");
-        metadata.setSchemaVersion(SCHEMA_VERSION);
         metadata.setClassifier("dist");
         metadata.setArchiveType("zip");
         metadata.setProjectLicenses(List.of(

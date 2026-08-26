@@ -16,7 +16,6 @@ class SbomPipelineOrchestratorTest {
         md.setProjectArtifactId("a");
         md.setProjectVersion("1");
         md.setHashAlgorithmSpec("SHA-256");
-        md.setSchemaVersion("1.6");
         m.setMetadata(md);
         for (PackageComponent c : comps) {
             m.addComponent(c);
