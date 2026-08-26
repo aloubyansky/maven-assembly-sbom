@@ -80,55 +80,14 @@ public class SbomGenerator {
         this.failOnMissingLicense = failOnMissingLicense;
         this.embeddedSboms = embeddedSboms;
         this.librariesOnly = librariesOnly;
-        this.schemaVersion = parseSchemaVersion(schemaVersion);
+        this.schemaVersion = SchemaVersions.resolve(schemaVersion);
     }
 
     /**
-     * Returns the resolved CycloneDX schema version used for serialization
-     * and serial-number computation.
+     * Returns the resolved CycloneDX schema version.
      */
     Version getSchemaVersion() {
         return schemaVersion;
-    }
-
-    /**
-     * Parses a user-supplied schema version string (e.g. {@code "1.6"}) to the
-     * corresponding {@link Version} enum constant.
-     *
-     * <p>
-     * When {@code value} is {@code null} or blank, the latest version supported
-     * by the integrated CycloneDX Java library is returned.
-     * </p>
-     *
-     * @param value the version string, or {@code null} for the default
-     * @return the resolved {@link Version}
-     * @throws IllegalArgumentException if the string is non-null and does not
-     *         match any known CycloneDX schema version
-     */
-    static Version parseSchemaVersion(String value) {
-        Version[] versions = Version.values();
-        if (value == null || value.isBlank()) {
-            return versions[versions.length - 1];
-        }
-        for (Version v : versions) {
-            if (v.getVersionString().equals(value.trim())) {
-                return v;
-            }
-        }
-        throw new IllegalArgumentException(
-                "Unsupported CycloneDX schema version: '" + value
-                        + "'. Supported values: " + supportedVersionStrings());
-    }
-
-    private static String supportedVersionStrings() {
-        StringBuilder sb = new StringBuilder();
-        for (Version v : Version.values()) {
-            if (!sb.isEmpty()) {
-                sb.append(", ");
-            }
-            sb.append(v.getVersionString());
-        }
-        return sb.toString();
     }
 
     /**

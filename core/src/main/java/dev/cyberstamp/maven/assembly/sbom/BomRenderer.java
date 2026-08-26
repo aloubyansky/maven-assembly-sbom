@@ -1,6 +1,5 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
@@ -9,10 +8,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 
-import org.cyclonedx.Version;
-import org.cyclonedx.generators.BomGeneratorFactory;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Dependency;
@@ -65,20 +61,17 @@ public class BomRenderer {
         AssemblyMetadata metadata = model.metadata();
         Hash.Algorithm hashAlgorithm = parseHashAlgorithm(metadata.getHashAlgorithmSpec());
         String normalizedAlg = SbomUtils.normalizeAlgorithm(hashAlgorithm.getSpec());
-        Version schemaVersion = parseSchemaVersion(metadata.getSchemaVersion());
 
-        RenderContext ctx = new RenderContext(hashAlgorithm, normalizedAlg, schemaVersion, metadata);
+        RenderContext ctx = new RenderContext(hashAlgorithm, normalizedAlg, metadata);
 
         buildTopLevelComponents(model, ctx);
         attachNestedComponents(ctx);
 
         Bom bom = new Bom();
-        Component mainComponent = createMainComponent(metadata, ctx);
+        Component mainComponent = createMainComponent(metadata);
         bom.setMetadata(createMetadata(mainComponent, metadata, ctx));
         bom.setComponents(buildSortedComponentList(ctx));
         buildDependencyTree(bom, mainComponent.getBomRef(), model, ctx);
-
-        bom.setSerialNumber(generateSerialNumber(bom, schemaVersion));
 
         return bom;
     }
@@ -119,21 +112,7 @@ public class BomRenderer {
                 return alg;
             }
         }
-        throw new IllegalArgumentException(
-                "Unsupported hash algorithm: '" + spec + "'");
-    }
-
-    /**
-     * Parses a schema version string into the CycloneDX enum.
-     * Delegates to {@link SbomGenerator#parseSchemaVersion}.
-     *
-     * @param value the schema version string (e.g. "1.6"), or {@code null}
-     * @return the parsed version
-     * @throws IllegalArgumentException if the value does not match any
-     *         supported version
-     */
-    private Version parseSchemaVersion(String value) {
-        return SbomGenerator.parseSchemaVersion(value);
+        throw new IllegalArgumentException("Unsupported hash algorithm: '" + spec + "'");
     }
 
     /**
@@ -160,7 +139,6 @@ public class BomRenderer {
             } else if (neutralComp instanceof FileComponent file) {
                 Component comp = createFileComponent(file, ctx);
                 allComponents.add(comp);
-                ctx.fileComponentsByPath.put(file.archivePath(), comp);
                 ctx.directChildren.add(comp.getBomRef());
             }
         }
@@ -212,7 +190,7 @@ public class BomRenderer {
      * Ported verbatim from {@code BomBuilder#createMavenComponent}.
      * </p>
      */
-    private org.cyclonedx.model.Component createMavenComponent(ArtifactCoords coords) {
+    private Component createMavenComponent(ArtifactCoords coords) {
         Component comp = new Component();
         comp.setType(Component.Type.LIBRARY);
         comp.setGroup(coords.groupId());
@@ -376,7 +354,6 @@ public class BomRenderer {
             } else if (neutralComp instanceof FileComponent file) {
                 Component comp = createFileComponent(file, ctx);
                 result.add(comp);
-                ctx.fileComponentsByPath.putIfAbsent(file.archivePath(), comp);
             }
         }
         return result;
@@ -392,8 +369,7 @@ public class BomRenderer {
      * </p>
      */
     private void attachNestedComponents(RenderContext ctx) {
-        for (Map.Entry<Component, List<Component>> entry : ctx.nestedComponentsByParent
-                .entrySet()) {
+        for (Map.Entry<Component, List<Component>> entry : ctx.nestedComponentsByParent.entrySet()) {
             List<Component> nested = entry.getValue();
             nested.sort(COMPONENT_ORDER);
             entry.getKey().setComponents(nested);
@@ -421,8 +397,7 @@ public class BomRenderer {
      * Ported from {@code BomBuilder#createMainComponent}.
      * </p>
      */
-    private Component createMainComponent(
-            AssemblyMetadata metadata, RenderContext ctx) {
+    private Component createMainComponent(AssemblyMetadata metadata) {
         Component main = new Component();
         main.setType(Component.Type.APPLICATION);
         main.setGroup(metadata.getProjectGroupId());
@@ -516,8 +491,7 @@ public class BomRenderer {
      * Ported from {@code BomBuilder#createMetadata}.
      * </p>
      */
-    private Metadata createMetadata(Component mainComponent,
-            AssemblyMetadata metadata, RenderContext ctx) {
+    private Metadata createMetadata(Component mainComponent, AssemblyMetadata metadata, RenderContext ctx) {
         Metadata meta = new Metadata();
         Date timestamp = metadata.getTimestamp();
         meta.setTimestamp(timestamp != null ? timestamp : new Date());
@@ -584,8 +558,7 @@ public class BomRenderer {
      * Ported from {@code BomBuilder#buildDependencyTree}.
      * </p>
      */
-    private void buildDependencyTree(Bom bom, String mainBomRef,
-            AssemblyComponents model, RenderContext ctx) {
+    private void buildDependencyTree(Bom bom, String mainBomRef, AssemblyComponents model, RenderContext ctx) {
         Dependency mainDep = buildMainDependency(mainBomRef, model, ctx);
         bom.addDependency(mainDep);
         addInterArtifactDependencies(bom, model, ctx);
@@ -602,8 +575,7 @@ public class BomRenderer {
      * Ported from {@code BomBuilder#buildMainDependency}.
      * </p>
      */
-    private Dependency buildMainDependency(String mainBomRef,
-            AssemblyComponents model, RenderContext ctx) {
+    private Dependency buildMainDependency(String mainBomRef, AssemblyComponents model, RenderContext ctx) {
         Set<String> transitiveChildren = collectTransitiveChildren(model, ctx);
         Dependency mainDep = new Dependency(mainBomRef);
         ctx.directChildren.stream()
@@ -662,8 +634,7 @@ public class BomRenderer {
                 continue;
             }
             Dependency dep = new Dependency(parent.getBomRef());
-            resolveChildPurls(entry.getValue(), ctx).forEach(
-                    childRef -> dep.addDependency(new Dependency(childRef)));
+            resolveChildPurls(entry.getValue(), ctx).forEach(childRef -> dep.addDependency(new Dependency(childRef)));
             bom.addDependency(dep);
         }
     }
@@ -692,8 +663,7 @@ public class BomRenderer {
     /**
      * Recursively collects nested PackageComponent refs under a parent.
      */
-    private void collectNestedRefs(AssemblyComponent comp,
-            Map<String, Set<String>> lookup) {
+    private void collectNestedRefs(AssemblyComponent comp, Map<String, Set<String>> lookup) {
         if (comp instanceof PackageComponent pkg) {
             String parentPurl = pkg.ref().toPurl().toString();
             Set<String> nestedRefs = new HashSet<>();
@@ -774,64 +744,22 @@ public class BomRenderer {
     }
 
     /**
-     * Generates a serial number for the BOM in {@code urn:uuid:} format.
-     *
-     * <p>
-     * The UUID is derived from the BOM serialized as compact JSON, making
-     * the serial number a pure function of the BOM content. This avoids
-     * relying on {@link Bom#hashCode()}, which includes JVM-dependent
-     * identity hash codes of enum constants and is therefore
-     * non-deterministic across builds.
-     * </p>
-     *
-     * <p>
-     * Must be called after the BOM is fully assembled and before the
-     * serial number itself is set, so that the serialized form does not
-     * yet contain one.
-     * </p>
-     *
-     * <p>
-     * Ported verbatim from {@code BomBuilder#generateSerialNumber}.
-     * </p>
-     *
-     * @param bom the fully assembled BOM (with serial number still {@code null})
-     * @param schemaVersion the CycloneDX schema version to use for serialization
-     * @return a {@code urn:uuid:} serial number string
-     */
-    private String generateSerialNumber(Bom bom, Version schemaVersion) {
-        final String json;
-        try {
-            json = BomGeneratorFactory.createJson(schemaVersion, bom)
-                    .toJsonString(false);
-        } catch (Exception e) {
-            throw new RuntimeException(
-                    "Failed to serialize the SBOM to compute its serial number", e);
-        }
-        return "urn:uuid:" + UUID.nameUUIDFromBytes(
-                json.getBytes(StandardCharsets.UTF_8));
-    }
-
-    /**
      * Rendering context holding intermediate state and lookup maps.
      */
     private static class RenderContext {
         final Hash.Algorithm hashAlgorithm;
         final String normalizedAlg;
-        final Version schemaVersion;
         final AssemblyMetadata metadata;
 
         final List<Component> components = new ArrayList<>();
         // Keyed by purl string to match occurrence-merge deduplication key
         final Map<String, Component> componentsById = new HashMap<>();
-        final Map<String, Component> fileComponentsByPath = new HashMap<>();
         final Map<Component, List<Component>> nestedComponentsByParent = new HashMap<>();
         final Set<String> directChildren = new HashSet<>();
 
-        RenderContext(Hash.Algorithm hashAlgorithm, String normalizedAlg,
-                Version schemaVersion, AssemblyMetadata metadata) {
+        RenderContext(Hash.Algorithm hashAlgorithm, String normalizedAlg, AssemblyMetadata metadata) {
             this.hashAlgorithm = hashAlgorithm;
             this.normalizedAlg = normalizedAlg;
-            this.schemaVersion = schemaVersion;
             this.metadata = metadata;
         }
     }

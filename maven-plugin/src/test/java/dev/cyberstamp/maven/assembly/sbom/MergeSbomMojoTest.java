@@ -199,7 +199,7 @@ class MergeSbomMojoTest {
 
     private File writeBom(Bom bom, String filename) throws Exception {
         Path path = tempDir.resolve(filename);
-        BomWriter.writeJson(bom, path, false, SbomGenerator.parseSchemaVersion(null));
+        BomWriter.writeJson(bom, path, false);
         return path.toFile();
     }
 

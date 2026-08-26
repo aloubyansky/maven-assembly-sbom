@@ -199,7 +199,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                     "Unsupported embeddedSboms: " + embeddedSboms
                             + ". Supported values: merge, link, ignore");
         }
-        resolvedSchemaVersion = SbomGenerator.parseSchemaVersion(schemaVersion);
+        resolvedSchemaVersion = SchemaVersions.resolve(schemaVersion);
         AssemblyConfig assemblyConfig = resolveAssemblyConfig(archiver);
         includeBaseDir = assemblyConfig.assembly == null
                 || assemblyConfig.assembly.isIncludeBaseDirectory();

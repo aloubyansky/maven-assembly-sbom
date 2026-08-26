@@ -142,7 +142,7 @@ class GenerateSbomMojoTest {
         react.setPurl("pkg:npm/react@18.3.1");
         npmBom.setComponents(new java.util.ArrayList<>(List.of(react)));
         Path npmBomFile = tempDir.resolve("npm-bom.cdx.json");
-        BomWriter.writeJson(npmBom, npmBomFile, false, SbomGenerator.parseSchemaVersion(null));
+        BomWriter.writeJson(npmBom, npmBomFile, false);
 
         File output = tempDir.resolve("output.cdx.json").toFile();
         GenerateSbomMojo mojo = createMojo(output);
@@ -392,7 +392,7 @@ class GenerateSbomMojoTest {
         embeddedBom.addComponent(comp);
 
         Path bomJson = tempDir.resolve("tmp-embedded.cdx.json");
-        BomWriter.writeJson(embeddedBom, bomJson, false, SbomGenerator.parseSchemaVersion(null));
+        BomWriter.writeJson(embeddedBom, bomJson, false);
         byte[] bomBytes = java.nio.file.Files.readAllBytes(bomJson);
 
         Path jarPath = inputDir.resolve(relativePath);

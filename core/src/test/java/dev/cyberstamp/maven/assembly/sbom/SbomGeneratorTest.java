@@ -1122,7 +1122,7 @@ class SbomGeneratorTest {
         Bom bom = new Bom();
         bom.addComponent(createLibrary("lib-a", "ref-a"));
         Path bomFile = tempDir.resolve("bom.cdx.json");
-        BomWriter.writeJson(bom, bomFile, false, SbomGenerator.parseSchemaVersion(null));
+        BomWriter.writeJson(bom, bomFile, false);
 
         List<Bom> result = SbomGenerator.parseExternalBoms(
                 bomFile.toString(), null);
@@ -1137,12 +1137,12 @@ class SbomGeneratorTest {
         Bom bom1 = new Bom();
         bom1.addComponent(createLibrary("lib-a", "ref-a"));
         Path file1 = tempDir.resolve("bom1.cdx.json");
-        BomWriter.writeJson(bom1, file1, false, SbomGenerator.parseSchemaVersion(null));
+        BomWriter.writeJson(bom1, file1, false);
 
         Bom bom2 = new Bom();
         bom2.addComponent(createLibrary("lib-b", "ref-b"));
         Path file2 = tempDir.resolve("bom2.cdx.json");
-        BomWriter.writeJson(bom2, file2, false, SbomGenerator.parseSchemaVersion(null));
+        BomWriter.writeJson(bom2, file2, false);
 
         List<Bom> result = SbomGenerator.parseExternalBoms(
                 file1 + " , " + file2, null);
@@ -1162,7 +1162,7 @@ class SbomGeneratorTest {
         Bom bom = new Bom();
         bom.addComponent(createLibrary("lib-a", "ref-a"));
         Path bomFile = tempDir.resolve("sbom.cdx.json");
-        BomWriter.writeJson(bom, bomFile, false, SbomGenerator.parseSchemaVersion(null));
+        BomWriter.writeJson(bom, bomFile, false);
 
         List<Bom> result = SbomGenerator.parseExternalBoms(
                 "sbom.cdx.json", tempDir);
@@ -1175,7 +1175,7 @@ class SbomGeneratorTest {
         Bom bom = new Bom();
         bom.addComponent(createLibrary("lib-a", "ref-a"));
         Path bomFile = tempDir.resolve("bom.cdx.json");
-        BomWriter.writeJson(bom, bomFile, false, SbomGenerator.parseSchemaVersion(null));
+        BomWriter.writeJson(bom, bomFile, false);
 
         List<Bom> result = SbomGenerator.parseExternalBoms(
                 "," + bomFile + ",,", null);
