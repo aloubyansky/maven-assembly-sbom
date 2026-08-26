@@ -8,17 +8,17 @@ import java.util.List;
  * Assembly-level metadata that feeds the CycloneDX BOM renderer.
  *
  * <p>
- * Holds rendering parameters (hash algorithm spec, schema version), project
- * coordinates, tool metadata, timestamp, and optional product information.
+ * Holds rendering parameters (hash algorithm spec), project coordinates,
+ * tool metadata, timestamp, and optional product information.
  * All fields are mutable and nullable unless otherwise noted; the renderer
  * applies defaults and omits nulls.
  * </p>
  *
  * <p>
  * This class is part of the neutral SBOM component model and must remain
- * free of {@code org.cyclonedx.*} types. Hash algorithms and schema versions
- * are stored as String specs; the renderer converts them to CycloneDX enums
- * at the rendering boundary.
+ * free of {@code org.cyclonedx.*} types. Hash algorithms are stored as
+ * String specs; the renderer converts them to CycloneDX enums at the
+ * rendering boundary.
  * </p>
  */
 public final class AssemblyMetadata {
@@ -29,7 +29,6 @@ public final class AssemblyMetadata {
     private String assemblyId;
     private Date timestamp;
     private String hashAlgorithmSpec;
-    private String schemaVersion;
     private String classifier;
     private String archiveType;
     private String mainComponentPurl;
@@ -155,31 +154,6 @@ public final class AssemblyMetadata {
      */
     public void setHashAlgorithmSpec(String hashAlgorithmSpec) {
         this.hashAlgorithmSpec = hashAlgorithmSpec;
-    }
-
-    /**
-     * Returns the CycloneDX schema version string (e.g., {@code "1.6"},
-     * {@code "1.5"}).
-     *
-     * <p>
-     * The renderer maps this string to a CycloneDX {@code Version} enum
-     * at the rendering boundary. Stored as a String to honor the
-     * CycloneDX confinement rule (Ruling P2).
-     * </p>
-     *
-     * @return the schema version, or {@code null} for renderer default
-     */
-    public String getSchemaVersion() {
-        return schemaVersion;
-    }
-
-    /**
-     * Sets the schema version.
-     *
-     * @param schemaVersion the version string (e.g., {@code "1.6"})
-     */
-    public void setSchemaVersion(String schemaVersion) {
-        this.schemaVersion = schemaVersion;
     }
 
     /**

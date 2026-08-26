@@ -33,7 +33,7 @@ class BomRendererTest {
         metadata.setProjectArtifactId("my-app");
         metadata.setProjectVersion("1.0.0");
         metadata.setHashAlgorithmSpec("SHA-256");
-        metadata.setSchemaVersion("1.6");
+
         metadata.setTimestamp(new Date(1234567890000L));
         model.setMetadata(metadata);
 
@@ -101,7 +101,7 @@ class BomRendererTest {
         metadata.setProjectArtifactId("my-app");
         metadata.setProjectVersion("1.0.0");
         metadata.setHashAlgorithmSpec("SHA-256");
-        metadata.setSchemaVersion("1.6");
+
         model.setMetadata(metadata);
 
         ArtifactCoords coords = ArtifactCoords.of("com.example", "lib", "2.0.0");
@@ -160,7 +160,7 @@ class BomRendererTest {
         metadata.setProjectArtifactId("my-app");
         metadata.setProjectVersion("1.0.0");
         metadata.setHashAlgorithmSpec("SHA-256");
-        metadata.setSchemaVersion("1.6");
+
         model.setMetadata(metadata);
 
         ArtifactCoords nestedCoords = ArtifactCoords.of("com.nested", "dep", "1.0");
@@ -208,7 +208,7 @@ class BomRendererTest {
         metadata.setProjectArtifactId("my-app");
         metadata.setProjectVersion("1.0.0");
         metadata.setHashAlgorithmSpec("SHA-256");
-        metadata.setSchemaVersion("1.6");
+
         metadata.setProjectLicenses(List.of(LicenseInfo.spdx("Apache-2.0")));
         model.setMetadata(metadata);
 
@@ -251,7 +251,7 @@ class BomRendererTest {
         metadata.setProjectArtifactId("my-app");
         metadata.setProjectVersion("1.0.0");
         metadata.setHashAlgorithmSpec("SHA-256");
-        metadata.setSchemaVersion("1.6");
+
         model.setMetadata(metadata);
 
         PackageComponent nested = PackageComponent.of(
@@ -291,7 +291,7 @@ class BomRendererTest {
         metadata.setProjectArtifactId("JBoss EAP");
         metadata.setProjectVersion("8.1 Update 7.1");
         metadata.setHashAlgorithmSpec("SHA-256");
-        metadata.setSchemaVersion("1.6");
+
         metadata.setMainComponentPurl("pkg:generic/jboss-eap@8.1-update-7.1");
         model.setMetadata(metadata);
         model.addComponent(PackageComponent.of(
@@ -320,7 +320,7 @@ class BomRendererTest {
         metadata.setProjectArtifactId("my-app");
         metadata.setProjectVersion("1.0.0");
         metadata.setHashAlgorithmSpec("SHA-256");
-        metadata.setSchemaVersion("1.6");
+
         model.setMetadata(metadata);
 
         ArtifactCoords lib1 = ArtifactCoords.of("com.example", "lib1", "1.0");
@@ -368,7 +368,7 @@ class BomRendererTest {
         metadata.setProjectArtifactId("my-app");
         metadata.setProjectVersion("1.0.0");
         metadata.setHashAlgorithmSpec("SHA-256");
-        metadata.setSchemaVersion("1.6");
+
         metadata.setTimestamp(new Date(1234567890000L));
         model.setMetadata(metadata);
 
@@ -392,7 +392,7 @@ class BomRendererTest {
         metadata.setProjectArtifactId("my-app");
         metadata.setProjectVersion("1.0.0");
         metadata.setHashAlgorithmSpec("SHA-256");
-        metadata.setSchemaVersion("1.6");
+
         model.setMetadata(metadata);
 
         ArtifactCoords jarCoords = ArtifactCoords.of("com.example", "lib", "1.0");
@@ -446,7 +446,7 @@ class BomRendererTest {
         metadata.setProjectArtifactId("my-app");
         metadata.setProjectVersion("1.0.0");
         metadata.setHashAlgorithmSpec("SHA-256");
-        metadata.setSchemaVersion("1.6");
+
         model.setMetadata(metadata);
 
         ArtifactCoords parent = ArtifactCoords.of("com.example", "parent", "1.0");
