@@ -151,7 +151,7 @@ public class MergeSbomMojo extends AbstractMojo {
         }
         try {
             BomWriter.write(bom, outputFile.toPath(), format, prettyPrint,
-                    SbomGenerator.parseSchemaVersion(schemaVersion));
+                    SchemaVersions.resolve(schemaVersion));
         } catch (java.io.IOException | GeneratorException e) {
             throw new MojoExecutionException("Failed to write merged BOM to " + outputFile, e);
         }

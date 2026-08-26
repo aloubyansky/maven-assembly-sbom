@@ -11,9 +11,9 @@ import java.util.Date;
 import java.util.List;
 
 import org.cyclonedx.Version;
-import org.cyclonedx.generators.BomGeneratorFactory;
 import org.cyclonedx.model.Bom;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Byte-identity regression guard for {@link BomRenderer}.
@@ -53,13 +53,16 @@ class GoldenBomTest {
     /** Pinned so the golden bytes never drift with the CycloneDX library default. */
     private static final String SCHEMA_VERSION = "1.6";
 
+    @TempDir
+    Path tempDir;
+
     @Test
     void renderedBomMatchesGolden() throws Exception {
         Bom bom = new BomRenderer().render(buildFixedModel());
-        Version schemaVersion = SbomGenerator.parseSchemaVersion(SCHEMA_VERSION);
-        String actual = BomGeneratorFactory
-                .createJson(schemaVersion, bom)
-                .toJsonString(true);
+        Version schemaVersion = SchemaVersions.resolve(SCHEMA_VERSION);
+        Path out = tempDir.resolve("golden.cdx.json");
+        BomWriter.writeJson(bom, out, true, schemaVersion);
+        String actual = Files.readString(out);
 
         if (Boolean.getBoolean("golden.regenerate")) {
             Files.createDirectories(GOLDEN_SOURCE_PATH.getParent());

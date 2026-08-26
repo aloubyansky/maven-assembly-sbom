@@ -19,18 +19,16 @@ class BomWriterTest {
     @Test
     void writeJsonProducesValidCycloneDx() throws Exception {
         Path output = tempDir.resolve("test.cdx.json");
-        Version defaultVersion = SbomGenerator.parseSchemaVersion(null);
-        BomWriter.writeJson(createMinimalBom(), output, true, defaultVersion);
+        BomWriter.writeJson(createMinimalBom(), output, true);
 
         String content = Files.readString(output);
         assertTrue(content.contains("\"bomFormat\" : \"CycloneDX\""));
-        assertTrue(content.contains("\"specVersion\" : \"" + defaultVersion.getVersionString() + "\""));
     }
 
     @Test
     void writeXmlProducesValidCycloneDx() throws Exception {
         Path output = tempDir.resolve("test.cdx.xml");
-        BomWriter.writeXml(createMinimalBom(), output, SbomGenerator.parseSchemaVersion(null));
+        BomWriter.writeXml(createMinimalBom(), output);
 
         String content = Files.readString(output);
         assertTrue(content.contains("<bom"));
@@ -38,42 +36,68 @@ class BomWriterTest {
     }
 
     @Test
-    void jsonContainsComponents() throws Exception {
-        Bom bom = createMinimalBom();
-        Component comp = new Component();
-        comp.setType(Component.Type.LIBRARY);
-        comp.setName("test-lib");
-        comp.setVersion("1.0");
-        comp.setBomRef("test-lib-ref");
-        bom.addComponent(comp);
-
+    void writeJsonUsesSuppliedSchemaVersion() throws Exception {
         Path output = tempDir.resolve("test.cdx.json");
-        BomWriter.writeJson(bom, output, true, SbomGenerator.parseSchemaVersion(null));
+        BomWriter.writeJson(createMinimalBom(), output, true, Version.VERSION_15);
 
         String content = Files.readString(output);
-        assertTrue(content.contains("test-lib"));
+        assertTrue(content.contains("\"specVersion\" : \"1.5\""),
+                "serialized specVersion should match the supplied version");
+    }
+
+    @Test
+    void jsonContainsComponents() throws Exception {
+        Bom bom = createMinimalBom();
+        bom.addComponent(componentNamed("test-lib"));
+
+        Path output = tempDir.resolve("test.cdx.json");
+        BomWriter.writeJson(bom, output, true);
+
+        assertTrue(Files.readString(output).contains("test-lib"));
     }
 
     @Test
     void xmlContainsComponents() throws Exception {
         Bom bom = createMinimalBom();
-        Component comp = new Component();
-        comp.setType(Component.Type.LIBRARY);
-        comp.setName("test-lib");
-        comp.setVersion("1.0");
-        comp.setBomRef("test-lib-ref");
-        bom.addComponent(comp);
+        bom.addComponent(componentNamed("test-lib"));
 
         Path output = tempDir.resolve("test.cdx.xml");
-        BomWriter.writeXml(bom, output, SbomGenerator.parseSchemaVersion(null));
+        BomWriter.writeXml(bom, output);
+
+        assertTrue(Files.readString(output).contains("test-lib"));
+    }
+
+    @Test
+    void writeDispatchesByFormat() throws Exception {
+        Path json = tempDir.resolve("out.json");
+        Path xml = tempDir.resolve("out.xml");
+        BomWriter.write(createMinimalBom(), json, "json", false);
+        BomWriter.write(createMinimalBom(), xml, "xml", false);
+
+        assertTrue(Files.readString(json).contains("\"bomFormat\""));
+        assertTrue(Files.readString(xml).contains("<bom"));
+    }
+
+    @Test
+    void setsSerialNumber() throws Exception {
+        Path output = tempDir.resolve("test.cdx.json");
+        BomWriter.writeJson(createMinimalBom(), output, true);
 
         String content = Files.readString(output);
-        assertTrue(content.contains("test-lib"));
+        assertTrue(content.contains("\"serialNumber\" : \"urn:uuid:"),
+                "writer should compute and set the serial number");
+    }
+
+    private static Component componentNamed(String name) {
+        Component comp = new Component();
+        comp.setType(Component.Type.LIBRARY);
+        comp.setName(name);
+        comp.setVersion("1.0");
+        comp.setBomRef(name + "-ref");
+        return comp;
     }
 
     private static Bom createMinimalBom() {
-        Bom bom = new Bom();
-        bom.setSerialNumber("urn:uuid:00000000-0000-0000-0000-000000000000");
-        return bom;
+        return new Bom();
     }
 }

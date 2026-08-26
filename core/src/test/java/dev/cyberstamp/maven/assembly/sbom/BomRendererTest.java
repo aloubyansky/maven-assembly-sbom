@@ -2,6 +2,7 @@ package dev.cyberstamp.maven.assembly.sbom;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Date;
@@ -359,12 +360,8 @@ class BomRendererTest {
         assertEquals("pkg:maven/com.example/lib2@2.0", lib1Dep.getDependencies().get(0).getRef());
     }
 
-    /**
-     * (f) serialNumber is a stable urn:uuid: derived from content
-     * (assert equality across two renders of an identical model).
-     */
     @Test
-    void testSerialNumberStability() {
+    void renderDoesNotSetSerialNumber() {
         AssemblyComponents model = new AssemblyComponents();
         AssemblyMetadata metadata = new AssemblyMetadata();
         metadata.setProjectGroupId("org.example");
@@ -372,20 +369,14 @@ class BomRendererTest {
         metadata.setProjectVersion("1.0.0");
         metadata.setHashAlgorithmSpec("SHA-256");
         metadata.setSchemaVersion("1.6");
-        metadata.setTimestamp(new Date(1234567890000L)); // Fixed timestamp for stability
+        metadata.setTimestamp(new Date(1234567890000L));
         model.setMetadata(metadata);
 
         ArtifactCoords coords = ArtifactCoords.of("com.example", "lib", "2.0.0");
         model.addComponent(PackageComponent.of(coords, "lib/lib-2.0.0.jar", "abc123"));
 
-        BomRenderer renderer = new BomRenderer();
-        Bom bom1 = renderer.render(model);
-        Bom bom2 = renderer.render(model);
-
-        assertNotNull(bom1.getSerialNumber());
-        assertNotNull(bom2.getSerialNumber());
-        assertTrue(bom1.getSerialNumber().startsWith("urn:uuid:"));
-        assertEquals(bom1.getSerialNumber(), bom2.getSerialNumber());
+        Bom bom = new BomRenderer().render(model);
+        assertNull(bom.getSerialNumber());
     }
 
     /**
@@ -495,4 +486,5 @@ class BomRendererTest {
         assertEquals(1, parentDep.getDependencies().size());
         assertEquals("pkg:maven/com.example/child@2.0", parentDep.getDependencies().get(0).getRef());
     }
+
 }

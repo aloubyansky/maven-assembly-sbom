@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.UUID;
 
 import org.cyclonedx.Version;
 import org.cyclonedx.exception.GeneratorException;
@@ -16,6 +17,12 @@ import org.cyclonedx.model.Bom;
  * Serializes a CycloneDX {@link Bom} to disk in JSON or XML format.
  *
  * <p>
+ * Before writing, a content-based serial number is computed and set on the BOM
+ * using the same schema version that drives serialization, so the two always
+ * stay in sync.
+ * </p>
+ *
+ * <p>
  * The class is a stateless utility and cannot be instantiated.
  * </p>
  */
@@ -24,49 +31,36 @@ public final class BomWriter {
     private BomWriter() {
     }
 
-    /**
-     * Writes the given BOM as a CycloneDX JSON document.
-     *
-     * @param bom the BOM model to serialize
-     * @param output the file path to write to (created or overwritten)
-     * @param prettyPrint whether to indent the output for readability
-     * @param schemaVersion the CycloneDX schema version to use
-     * @throws IOException if the file cannot be written
-     * @throws GeneratorException if the BOM model cannot be converted to JSON
-     */
+    public static void writeJson(Bom bom, Path output, boolean prettyPrint)
+            throws IOException, GeneratorException {
+        writeJson(bom, output, prettyPrint, null);
+    }
+
     public static void writeJson(Bom bom, Path output, boolean prettyPrint, Version schemaVersion)
             throws IOException, GeneratorException {
+        schemaVersion = resolveVersion(schemaVersion);
+        setSerialNumber(bom, schemaVersion);
         BomJsonGenerator generator = BomGeneratorFactory.createJson(schemaVersion, bom);
         Files.writeString(output, generator.toJsonString(prettyPrint), StandardCharsets.UTF_8);
     }
 
-    /**
-     * Writes the given BOM as a CycloneDX XML document.
-     * The output is always indented.
-     *
-     * @param bom the BOM model to serialize
-     * @param output the file path to write to (created or overwritten)
-     * @param schemaVersion the CycloneDX schema version to use
-     * @throws IOException if the file cannot be written
-     * @throws GeneratorException if the BOM model cannot be converted to XML
-     */
+    public static void writeXml(Bom bom, Path output) throws IOException, GeneratorException {
+        writeXml(bom, output, null);
+    }
+
     public static void writeXml(Bom bom, Path output, Version schemaVersion)
             throws IOException, GeneratorException {
+        schemaVersion = resolveVersion(schemaVersion);
+        setSerialNumber(bom, schemaVersion);
         BomXmlGenerator generator = BomGeneratorFactory.createXml(schemaVersion, bom);
         Files.writeString(output, generator.toXmlString(), StandardCharsets.UTF_8);
     }
 
-    /**
-     * Writes the given BOM in the specified format.
-     *
-     * @param bom the BOM model to serialize
-     * @param output the file path to write to (created or overwritten)
-     * @param format {@code "json"} or {@code "xml"} (case-insensitive)
-     * @param prettyPrint whether to indent JSON output (ignored for XML)
-     * @param schemaVersion the CycloneDX schema version to use
-     * @throws IOException if the file cannot be written
-     * @throws GeneratorException if the BOM model cannot be serialized
-     */
+    public static void write(Bom bom, Path output, String format, boolean prettyPrint)
+            throws IOException, GeneratorException {
+        write(bom, output, format, prettyPrint, null);
+    }
+
     public static void write(Bom bom, Path output, String format, boolean prettyPrint,
             Version schemaVersion) throws IOException, GeneratorException {
         if ("xml".equalsIgnoreCase(format)) {
@@ -74,5 +68,19 @@ public final class BomWriter {
         } else {
             writeJson(bom, output, prettyPrint, schemaVersion);
         }
+    }
+
+    private static Version resolveVersion(Version schemaVersion) {
+        return schemaVersion != null ? schemaVersion : SchemaVersions.latest();
+    }
+
+    private static void setSerialNumber(Bom bom, Version schemaVersion) {
+        final String json;
+        try {
+            json = BomGeneratorFactory.createJson(schemaVersion, bom).toJsonString(false);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to serialize the SBOM to compute its serial number", e);
+        }
+        bom.setSerialNumber("urn:uuid:" + UUID.nameUUIDFromBytes(json.getBytes(StandardCharsets.UTF_8)));
     }
 }
