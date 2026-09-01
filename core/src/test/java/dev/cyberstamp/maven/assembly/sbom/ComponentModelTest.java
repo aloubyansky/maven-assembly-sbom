@@ -56,6 +56,45 @@ class ComponentModelTest {
     }
 
     @Test
+    void dependenciesKnownDefaultsTrueAndIsSettable() {
+        PackageComponent known = PackageComponent.of(
+                ArtifactCoords.of("org.example", "foo", "1.0"), null, null);
+        assertTrue(known.dependenciesKnown());
+
+        PackageComponent unknown = PackageComponent.of(
+                ArtifactCoords.of("org.example", "foo", "1.0"), null, null, false);
+        assertFalse(unknown.dependenciesKnown());
+    }
+
+    @Test
+    void withersReturnSameInstanceWhenUnchanged() {
+        PackageComponent pc = PackageComponent.of(
+                ArtifactCoords.of("org.example", "foo", "1.0"), null, null, false);
+        // No licenses / no nested → replacing with empty is a no-op, no allocation.
+        assertSame(pc, pc.withLicenses(List.of()));
+        assertSame(pc, pc.withNested(List.of()));
+        assertSame(pc, pc.withLicenses(null));
+        assertSame(pc, pc.withNested(null));
+        // Same list instance → no-op.
+        assertSame(pc, pc.withLicenses(pc.licenses()));
+        assertSame(pc, pc.withNested(pc.nested()));
+    }
+
+    @Test
+    void withersPreserveDependenciesKnown() {
+        PackageComponent pc = PackageComponent.of(
+                ArtifactCoords.of("org.example", "foo", "1.0"), null, null, false);
+        PackageComponent withLic = pc.withLicenses(List.of(LicenseInfo.spdx("Apache-2.0")));
+        assertNotSame(pc, withLic);
+        assertFalse(withLic.dependenciesKnown());
+
+        PackageComponent child = PackageComponent.of(ArtifactCoords.of("g", "a", "1"), null, null);
+        PackageComponent withNested = pc.withNested(List.of(child));
+        assertNotSame(pc, withNested);
+        assertFalse(withNested.dependenciesKnown());
+    }
+
+    @Test
     void componentIsSealedOverTwoKinds() {
         AssemblyComponent pkg = PackageComponent.of(ArtifactCoords.of("g", "a", "1"), null, null);
         AssemblyComponent file = new FileComponent("f", null, List.of());

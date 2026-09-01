@@ -1252,8 +1252,7 @@ class ArchiveAnalyzer {
                         List<AssemblyComponent> nestedList = buildNestedComponentsRecursively(
                                 coords, childrenByParent, builtNested);
                         if (!nestedList.isEmpty()) {
-                            topLevel.set(i, new PackageComponent(pkg.ref(),
-                                    pkg.archivePath(), pkg.hash(), pkg.licenses(), nestedList));
+                            topLevel.set(i, pkg.withNested(nestedList));
                         }
                     }
                 }

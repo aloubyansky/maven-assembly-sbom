@@ -360,6 +360,48 @@ class BomRendererTest {
         assertEquals("pkg:maven/com.example/lib2@2.0", lib1Dep.getDependencies().get(0).getRef());
     }
 
+    /**
+     * A component created with {@code dependenciesKnown = false} is not declared
+     * as an empty leaf entry in the dependency graph, while one with known
+     * dependencies (the default) is. This lets a producer mark exactly those
+     * components whose dependencies it never resolved, so "unknown" is not
+     * misreported as "no dependencies".
+     */
+    @Test
+    void testComponentWithUnknownDependenciesOmittedFromGraph() {
+        AssemblyComponents model = new AssemblyComponents();
+        AssemblyMetadata metadata = new AssemblyMetadata();
+        metadata.setProjectGroupId("org.example");
+        metadata.setProjectArtifactId("my-app");
+        metadata.setProjectVersion("1.0.0");
+        metadata.setHashAlgorithmSpec("SHA-256");
+        model.setMetadata(metadata);
+
+        // lib1: dependencies known (default) → declared as a leaf entry.
+        model.addComponent(PackageComponent.of(
+                ArtifactCoords.of("com.example", "lib1", "1.0"), "lib/lib1-1.0.jar", "hash1"));
+        // lib2: dependencies unknown → omitted from the dependency graph.
+        model.addComponent(PackageComponent.of(
+                ArtifactCoords.of("com.example", "lib2", "2.0"), "lib/lib2-2.0.jar", "hash2", false));
+
+        final String mainPurl = "pkg:maven/org.example/my-app@1.0.0";
+        final String lib1Purl = "pkg:maven/com.example/lib1@1.0";
+        final String lib2Purl = "pkg:maven/com.example/lib2@2.0";
+
+        Bom bom = new BomRenderer().render(model);
+
+        // Main references both (they are components), but only lib1 has a leaf entry.
+        Dependency mainDep = bom.getDependencies().stream()
+                .filter(d -> mainPurl.equals(d.getRef()))
+                .findFirst().orElse(null);
+        assertNotNull(mainDep);
+        assertEquals(2, mainDep.getDependencies().size());
+        assertTrue(bom.getDependencies().stream().anyMatch(d -> lib1Purl.equals(d.getRef())),
+                "component with known dependencies should have a leaf entry");
+        assertTrue(bom.getDependencies().stream().noneMatch(d -> lib2Purl.equals(d.getRef())),
+                "component with unknown dependencies should not have a leaf entry");
+    }
+
     @Test
     void renderDoesNotSetSerialNumber() {
         AssemblyComponents model = new AssemblyComponents();

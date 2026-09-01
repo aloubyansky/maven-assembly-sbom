@@ -147,24 +147,36 @@ public final class LicenseEnrichment {
      */
     private AssemblyComponent enrich(AssemblyComponent comp) {
         if (comp instanceof PackageComponent pkg) {
-            List<AssemblyComponent> nested = new ArrayList<>(pkg.nested().size());
-            for (AssemblyComponent child : pkg.nested()) {
-                nested.add(enrich(child));
-            }
             List<LicenseInfo> licenses = pkg.licenses();
             if (licenses.isEmpty() && pkg.ref() instanceof ArtifactCoords coords) {
                 licenses = resolve(coords.groupId(), coords.artifactId(), coords.version());
             }
-            return new PackageComponent(pkg.ref(), pkg.archivePath(), pkg.hash(), licenses, nested);
+            // withLicenses/withNested return the same instance when nothing changed,
+            // so an unchanged leaf component is not reallocated.
+            return pkg.withLicenses(licenses).withNested(enrichNested(pkg.nested()));
         }
         if (comp instanceof FileComponent file) {
-            List<AssemblyComponent> nested = new ArrayList<>(file.nested().size());
-            for (AssemblyComponent child : file.nested()) {
-                nested.add(enrich(child));
+            if (file.nested().isEmpty()) {
+                return file;
             }
-            return new FileComponent(file.archivePath(), file.hash(), nested);
+            return new FileComponent(file.archivePath(), file.hash(), enrichNested(file.nested()));
         }
         return comp;
+    }
+
+    /**
+     * Enriches each nested component, returning the same list instance when it is
+     * empty so callers can avoid an unnecessary copy.
+     */
+    private List<AssemblyComponent> enrichNested(List<AssemblyComponent> nested) {
+        if (nested.isEmpty()) {
+            return nested;
+        }
+        List<AssemblyComponent> enriched = new ArrayList<>(nested.size());
+        for (AssemblyComponent child : nested) {
+            enriched.add(enrich(child));
+        }
+        return enriched;
     }
 
     private void handleMissing(ArtifactCoords id) {
