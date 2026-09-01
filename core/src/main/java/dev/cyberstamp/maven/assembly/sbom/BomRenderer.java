@@ -180,6 +180,12 @@ public class BomRenderer {
             ctx.nestedComponentsByParent.put(comp, buildNestedComponents(pkg.nested(), ctx));
         }
 
+        // Components whose dependencies are unknown must not be declared as empty
+        // leaf entries in the dependency graph (unknown != no dependencies).
+        if (!pkg.dependenciesKnown()) {
+            ctx.dependenciesUnknownRefs.add(comp.getBomRef());
+        }
+
         return comp;
     }
 
@@ -737,6 +743,11 @@ public class BomRenderer {
             existingRefs.add(d.getRef());
         }
         for (Component comp : ctx.componentsById.values()) {
+            // Skip components whose dependencies are unknown: declaring an empty
+            // leaf entry would misreport "unknown" as "no dependencies".
+            if (ctx.dependenciesUnknownRefs.contains(comp.getBomRef())) {
+                continue;
+            }
             if (existingRefs.add(comp.getBomRef())) {
                 bom.addDependency(new Dependency(comp.getBomRef()));
             }
@@ -754,6 +765,8 @@ public class BomRenderer {
         final List<Component> components = new ArrayList<>();
         // Keyed by purl string to match occurrence-merge deduplication key
         final Map<String, Component> componentsById = new HashMap<>();
+        // Bom-refs of components whose dependencies are unknown; excluded from leaf entries.
+        final Set<String> dependenciesUnknownRefs = new HashSet<>();
         final Map<Component, List<Component>> nestedComponentsByParent = new HashMap<>();
         final Set<String> directChildren = new HashSet<>();
 

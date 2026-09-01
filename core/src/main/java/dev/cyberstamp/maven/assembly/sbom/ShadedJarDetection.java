@@ -94,7 +94,6 @@ public final class ShadedJarDetection {
                 nested.add(PackageComponent.of(coords, null, null));
             }
         }
-        return new PackageComponent(pkg.ref(), pkg.archivePath(), pkg.hash(),
-                pkg.licenses(), nested);
+        return pkg.withNested(nested);
     }
 }

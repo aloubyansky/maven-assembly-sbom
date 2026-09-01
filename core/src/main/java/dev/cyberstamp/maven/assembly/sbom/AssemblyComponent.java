@@ -35,4 +35,23 @@ public sealed interface AssemblyComponent permits PackageComponent, FileComponen
      *         dependencies, assembled-jar contents); never {@code null}
      */
     List<AssemblyComponent> nested();
+
+    /**
+     * Indicates whether this component's dependencies are known.
+     *
+     * <p>
+     * When {@code true} (the default), a component with no recorded
+     * dependencies is understood to genuinely have none, and is rendered as an
+     * empty leaf entry in the CycloneDX dependency graph. When {@code false},
+     * the component's dependencies were never resolved, so it is omitted from
+     * the dependency graph rather than misreporting "unknown" as "none".
+     * Producers that record a flat inventory rather than a resolved dependency
+     * tree should create components with this set to {@code false}.
+     * </p>
+     *
+     * @return whether this component's dependencies are known
+     */
+    default boolean dependenciesKnown() {
+        return true;
+    }
 }
