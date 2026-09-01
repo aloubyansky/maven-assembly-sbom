@@ -35,6 +35,12 @@ public record PackageComponent(PackageRef ref, String archivePath, String hash,
     /**
      * Backward-compatible constructor that assumes the component's dependencies
      * are known.
+     *
+     * @param ref the package identity; never {@code null}
+     * @param archivePath the path within the assembly, or {@code null}
+     * @param hash the content hash, or {@code null}
+     * @param licenses the attached licenses ({@code null} becomes empty)
+     * @param nested the nested components ({@code null} becomes empty)
      */
     public PackageComponent(PackageRef ref, String archivePath, String hash,
             List<LicenseInfo> licenses, List<AssemblyComponent> nested) {
@@ -102,6 +108,11 @@ public record PackageComponent(PackageRef ref, String archivePath, String hash,
      * would be a no-op: they are the same list instance, or both are empty
      * ({@code candidate} may be {@code null}). {@code current} is always a
      * non-null (possibly empty) list produced by the canonical constructor.
+     *
+     * @param candidate the replacement list, possibly {@code null}
+     * @param current the current (non-null) list
+     * @return {@code true} if replacing {@code current} with {@code candidate}
+     *         would leave the component unchanged
      */
     private static boolean sameOrBothEmpty(List<?> candidate, List<?> current) {
         return candidate == current || ((candidate == null || candidate.isEmpty()) && current.isEmpty());
