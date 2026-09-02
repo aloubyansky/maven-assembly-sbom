@@ -91,7 +91,10 @@ public final class ShadedJarDetection {
         List<AssemblyComponent> nested = new ArrayList<>(pkg.nested());
         for (ArtifactCoords coords : bundled) {
             if (existing.add(coords.toPurl().toString())) {
-                nested.add(PackageComponent.of(coords, null, null));
+                // Bundled artifacts are discovered from embedded pom.properties;
+                // their transitive dependencies are not resolved, so they are
+                // marked as having unknown dependencies (not an empty leaf).
+                nested.add(PackageComponent.of(coords, null, null, false));
             }
         }
         return pkg.withNested(nested);

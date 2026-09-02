@@ -50,6 +50,33 @@ class ShadedJarDetectionTest {
         assertEquals(1, pkg.nested().size(), "the non-owner bundled dep should be nested");
         PackageComponent nested = (PackageComponent) pkg.nested().get(0);
         assertEquals("pkg:maven/com.bundled/dep@2.0", nested.ref().toPurl().toString());
+        assertFalse(nested.dependenciesKnown(),
+                "a pom.properties-detected bundle has unresolved dependencies");
+    }
+
+    @Test
+    void bundledArtifactsHaveUnknownDependencies() throws Exception {
+        // A bundle is discovered from embedded pom.properties, not from a resolved
+        // dependency tree, so its dependencies must be marked unknown so the
+        // renderer omits it from the dependency graph rather than declaring it a
+        // leaf with no dependencies.
+        Path jar = jarWithPomProperties("owner-1.0.jar",
+                new String[] { "com.example", "owner", "1.0" },
+                new String[] { "com.bundled", "dep-a", "2.0" },
+                new String[] { "com.bundled", "dep-b", "3.0" });
+
+        ArtifactCoords owner = ArtifactCoords.of("com.example", "owner", "1.0");
+        AssemblyComponents model = new AssemblyComponents();
+        model.addComponent(PackageComponent.of(owner, "lib/owner.jar", "hash"));
+
+        new ShadedJarDetection(c -> c.equals(owner) ? jar : null).apply(model);
+
+        PackageComponent pkg = (PackageComponent) model.components().get(0);
+        assertEquals(2, pkg.nested().size());
+        for (AssemblyComponent nested : pkg.nested()) {
+            assertFalse(nested.dependenciesKnown(),
+                    "every bundled dep should have unknown dependencies: " + nested);
+        }
     }
 
     @Test
