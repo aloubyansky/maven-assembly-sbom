@@ -29,7 +29,7 @@ import org.slf4j.LoggerFactory;
  * exploded directories (unpacked artifacts) are handled uniformly.
  * </p>
  */
-final class BundledArtifactScanner {
+public final class BundledArtifactScanner {
 
     private static final Logger log = LoggerFactory.getLogger(BundledArtifactScanner.class);
 
@@ -44,7 +44,7 @@ final class BundledArtifactScanner {
      * extension filtering is applied — a regular file that is not a ZIP falls
      * through to the graceful error path.
      */
-    static List<ArtifactCoords> bundledNonOwner(Path artifact, ArtifactCoords owner) {
+    public static List<ArtifactCoords> bundledNonOwner(Path artifact, ArtifactCoords owner) {
         if (artifact == null) {
             return List.of();
         }
