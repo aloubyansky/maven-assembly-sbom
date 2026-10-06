@@ -31,6 +31,7 @@ The project includes two SBOM generators:
   - [Shaded / Fat JAR Detection](#shaded--fat-jar-detection)
   - [Dependency Graph](#dependency-graph)
   - [SBOM Merging](#sbom-merging)
+  - [Cryptography Bills of Materials (CBOM)](#cryptography-bills-of-materials-cbom)
   - [Reproducible Builds](#reproducible-builds)
   - [CycloneDX Component Types](#cyclonedx-component-types)
   - [Evidence](#evidence)
@@ -405,6 +406,42 @@ Example configuration:
 | Yarn | [`@cyclonedx/cyclonedx-node-yarn`](https://github.com/CycloneDX/cyclonedx-node-yarn) |
 | pnpm | [`cdxgen`](https://www.npmjs.com/package/@cyclonedx/cdxgen) |
 | Any | [`cdxgen`](https://www.npmjs.com/package/@cyclonedx/cdxgen) (multi-ecosystem) |
+
+### Cryptography Bills of Materials (CBOM)
+
+A [CBOM](https://cyclonedx.org/capabilities/cbom/) is the CycloneDX cryptography extension (schema 1.6+): it inventories cryptographic assets — algorithms, protocols, certificates, and key material — discovered in an application, so they can be assessed for issues like post-quantum readiness.
+
+This project **does not generate** CBOM data. Doing so requires static analysis of source or bytecode to find cryptographic API usage, which is a different discipline from the content-hash identification this project performs. Instead, it **consumes** CBOMs through the same merge machinery used for other ecosystems: generate a CBOM with a dedicated tool, then merge it into the distribution SBOM via [`externalSboms`](#external-sboms) (or let it be auto-detected as an [embedded SBOM](#auto-detection)).
+
+#### Generating a CBOM for a Java application
+
+| Tool | How it runs | Java coverage |
+|---|---|---|
+| [IBM Sonar Cryptography](https://github.com/cbomkit/sonar-cryptography) | SonarQube plugin — analyzes a **built** project | Highest: JCA/JCE and BouncyCastle lightweight API |
+| [CBOMkit Action](https://github.com/cbomkit/cbomkit-action) | GitHub Action — builds, then scans, in CI | High |
+| [CBOMkit](https://github.com/cbomkit/cbomkit) | Docker/Podman/Helm toolset — scans a git repo or PURL, plus a viewer, REST API, and compliance checks | Moderate (scans source **without building**, so some symbols go unresolved) |
+| [`cdxgen --include-crypto`](https://github.com/CycloneDX/cdxgen) | Single CLI, no server (`cdxgen -t java --include-crypto -o crypto.cdx.json .`) | Moderate |
+
+All of these emit CycloneDX CBOM JSON. Scanners that run **after a build** (the SonarQube plugin, the Action) produce the most accurate Java results, because resolved symbols are what make cryptographic-API detection reliable.
+
+#### Merging a CBOM into the distribution SBOM
+
+```xml
+<containerDescriptorHandler>
+    <handlerName>sbom</handlerName>
+    <configuration>
+        <outputMode>external</outputMode>
+        <externalSboms>target/crypto.cdx.json</externalSboms>
+    </configuration>
+</containerDescriptorHandler>
+```
+
+The merge preserves `cryptographic-asset` components and their full `cryptoProperties` (algorithm, certificate, protocol, and related-material details), along with `dependsOn` relationships between them. This round trip is covered by `CbomMergeRoundTripTest`.
+
+**Limitations:**
+
+- The CBOM-specific `provides` dependency relationship is not preserved — the integrated CycloneDX Java library models only `dependsOn`, so `provides` edges are dropped at parse time. Ordinary `dependsOn` edges round-trip normally.
+- `cryptoProperties` require CycloneDX schema 1.6 or later. The default `schemaVersion` tracks the latest version supported by the integrated library (1.6+), so no configuration is needed; explicitly setting `schemaVersion` to 1.5 or lower will silently drop crypto data on output.
 
 ### Reproducible Builds
 
