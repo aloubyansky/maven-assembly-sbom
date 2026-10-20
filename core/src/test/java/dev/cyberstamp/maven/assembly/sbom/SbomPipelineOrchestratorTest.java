@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.util.List;
 
 import org.cyclonedx.model.Bom;
+import org.cyclonedx.model.component.evidence.Method;
 import org.junit.jupiter.api.Test;
 
 class SbomPipelineOrchestratorTest {
@@ -45,5 +46,31 @@ class SbomPipelineOrchestratorTest {
         Bom bom = SbomPipeline.forModel(m).render();
         assertNotNull(bom.getComponents());
         assertFalse(bom.getComponents().isEmpty());
+    }
+
+    /**
+     * The option governs this library's own findings; an identification a
+     * producer put on the model passes through untouched.
+     */
+    @Test
+    void identityEvidenceFalseKeepsProducerIdentification() {
+        AssemblyComponents m = model(PackageComponent.of(ArtifactCoords.of("g", "a", "1"), "lib/a.jar", null,
+                true, new Identification(Technique.ATTESTATION, 0.9)));
+        Bom bom = SbomPipeline.forModel(m).identityEvidence(false).render();
+        var identity = bom.getComponents().get(0).getEvidence().getIdentities().get(0);
+        assertEquals(0.9, identity.getConfidence());
+        assertEquals(Method.Technique.ATTESTATION,
+                identity.getMethods().get(0).getTechnique());
+    }
+
+    @Test
+    void identityEvidenceSurvivesLicenseEnrichment() {
+        LicenseSource src = (g, a, v) -> List.of(new RawLicense("Apache License 2.0", null));
+        AssemblyComponents m = model(PackageComponent.of(ArtifactCoords.of("g", "a", "1"), "lib/a.jar", null,
+                true, Identification.hashMatch()));
+        Bom bom = SbomPipeline.forModel(m).licenseSource(src).render();
+        var component = bom.getComponents().get(0);
+        assertNotNull(component.getLicenses(), "license enrichment ran");
+        assertEquals(1.0, component.getEvidence().getIdentities().get(0).getConfidence());
     }
 }

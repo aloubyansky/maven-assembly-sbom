@@ -1,7 +1,7 @@
 {
   "bomFormat" : "CycloneDX",
   "specVersion" : "1.6",
-  "serialNumber" : "urn:uuid:a6fd078f-53ca-3b74-9005-dfdbd7c2af9a",
+  "serialNumber" : "urn:uuid:d2436efb-2485-33ac-b166-f9e83c451479",
   "version" : 1,
   "metadata" : {
     "timestamp" : "2023-11-14T22:13:20Z",
@@ -111,7 +111,7 @@
                 "methods" : [
                   {
                     "technique" : "manifest-analysis",
-                    "value" : "maven-pom-analysis"
+                    "confidence" : 1.0
                   }
                 ]
               }
@@ -131,8 +131,8 @@
             "confidence" : 1.0,
             "methods" : [
               {
-                "technique" : "manifest-analysis",
-                "value" : "maven-pom-analysis"
+                "technique" : "hash-comparison",
+                "confidence" : 1.0
               }
             ]
           }
@@ -166,18 +166,6 @@
       ],
       "purl" : "pkg:maven/org.example/beta@2.0",
       "evidence" : {
-        "identity" : [
-          {
-            "field" : "purl",
-            "confidence" : 1.0,
-            "methods" : [
-              {
-                "technique" : "manifest-analysis",
-                "value" : "maven-pom-analysis"
-              }
-            ]
-          }
-        ],
         "occurrences" : [
           {
             "location" : "lib/beta.jar"

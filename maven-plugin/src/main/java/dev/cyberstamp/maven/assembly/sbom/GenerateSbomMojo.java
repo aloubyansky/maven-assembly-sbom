@@ -112,6 +112,16 @@ public class GenerateSbomMojo extends AbstractMojo {
     private boolean failOnDuplicateHash;
 
     /**
+     * When {@code true}, components this plugin identifies carry CycloneDX
+     * identity evidence recording how they were identified. When
+     * {@code false}, this plugin emits no identity evidence of its own;
+     * identity evidence from external or embedded SBOMs is preserved, and
+     * occurrences are unaffected.
+     */
+    @Parameter(defaultValue = "true")
+    private boolean identityEvidence;
+
+    /**
      * When {@code true}, generic file components are removed from
      * the output, keeping only library components.
      */
@@ -205,6 +215,7 @@ public class GenerateSbomMojo extends AbstractMojo {
                 failOnDuplicateHash, failOnMissingLicense, embeddedSboms,
                 librariesOnly, schemaVersion);
         generator.setProduct(product);
+        generator.setIdentityEvidence(identityEvidence);
         Bom bom = generator.generate(entries, null, externalBomList,
                 null, null, project.getPackaging());
 

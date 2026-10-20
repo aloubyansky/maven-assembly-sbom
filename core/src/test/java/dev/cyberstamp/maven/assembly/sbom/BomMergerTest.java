@@ -2,6 +2,7 @@ package dev.cyberstamp.maven.assembly.sbom;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import org.cyclonedx.model.Bom;
@@ -10,10 +11,12 @@ import org.cyclonedx.model.Dependency;
 import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.ExternalReference;
 import org.cyclonedx.model.Hash;
+import org.cyclonedx.model.License;
 import org.cyclonedx.model.LicenseChoice;
 import org.cyclonedx.model.Metadata;
 import org.cyclonedx.model.Property;
 import org.cyclonedx.model.component.evidence.Identity;
+import org.cyclonedx.model.component.evidence.Method;
 import org.cyclonedx.model.component.evidence.Occurrence;
 import org.junit.jupiter.api.Test;
 
@@ -414,7 +417,7 @@ class BomMergerTest {
         Identity identity = new Identity();
         identity.setField(Identity.Field.PURL);
         identity.setConfidence(1.0);
-        evidence.setIdentities(new java.util.ArrayList<>(List.of(identity)));
+        evidence.setIdentities(new ArrayList<>(List.of(identity)));
         topLib.setEvidence(evidence);
 
         Component war = createLibrary("org.a", "war", "1.0",
@@ -441,6 +444,37 @@ class BomMergerTest {
                 nested.getEvidence().getIdentities().get(0).getField());
     }
 
+    /**
+     * When an embedded SBOM's component absorbs one of our top-level
+     * components, the identity we established for it stays: identity already
+     * in the BOM wins over the incoming SBOM's, as in every merge branch.
+     */
+    @Test
+    void mergeKeepsTopLevelIdentityWhenEmbeddedComponentAbsorbsIt() {
+        Component topLib = createLibrary("org.jspecify", "jspecify", "1.0.0",
+                "pkg:maven/org.jspecify/jspecify@1.0.0");
+        Evidence evidence = evidenceWithOccurrence("WEB-INF/lib/jspecify-1.0.0.jar");
+        evidence.setIdentities(new ArrayList<>(List.of(
+                identity(Method.Technique.HASH_COMPARISON, 1.0))));
+        topLib.setEvidence(evidence);
+        Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0?type=war");
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war, topLib);
+
+        Component sourceLib = createLibrary("org.jspecify", "jspecify", "1.0.0",
+                "pkg:maven/org.jspecify/jspecify@1.0.0?type=jar");
+        Evidence sourceEvidence = new Evidence();
+        sourceEvidence.setIdentities(new ArrayList<>(List.of(
+                identity(Method.Technique.MANIFEST_ANALYSIS, 0.4))));
+        sourceLib.setEvidence(sourceEvidence);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0?type=war", buildSourceBom(sourceLib));
+
+        Identity kept = war.getComponents().get(0).getEvidence().getIdentities().get(0);
+        assertEquals(1.0, kept.getConfidence());
+        assertEquals(Method.Technique.HASH_COMPARISON,
+                kept.getMethods().get(0).getTechnique());
+    }
+
     @Test
     void mergeDeduplicateCarriesOverLicensesFromSbom() {
         Component nested = createLibrary("org.x", "lib", "1.0",
@@ -456,7 +490,7 @@ class BomMergerTest {
 
         Component fromSbom = createLibrary("org.x", "lib", "1.0",
                 "pkg:maven/org.x/lib@1.0?type=jar");
-        org.cyclonedx.model.License license = new org.cyclonedx.model.License();
+        License license = new License();
         license.setId("Apache-2.0");
         LicenseChoice lc = new LicenseChoice();
         lc.addLicense(license);
@@ -479,7 +513,7 @@ class BomMergerTest {
         Identity identity = new Identity();
         identity.setField(Identity.Field.PURL);
         identity.setConfidence(1.0);
-        evidence.setIdentities(new java.util.ArrayList<>(List.of(identity)));
+        evidence.setIdentities(new ArrayList<>(List.of(identity)));
         nested.setEvidence(evidence);
 
         Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
@@ -539,7 +573,7 @@ class BomMergerTest {
         Identity existingIdentity = new Identity();
         existingIdentity.setField(Identity.Field.PURL);
         existingIdentity.setConfidence(1.0);
-        evidence.setIdentities(new java.util.ArrayList<>(List.of(existingIdentity)));
+        evidence.setIdentities(new ArrayList<>(List.of(existingIdentity)));
         nested.setEvidence(evidence);
 
         Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
@@ -553,7 +587,7 @@ class BomMergerTest {
         Identity sourceIdentity = new Identity();
         sourceIdentity.setField(Identity.Field.CPE);
         sourceIdentity.setConfidence(0.5);
-        sourceEvidence.setIdentities(new java.util.ArrayList<>(List.of(sourceIdentity)));
+        sourceEvidence.setIdentities(new ArrayList<>(List.of(sourceIdentity)));
         fromSbom.setEvidence(sourceEvidence);
 
         Bom source = buildSourceBom(fromSbom);
@@ -838,7 +872,7 @@ class BomMergerTest {
         sourceMain.setBomRef("pkg:npm/npm-app@1.0");
         sourceMeta.setComponent(sourceMain);
         source.setMetadata(sourceMeta);
-        source.setComponents(new java.util.ArrayList<>(List.of(
+        source.setComponents(new ArrayList<>(List.of(
                 createLibrary(null, "react", "18.3.1", "pkg:npm/react@18.3.1"))));
         Dependency sourceMainDep = new Dependency("pkg:npm/npm-app@1.0");
         sourceMainDep.addDependency(new Dependency("pkg:npm/react@18.3.1"));
@@ -1101,7 +1135,7 @@ class BomMergerTest {
         sourceMain.setBomRef("pkg:npm/npm-app@1.0");
         sourceMeta.setComponent(sourceMain);
         source.setMetadata(sourceMeta);
-        source.setComponents(new java.util.ArrayList<>(List.of(
+        source.setComponents(new ArrayList<>(List.of(
                 createLibrary(null, "react", "18.3.1", "pkg:npm/react@18.3.1"),
                 createLibrary(null, "lodash", "4.17.21", "pkg:npm/lodash@4.17.21"))));
         Dependency sourceMainDep = new Dependency("pkg:npm/npm-app@1.0");
@@ -1142,7 +1176,7 @@ class BomMergerTest {
         sourceMain.setBomRef("pkg:npm/npm-app@1.0");
         sourceMeta.setComponent(sourceMain);
         source.setMetadata(sourceMeta);
-        source.setComponents(new java.util.ArrayList<>(List.of(
+        source.setComponents(new ArrayList<>(List.of(
                 createLibrary(null, "react", "18.3.1", "pkg:npm/react@18.3.1"))));
 
         BomMerger.mergeFlat(target, source);
@@ -1346,6 +1380,76 @@ class BomMergerTest {
                 "top-level file should be removed after occurrence migration");
     }
 
+    /**
+     * "Absent wins": the analyzer no longer stamps identity on everything, so
+     * a component this tool did not identify can adopt the identity an
+     * embedded SBOM states for the same artifact.
+     */
+    @Test
+    void mergeFillsAbsentIdentityFromSource() {
+        Component nested = createLibrary("org.jspecify", "jspecify", "1.0.0",
+                "pkg:maven/org.jspecify/jspecify@1.0.0");
+        nested.setEvidence(evidenceWithOccurrence("WEB-INF/lib/jspecify-1.0.0.jar"));
+        Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
+        war.addComponent(nested);
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war);
+
+        Component fromSbom = createLibrary("org.jspecify", "jspecify", "1.0.0",
+                "pkg:maven/org.jspecify/jspecify@1.0.0?type=jar");
+        Evidence sourceEvidence = new Evidence();
+        sourceEvidence.setIdentities(new ArrayList<>(List.of(
+                identity(Method.Technique.HASH_COMPARISON, 1.0))));
+        fromSbom.setEvidence(sourceEvidence);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", buildSourceBom(fromSbom));
+
+        Component result = war.getComponents().get(0);
+        assertEquals(1, result.getEvidence().getIdentities().size());
+        assertEquals(Method.Technique.HASH_COMPARISON,
+                result.getEvidence().getIdentities().get(0).getMethods().get(0).getTechnique());
+        assertEquals("WEB-INF/lib/jspecify-1.0.0.jar",
+                result.getEvidence().getOccurrences().get(0).getLocation());
+    }
+
+    @Test
+    void mergeKeepsTargetIdentityOverSource() {
+        Component nested = createLibrary("org.jspecify", "jspecify", "1.0.0",
+                "pkg:maven/org.jspecify/jspecify@1.0.0");
+        Evidence targetEvidence = evidenceWithOccurrence("WEB-INF/lib/jspecify-1.0.0.jar");
+        targetEvidence.setIdentities(new ArrayList<>(List.of(
+                identity(Method.Technique.HASH_COMPARISON, 1.0))));
+        nested.setEvidence(targetEvidence);
+        Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
+        war.addComponent(nested);
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war);
+
+        Component fromSbom = createLibrary("org.jspecify", "jspecify", "1.0.0",
+                "pkg:maven/org.jspecify/jspecify@1.0.0?type=jar");
+        Evidence sourceEvidence = new Evidence();
+        sourceEvidence.setIdentities(new ArrayList<>(List.of(
+                identity(Method.Technique.MANIFEST_ANALYSIS, 0.4))));
+        fromSbom.setEvidence(sourceEvidence);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", buildSourceBom(fromSbom));
+
+        Identity kept = war.getComponents().get(0).getEvidence().getIdentities().get(0);
+        assertEquals(1.0, kept.getConfidence());
+        assertEquals(Method.Technique.HASH_COMPARISON,
+                kept.getMethods().get(0).getTechnique());
+    }
+
+    private static Identity identity(Method.Technique technique,
+            double confidence) {
+        Method method = new Method();
+        method.setTechnique(technique);
+        method.setConfidence(confidence);
+        Identity identity = new Identity();
+        identity.setField(Identity.Field.PURL);
+        identity.setConfidence(confidence);
+        identity.setMethods(List.of(method));
+        return identity;
+    }
+
     private static Evidence evidenceWithOccurrence(String location) {
         Evidence evidence = new Evidence();
         evidence.addOccurrence(occurrence(location));
@@ -1368,7 +1472,7 @@ class BomMergerTest {
         metadata.setComponent(main);
         bom.setMetadata(metadata);
         if (components.length > 0) {
-            bom.setComponents(new java.util.ArrayList<>(List.of(components)));
+            bom.setComponents(new ArrayList<>(List.of(components)));
         }
         return bom;
     }
@@ -1427,7 +1531,7 @@ class BomMergerTest {
         main.setBomRef("pkg:maven/com.example/app@1.0");
         metadata.setComponent(main);
         target.setMetadata(metadata);
-        target.setComponents(new java.util.ArrayList<>(List.of(war, topLevel)));
+        target.setComponents(new ArrayList<>(List.of(war, topLevel)));
 
         Component libFromSbom = createLibrary("org.x", "lib", "1.0",
                 "pkg:maven/org.x/lib@1.0?type=jar");
@@ -1440,7 +1544,7 @@ class BomMergerTest {
 
     private static Bom buildSourceBom(Component... components) {
         Bom bom = new Bom();
-        bom.setComponents(new java.util.ArrayList<>(List.of(components)));
+        bom.setComponents(new ArrayList<>(List.of(components)));
         return bom;
     }
 

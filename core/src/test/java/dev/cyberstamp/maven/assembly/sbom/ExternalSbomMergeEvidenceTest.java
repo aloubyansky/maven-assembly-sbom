@@ -1,7 +1,6 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
@@ -12,17 +11,16 @@ import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.Hash;
+import org.cyclonedx.model.component.evidence.Identity;
 import org.cyclonedx.model.component.evidence.Method;
 import org.cyclonedx.model.component.evidence.Occurrence;
 import org.junit.jupiter.api.Test;
 
 /**
- * When a Maven component from an external/embedded SBOM (rich in metadata but
- * without a {@code manifest-analysis} identity, e.g. a Quarkus-generated SBOM)
- * is verified present in the assembly during archive filtering, it should gain
- * a {@code manifest-analysis} identity — asserting the assembly plugin
- * confirmed the component is in the distribution — while keeping its
- * description/publisher.
+ * Components from external/embedded SBOMs were identified by another tool.
+ * Archive filtering verifies their presence, not their identity, so their
+ * identity evidence passes through exactly as upstream wrote it: preserved
+ * when present, absent when absent, whichever way they matched the archive.
  */
 class ExternalSbomMergeEvidenceTest {
 
@@ -56,7 +54,7 @@ class ExternalSbomMergeEvidenceTest {
     }
 
     @Test
-    void matchedExternalComponentGainsManifestIdentityAndKeepsDescription() {
+    void matchedExternalComponentWithoutIdentityGainsNoneAndKeepsDescription() {
         String hash = "aabbccdd";
         Bom external = bomOf(externalMaven(hash, "lib/main/jackson-core-2.22.0.jar"));
         ArchiveIndex index = buildIndex(Map.of(hash,
@@ -68,10 +66,52 @@ class ExternalSbomMergeEvidenceTest {
         Component c = filtered.getComponents().get(0);
         assertEquals("Core Jackson processing abstractions", c.getDescription(),
                 "description must be preserved");
-        assertNotNull(c.getEvidence().getIdentities(),
-                "a manifest-analysis identity must be added for the verified component");
-        assertEquals(Method.Technique.MANIFEST_ANALYSIS,
-                c.getEvidence().getIdentities().get(0).getMethods().get(0).getTechnique());
+        assertNoIdentity(c);
+    }
+
+    @Test
+    void externalComponentIdentityPassesThroughUnchanged() {
+        String hash = "aabbccdd";
+        Component comp = externalMaven(hash, "lib/main/jackson-core-2.22.0.jar");
+        Method method = new Method();
+        method.setTechnique(Method.Technique.FILENAME);
+        method.setConfidence(0.3);
+        method.setValue("x.jar");
+        Identity identity = new Identity();
+        identity.setField(Identity.Field.PURL);
+        identity.setConfidence(0.3);
+        identity.setMethods(List.of(method));
+        comp.getEvidence().setIdentities(new ArrayList<>(List.of(identity)));
+        ArchiveIndex index = buildIndex(Map.of(hash, List.of("lib/main/jackson-core-2.22.0.jar")));
+
+        Bom filtered = SbomGenerator.filterSbomByArchive(bomOf(comp), index, null);
+
+        List<Identity> identities = filtered.getComponents().get(0).getEvidence().getIdentities();
+        assertEquals(1, identities.size());
+        assertEquals(0.3, identities.get(0).getConfidence());
+        Method kept = identities.get(0).getMethods().get(0);
+        assertEquals(Method.Technique.FILENAME, kept.getTechnique());
+        assertEquals(0.3, kept.getConfidence());
+        assertEquals("x.jar", kept.getValue());
+    }
+
+    /**
+     * No occurrences and no hash in the configured algorithm: admitted with
+     * nothing verified.
+     */
+    @Test
+    void unverifiedExternalComponentGainsNoIdentity() {
+        Bom filtered = SbomGenerator.filterSbomByArchive(
+                bomOf(externalMaven(null, null)), buildIndex(Map.of()), null);
+
+        assertEquals(1, filtered.getComponents().size());
+        assertNoIdentity(filtered.getComponents().get(0));
+    }
+
+    private static void assertNoIdentity(Component c) {
+        Evidence ev = c.getEvidence();
+        assertTrue(ev == null || ev.getIdentities() == null || ev.getIdentities().isEmpty(),
+                "this tool must not add identity evidence to an upstream component");
     }
 
     @Test

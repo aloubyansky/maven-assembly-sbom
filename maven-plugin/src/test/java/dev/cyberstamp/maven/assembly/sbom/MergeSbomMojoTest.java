@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.io.File;
 import java.lang.reflect.Field;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.maven.plugin.MojoExecutionException;
@@ -86,11 +87,11 @@ class MergeSbomMojoTest {
         File base = writeBom(buildMavenBom(), "base.cdx.json");
 
         Bom npm1 = new Bom();
-        npm1.setComponents(new java.util.ArrayList<>(List.of(
+        npm1.setComponents(new ArrayList<>(List.of(
                 createComponent(null, "react", "18.3.1", "pkg:npm/react@18.3.1"))));
 
         Bom npm2 = new Bom();
-        npm2.setComponents(new java.util.ArrayList<>(List.of(
+        npm2.setComponents(new ArrayList<>(List.of(
                 createComponent(null, "vue", "3.4.0", "pkg:npm/vue@3.4.0"))));
 
         File ext1 = writeBom(npm1, "npm1.cdx.json");
@@ -172,14 +173,14 @@ class MergeSbomMojoTest {
         main.setBomRef("pkg:maven/com.example/app@1.0");
         metadata.setComponent(main);
         bom.setMetadata(metadata);
-        bom.setComponents(new java.util.ArrayList<>(List.of(
+        bom.setComponents(new ArrayList<>(List.of(
                 createComponent("org.a", "lib-a", "1.0", "pkg:maven/org.a/lib-a@1.0"))));
         return bom;
     }
 
     private Bom buildNpmBom() {
         Bom bom = new Bom();
-        bom.setComponents(new java.util.ArrayList<>(List.of(
+        bom.setComponents(new ArrayList<>(List.of(
                 createComponent(null, "react", "18.3.1", "pkg:npm/react@18.3.1"),
                 createComponent(null, "lodash", "4.17.21", "pkg:npm/lodash@4.17.21"))));
         return bom;

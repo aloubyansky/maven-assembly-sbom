@@ -16,9 +16,13 @@ import java.util.Objects;
  *        becomes empty)
  * @param dependenciesKnown whether this component's dependencies are known
  *        (see {@link AssemblyComponent#dependenciesKnown()})
+ * @param identification how this component's identity was determined, or
+ *        {@code null} if not known, in which case no identity evidence is
+ *        emitted for it
  */
 public record PackageComponent(PackageRef ref, String archivePath, String hash,
-        List<LicenseInfo> licenses, List<AssemblyComponent> nested, boolean dependenciesKnown)
+        List<LicenseInfo> licenses, List<AssemblyComponent> nested, boolean dependenciesKnown,
+        Identification identification)
         implements
             AssemblyComponent {
 
@@ -30,6 +34,21 @@ public record PackageComponent(PackageRef ref, String archivePath, String hash,
         Objects.requireNonNull(ref, "ref");
         licenses = licenses == null ? List.of() : List.copyOf(licenses);
         nested = nested == null ? List.of() : List.copyOf(nested);
+    }
+
+    /**
+     * Backward-compatible constructor with no {@link #identification()}.
+     *
+     * @param ref the package identity; never {@code null}
+     * @param archivePath the path within the assembly, or {@code null}
+     * @param hash the content hash, or {@code null}
+     * @param licenses the attached licenses ({@code null} becomes empty)
+     * @param nested the nested components ({@code null} becomes empty)
+     * @param dependenciesKnown whether this component's dependencies are known
+     */
+    public PackageComponent(PackageRef ref, String archivePath, String hash,
+            List<LicenseInfo> licenses, List<AssemblyComponent> nested, boolean dependenciesKnown) {
+        this(ref, archivePath, hash, licenses, nested, dependenciesKnown, null);
     }
 
     /**
@@ -76,8 +95,26 @@ public record PackageComponent(PackageRef ref, String archivePath, String hash,
     }
 
     /**
+     * Creates a package component with no licenses and no nested components,
+     * declaring whether its dependencies are known and how it was identified.
+     *
+     * @param ref the package identity
+     * @param archivePath the path within the assembly, or {@code null}
+     * @param hash the content hash, or {@code null}
+     * @param dependenciesKnown whether this component's dependencies are known
+     * @param identification how this component was identified, or {@code null}
+     * @return a new {@link PackageComponent}
+     */
+    public static PackageComponent of(PackageRef ref, String archivePath, String hash,
+            boolean dependenciesKnown, Identification identification) {
+        return new PackageComponent(ref, archivePath, hash, List.of(), List.of(), dependenciesKnown,
+                identification);
+    }
+
+    /**
      * Returns a copy of this component with the given licenses, preserving all
-     * other attributes (including {@link #dependenciesKnown()}).
+     * other attributes (including {@link #dependenciesKnown()} and
+     * {@link #identification()}).
      *
      * @param licenses the licenses to attach
      * @return this component, or a copy with the given licenses
@@ -86,12 +123,14 @@ public record PackageComponent(PackageRef ref, String archivePath, String hash,
         if (sameOrBothEmpty(licenses, this.licenses)) {
             return this;
         }
-        return new PackageComponent(ref, archivePath, hash, licenses, nested, dependenciesKnown);
+        return new PackageComponent(ref, archivePath, hash, licenses, nested, dependenciesKnown,
+                identification);
     }
 
     /**
      * Returns a copy of this component with the given nested components,
-     * preserving all other attributes (including {@link #dependenciesKnown()}).
+     * preserving all other attributes (including {@link #dependenciesKnown()} and
+     * {@link #identification()}).
      *
      * @param nested the nested components
      * @return this component, or a copy with the given nested components
@@ -100,7 +139,8 @@ public record PackageComponent(PackageRef ref, String archivePath, String hash,
         if (sameOrBothEmpty(nested, this.nested)) {
             return this;
         }
-        return new PackageComponent(ref, archivePath, hash, licenses, nested, dependenciesKnown);
+        return new PackageComponent(ref, archivePath, hash, licenses, nested, dependenciesKnown,
+                identification);
     }
 
     /**

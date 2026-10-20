@@ -21,6 +21,8 @@ import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
 
 import org.apache.maven.artifact.Artifact;
+import org.apache.maven.artifact.DefaultArtifact;
+import org.apache.maven.artifact.handler.DefaultArtifactHandler;
 import org.apache.maven.execution.MavenSession;
 import org.apache.maven.model.Model;
 import org.apache.maven.project.MavenProject;
@@ -67,6 +69,7 @@ class ArchiveAnalyzer {
     private final Map<ArtifactCoords, MavenProject> reactorModuleIndex;
     private final List<Bom> externalBoms;
     private final boolean detectEmbeddedSboms;
+    private boolean identityEvidence = true;
     private List<Artifact> allArtifacts;
     private ArtifactHashIndex hashIndex;
     private Map<ArtifactCoords, List<Dependency>> lastNestedDepsByParent;
@@ -195,6 +198,14 @@ class ArchiveAnalyzer {
     }
 
     /**
+     * Sets whether the components this analyzer identifies carry their
+     * {@link Identification}. When {@code false} none is recorded.
+     */
+    void setIdentityEvidence(boolean identityEvidence) {
+        this.identityEvidence = identityEvidence;
+    }
+
+    /**
      * Analyzes archive entries against Maven artifacts and returns
      * the neutral component model.
      *
@@ -205,7 +216,7 @@ class ArchiveAnalyzer {
      *         and the matcher is configured to fail on duplicates
      */
     AssemblyComponents analyze(List<FileEntry> entries, String baseDirPrefix) {
-        AssemblyComponentsBuilder content = new AssemblyComponentsBuilder();
+        AssemblyComponentsBuilder content = new AssemblyComponentsBuilder(identityEvidence);
         Set<Artifact> matchedArtifacts = new HashSet<>();
         Map<String, FileEntry> unmatchedByPath = new HashMap<>();
 
@@ -255,7 +266,8 @@ class ArchiveAnalyzer {
                 for (Artifact artifact : artifacts) {
                     matchedArtifacts.add(artifact);
                     content.addMavenEntry(new AssemblyComponentsBuilder.MavenEntry(
-                            MavenArtifactCoords.of(artifact), relativePath, entry.hash()));
+                            MavenArtifactCoords.of(artifact), relativePath, entry.hash(),
+                            Identification.hashMatch()));
                     detectBundledDepsInArtifactFile(artifact, content);
                 }
             } else {
@@ -348,7 +360,7 @@ class ArchiveAnalyzer {
                     // dependency edge (matches pre-refactor behavior).
                     content.addNestedEntry(new AssemblyComponentsBuilder.NestedMavenEntry(
                             parentId, entry.artifactId(),
-                            entry.archivePath(), entry.hash(), false));
+                            entry.archivePath(), entry.hash(), false, entry.identification()));
                 }
             }
         }
@@ -414,7 +426,8 @@ class ArchiveAnalyzer {
                     continue;
                 }
                 boolean identified = allProps.size() == 1
-                        ? registerFromStandaloneProps(allProps.get(0), fileEntry, content) != null
+                        ? registerFromStandaloneProps(allProps.get(0), fileEntry, content,
+                                Identification.pomProperties()) != null
                         : registerStandaloneShadedJar(allProps, fileEntry, content);
                 if (identified) {
                     it.remove();
@@ -432,7 +445,7 @@ class ArchiveAnalyzer {
      *         required properties are missing
      */
     private static ArtifactCoords registerFromStandaloneProps(Properties props,
-            FileEntry fileEntry, AssemblyComponentsBuilder content) {
+            FileEntry fileEntry, AssemblyComponentsBuilder content, Identification identification) {
         String gId = props.getProperty("groupId");
         String aId = props.getProperty("artifactId");
         String ver = props.getProperty("version");
@@ -441,7 +454,7 @@ class ArchiveAnalyzer {
         }
         ArtifactCoords coords = ArtifactCoords.of(gId, aId, ver);
         content.addMavenEntry(new AssemblyComponentsBuilder.MavenEntry(
-                coords, fileEntry.archivePath(), fileEntry.hash()));
+                coords, fileEntry.archivePath(), fileEntry.hash(), identification));
         return coords;
     }
 
@@ -456,7 +469,8 @@ class ArchiveAnalyzer {
             FileEntry fileEntry, AssemblyComponentsBuilder content) {
         return resolveAndRegisterShadedOwner(allProps, fileEntry, content,
                 fileEntry.archivePath(),
-                props -> registerFromStandaloneProps(props, fileEntry, content));
+                props -> registerFromStandaloneProps(props, fileEntry, content,
+                        Identification.pomPropertiesFilenameOwner()));
     }
 
     /**
@@ -529,7 +543,8 @@ class ArchiveAnalyzer {
                 log.debug("Could not determine unpack prefix for {}", artifact);
             }
             content.addMavenEntry(new AssemblyComponentsBuilder.MavenEntry(
-                    MavenArtifactCoords.of(artifact), occurrence, hashIndex.hashOf(artifact)));
+                    MavenArtifactCoords.of(artifact), occurrence, hashIndex.hashOf(artifact),
+                    Identification.unpackedContentMatch()));
 
             Map<String, Artifact> nestedArtifactsByHash = buildNestedArtifactHashMap(artifact);
             ArtifactCoords parentCoords = MavenArtifactCoords.of(artifact);
@@ -591,7 +606,8 @@ class ArchiveAnalyzer {
         if (archiveEntry.hash() != null) {
             Artifact nestedArtifact = nestedArtifactsByHash.get(archiveEntry.hash());
             if (nestedArtifact != null) {
-                registerNestedArtifact(nestedArtifact, archiveEntry, parentId, matchedArtifacts, content);
+                registerNestedArtifact(nestedArtifact, archiveEntry, parentId, matchedArtifacts, content,
+                        Identification.hashMatch());
                 detectBundledDependencies(archiveEntry, parentZip, hashToZipEntryNames,
                         MavenArtifactCoords.of(nestedArtifact), content);
                 return true;
@@ -612,7 +628,7 @@ class ArchiveAnalyzer {
         ArtifactCoords owner = MavenArtifactCoords.of(artifact);
         for (ArtifactCoords bundled : BundledArtifactScanner.bundledNonOwner(file.toPath(), owner)) {
             content.addNestedEntry(new AssemblyComponentsBuilder.NestedMavenEntry(
-                    owner, bundled, null, null, false));
+                    owner, bundled, null, null, false, Identification.pomProperties()));
         }
     }
 
@@ -654,8 +670,10 @@ class ArchiveAnalyzer {
     private static void registerBundled(ArtifactCoords ownerCoords, List<ArtifactCoords> bundled,
             AssemblyComponentsBuilder content) {
         for (ArtifactCoords coords : bundled) {
+            // Coordinates come verbatim from the bundled artifact's own
+            // pom.properties, however the owner was identified.
             content.addNestedEntry(new AssemblyComponentsBuilder.NestedMavenEntry(
-                    ownerCoords, coords, null, null, false));
+                    ownerCoords, coords, null, null, false, Identification.pomProperties()));
         }
     }
 
@@ -760,13 +778,14 @@ class ArchiveAnalyzer {
             }
             if (allProps.size() == 1) {
                 return tryRegisterFromProps(allProps.get(0), archiveEntry,
-                        parentId, matchedArtifacts, content) != null;
+                        parentId, matchedArtifacts, content, Identification.pomProperties()) != null;
             }
             // Shaded JAR: match the filename against artifactIds
             return resolveAndRegisterShadedOwner(allProps, archiveEntry, content,
                     zipEntryName,
                     props -> tryRegisterFromProps(props, archiveEntry,
-                            parentId, matchedArtifacts, content));
+                            parentId, matchedArtifacts, content,
+                            Identification.pomPropertiesFilenameOwner()));
         }
         return false;
     }
@@ -780,17 +799,17 @@ class ArchiveAnalyzer {
     private ArtifactCoords tryRegisterFromProps(Properties pomProps,
             FileEntry archiveEntry,
             ArtifactCoords parentId, Set<Artifact> matchedArtifacts,
-            AssemblyComponentsBuilder content) {
+            AssemblyComponentsBuilder content, Identification identification) {
         String gId = pomProps.getProperty("groupId");
         String aId = pomProps.getProperty("artifactId");
         String ver = pomProps.getProperty("version");
         if (gId == null || aId == null || ver == null) {
             return null;
         }
-        Artifact nested = new org.apache.maven.artifact.DefaultArtifact(
+        Artifact nested = new DefaultArtifact(
                 gId, aId, ver, "compile", JAR, null,
-                new org.apache.maven.artifact.handler.DefaultArtifactHandler(JAR));
-        registerNestedArtifact(nested, archiveEntry, parentId, matchedArtifacts, content);
+                new DefaultArtifactHandler(JAR));
+        registerNestedArtifact(nested, archiveEntry, parentId, matchedArtifacts, content, identification);
         return MavenArtifactCoords.of(nested);
     }
 
@@ -799,11 +818,11 @@ class ArchiveAnalyzer {
      */
     private void registerNestedArtifact(Artifact artifact, FileEntry archiveEntry,
             ArtifactCoords parentId, Set<Artifact> matchedArtifacts,
-            AssemblyComponentsBuilder content) {
+            AssemblyComponentsBuilder content, Identification identification) {
         matchedArtifacts.add(artifact);
         ArtifactCoords nestedId = MavenArtifactCoords.of(artifact);
         content.addNestedEntry(new AssemblyComponentsBuilder.NestedMavenEntry(
-                parentId, nestedId, archiveEntry.archivePath(), archiveEntry.hash(), true));
+                parentId, nestedId, archiveEntry.archivePath(), archiveEntry.hash(), true, identification));
         content.addNestedDependency(parentId, new Dependency(
                 SbomUtils.toAetherArtifact(artifact.getGroupId(), artifact.getArtifactId(),
                         artifact.getVersion(), artifact.getType(), artifact.getClassifier()),
@@ -901,12 +920,12 @@ class ArchiveAnalyzer {
                     session.getRepositorySession(), request);
             File file = result.getArtifact().getFile();
             if (file != null && file.isFile()) {
-                Artifact mavenArtifact = new org.apache.maven.artifact.DefaultArtifact(
+                Artifact mavenArtifact = new DefaultArtifact(
                         dep.getGroupId(), dep.getArtifactId(), dep.getVersion(),
                         dep.getScope() != null ? dep.getScope() : "compile",
                         dep.getType() != null ? dep.getType() : JAR,
                         dep.getClassifier(),
-                        new org.apache.maven.artifact.handler.DefaultArtifactHandler(
+                        new DefaultArtifactHandler(
                                 dep.getType() != null ? dep.getType() : JAR));
                 mavenArtifact.setFile(file);
                 String hash = hashIndex.hashOf(mavenArtifact);
@@ -1107,9 +1126,12 @@ class ArchiveAnalyzer {
     private static class AssemblyComponentsBuilder {
 
         /**
-         * An archive entry matched to a Maven artifact by content hash.
+         * An archive entry identified as a Maven artifact.
+         *
+         * @param identification how the entry was identified, or {@code null}
          */
-        record MavenEntry(ArtifactCoords artifactId, String archivePath, String hash) {
+        record MavenEntry(ArtifactCoords artifactId, String archivePath, String hash,
+                Identification identification) {
         }
 
         /**
@@ -1120,9 +1142,10 @@ class ArchiveAnalyzer {
          *        by hash and should produce a {@link DependencyEdge};
          *        {@code false} for bundled (shaded) deps discovered only via
          *        pom.properties, where nesting is sufficient
+         * @param identification how the entry was identified, or {@code null}
          */
         record NestedMavenEntry(ArtifactCoords parentId, ArtifactCoords artifactId,
-                String archivePath, String hash, boolean explicit) {
+                String archivePath, String hash, boolean explicit, Identification identification) {
         }
 
         private final List<MavenEntry> mavenEntries = new ArrayList<>();
@@ -1134,6 +1157,12 @@ class ArchiveAnalyzer {
         // file's archive path so they nest under that file's component.
         private final Map<String, List<ArtifactCoords>> fileNestedByPath = new LinkedHashMap<>();
         private final List<DiscoveredSbom> discoveredSboms = new ArrayList<>();
+        // Whether built components carry their Identification.
+        private final boolean identityEvidence;
+
+        AssemblyComponentsBuilder(boolean identityEvidence) {
+            this.identityEvidence = identityEvidence;
+        }
 
         List<MavenEntry> mavenEntries() {
             return mavenEntries;
@@ -1234,8 +1263,8 @@ class ArchiveAnalyzer {
             // 1. Top-level PackageComponents (no licenses yet).
             List<AssemblyComponent> topLevel = new ArrayList<>();
             for (MavenEntry entry : mavenEntries) {
-                topLevel.add(PackageComponent.of(
-                        entry.artifactId(), entry.archivePath(), entry.hash()));
+                topLevel.add(PackageComponent.of(entry.artifactId(), entry.archivePath(), entry.hash(),
+                        true, identityEvidence ? entry.identification() : null));
             }
 
             // 2. Attach nested children to their top-level parents.
@@ -1263,8 +1292,11 @@ class ArchiveAnalyzer {
                 List<ArtifactCoords> nestedCoords = fileNestedByPath
                         .getOrDefault(fileEntry.archivePath(), List.of());
                 List<AssemblyComponent> nestedPkgs = new ArrayList<>(nestedCoords.size());
+                // The owner could not be resolved, but each artifact's coordinates
+                // were read verbatim from its own pom.properties.
                 for (ArtifactCoords coords : nestedCoords) {
-                    nestedPkgs.add(PackageComponent.of(coords, null, null));
+                    nestedPkgs.add(PackageComponent.of(coords, null, null, true,
+                            identityEvidence ? Identification.pomProperties() : null));
                 }
                 topLevel.add(new FileComponent(
                         fileEntry.archivePath(), fileEntry.hash(), nestedPkgs));
@@ -1326,7 +1358,7 @@ class ArchiveAnalyzer {
                         child.artifactId(), childrenByParent, builtComponents);
                 PackageComponent childComponent = new PackageComponent(
                         child.artifactId(), child.archivePath(), child.hash(),
-                        List.of(), grandchildren);
+                        List.of(), grandchildren, true, identityEvidence ? child.identification() : null);
                 builtComponents.put(child.artifactId(), childComponent);
                 result.add(childComponent);
             }

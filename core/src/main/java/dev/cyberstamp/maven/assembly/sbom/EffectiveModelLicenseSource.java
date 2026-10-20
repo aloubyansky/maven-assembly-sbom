@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.function.Function;
 
+import org.apache.maven.model.License;
 import org.apache.maven.model.Model;
 
 /**
@@ -96,12 +97,12 @@ public class EffectiveModelLicenseSource implements LicenseSource {
         if (model == null) {
             return Collections.emptyList();
         }
-        List<org.apache.maven.model.License> mavenLicenses = model.getLicenses();
+        List<License> mavenLicenses = model.getLicenses();
         if (mavenLicenses == null || mavenLicenses.isEmpty()) {
             return Collections.emptyList();
         }
         List<RawLicense> result = new ArrayList<>(mavenLicenses.size());
-        for (org.apache.maven.model.License mavenLicense : mavenLicenses) {
+        for (License mavenLicense : mavenLicenses) {
             result.add(new RawLicense(mavenLicense.getName(), mavenLicense.getUrl()));
         }
         return result;

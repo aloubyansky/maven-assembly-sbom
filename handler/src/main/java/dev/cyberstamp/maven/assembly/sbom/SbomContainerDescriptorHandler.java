@@ -1,8 +1,10 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
+import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -17,6 +19,8 @@ import javax.inject.Inject;
 import javax.inject.Named;
 
 import org.apache.maven.execution.MavenSession;
+import org.apache.maven.model.Plugin;
+import org.apache.maven.model.PluginExecution;
 import org.apache.maven.plugins.assembly.filter.ContainerDescriptorHandler;
 import org.apache.maven.plugins.assembly.model.Assembly;
 import org.apache.maven.plugins.assembly.model.io.xpp3.AssemblyXpp3Reader;
@@ -28,8 +32,11 @@ import org.codehaus.plexus.archiver.ArchiverException;
 import org.codehaus.plexus.archiver.ResourceIterator;
 import org.codehaus.plexus.archiver.UnArchiver;
 import org.codehaus.plexus.components.io.fileselectors.FileInfo;
+import org.codehaus.plexus.util.xml.Xpp3Dom;
 import org.cyclonedx.Version;
+import org.cyclonedx.exception.GeneratorException;
 import org.cyclonedx.model.Bom;
+import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Hash;
 import org.eclipse.aether.RepositorySystem;
 import org.slf4j.Logger;
@@ -79,6 +86,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     private boolean prettyPrint;
     private boolean failOnMissingLicense;
     private boolean failOnDuplicateHash = true;
+    private boolean identityEvidence = true;
     private String embeddedSboms = "merge";
     private String externalSboms;
     private boolean librariesOnly;
@@ -148,6 +156,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                     failOnDuplicateHash, failOnMissingLicense, embeddedSboms,
                     librariesOnly, schemaVersion);
             generator.setProduct(product);
+            generator.setIdentityEvidence(identityEvidence);
             Bom bom = generator.generate(entries, baseDirPrefix, externalBomList,
                     assemblyId, classifier, detectArchiveType(archiver));
 
@@ -334,12 +343,12 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                 return new AssemblyConfig(null, null, true);
             }
             String destName = destFile.getName();
-            org.apache.maven.model.PluginExecution soleExec = null;
+            PluginExecution soleExec = null;
             Assembly soleAssembly = null;
             boolean solePluginAttach = true;
             boolean foundPlugin = false;
             int candidateCount = 0;
-            for (org.apache.maven.model.Plugin plugin : project.getBuild().getPlugins()) {
+            for (Plugin plugin : project.getBuild().getPlugins()) {
                 if (!"maven-assembly-plugin".equals(plugin.getArtifactId())) {
                     continue;
                 }
@@ -347,7 +356,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                 boolean pluginAttach = resolveAssemblyAttach(plugin.getConfiguration());
                 solePluginAttach = pluginAttach;
                 String defaultFinalName = resolveFinalName(plugin.getConfiguration());
-                for (org.apache.maven.model.PluginExecution exec : plugin.getExecutions()) {
+                for (PluginExecution exec : plugin.getExecutions()) {
                     boolean execAttach = resolveAssemblyAttach(exec.getConfiguration(), pluginAttach);
                     List<Assembly> descriptors = findAllDescriptors(exec);
                     Assembly match = matchDescriptorByFilename(exec, destName, defaultFinalName, descriptors);
@@ -407,10 +416,10 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     /**
      * Resolves the artifact classifier from the plugin execution config.
      */
-    private static String resolveClassifier(org.apache.maven.model.PluginExecution exec,
+    private static String resolveClassifier(PluginExecution exec,
             String assemblyId) {
         Object cfg = exec.getConfiguration();
-        if (!(cfg instanceof org.codehaus.plexus.util.xml.Xpp3Dom dom)) {
+        if (!(cfg instanceof Xpp3Dom dom)) {
             return assemblyId;
         }
         String explicit = getChildValue(dom, "classifier");
@@ -427,9 +436,9 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     /**
      * Returns the text value of a child element, or {@code null}.
      */
-    private static String getChildValue(org.codehaus.plexus.util.xml.Xpp3Dom dom,
+    private static String getChildValue(Xpp3Dom dom,
             String childName) {
-        org.codehaus.plexus.util.xml.Xpp3Dom child = dom.getChild(childName);
+        Xpp3Dom child = dom.getChild(childName);
         if (child == null) {
             return null;
         }
@@ -442,7 +451,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
      * filename from {@code finalName} and {@code appendAssemblyId}.
      */
     private Assembly matchDescriptorByFilename(
-            org.apache.maven.model.PluginExecution exec,
+            PluginExecution exec,
             String destName, String defaultFinalName, List<Assembly> descriptors) {
         String finalName = resolveFinalName(exec.getConfiguration(), defaultFinalName);
         boolean appendId = !"false".equalsIgnoreCase(
@@ -461,7 +470,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     /**
      * Parses all valid assembly descriptors from a plugin execution.
      */
-    private List<Assembly> findAllDescriptors(org.apache.maven.model.PluginExecution exec) {
+    private List<Assembly> findAllDescriptors(PluginExecution exec) {
         Object descCfg = exec.getConfiguration();
         if (descCfg == null) {
             return List.of();
@@ -496,7 +505,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
      * Reads a configuration value from a possibly-null config object.
      */
     private static String getConfigValue(Object config, String key) {
-        if (config instanceof org.codehaus.plexus.util.xml.Xpp3Dom dom) {
+        if (config instanceof Xpp3Dom dom) {
             return getChildValue(dom, key);
         }
         return null;
@@ -580,10 +589,10 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
      */
     private List<String> extractDescriptorPaths(Object configuration) {
         List<String> paths = new ArrayList<>();
-        if (configuration instanceof org.codehaus.plexus.util.xml.Xpp3Dom dom) {
-            org.codehaus.plexus.util.xml.Xpp3Dom descriptors = dom.getChild("descriptors");
+        if (configuration instanceof Xpp3Dom dom) {
+            Xpp3Dom descriptors = dom.getChild("descriptors");
             if (descriptors != null) {
-                for (org.codehaus.plexus.util.xml.Xpp3Dom desc : descriptors.getChildren("descriptor")) {
+                for (Xpp3Dom desc : descriptors.getChildren("descriptor")) {
                     String val = desc.getValue();
                     if (val != null && !val.isBlank()) {
                         paths.add(val.trim());
@@ -608,7 +617,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
      * </p>
      */
     private void writeBomOutput(Bom bom, String baseDirPrefix, Archiver archiver)
-            throws IOException, org.cyclonedx.exception.GeneratorException {
+            throws IOException, GeneratorException {
         Path externalBomPath = null;
         if (isExternal()) {
             externalBomPath = resolveExternalBomPath(archiver);
@@ -661,7 +670,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     private boolean registerPostArchiveHook(Archiver archiver, Bom bom,
             Path externalBomPath, Path tempFile) {
         try {
-            java.lang.reflect.Field field = findField(archiver.getClass(), "closeables");
+            Field field = findField(archiver.getClass(), "closeables");
             if (field == null) {
                 if (externalBomPath != null) {
                     log.warn("Could not find closeables field on archiver, "
@@ -670,7 +679,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                 return false;
             }
             field.setAccessible(true);
-            List<java.io.Closeable> closeables = (List<java.io.Closeable>) field.get(archiver);
+            List<Closeable> closeables = (List<Closeable>) field.get(archiver);
             MessageDigest digest = messageDigest;
             Hash.Algorithm algorithm = bomHashAlgorithm;
             boolean attachInHook = doAttach;
@@ -700,7 +709,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     /**
      * Walks the class hierarchy to find a declared field by name.
      */
-    private static java.lang.reflect.Field findField(Class<?> clazz, String name) {
+    private static Field findField(Class<?> clazz, String name) {
         while (clazz != null) {
             try {
                 return clazz.getDeclaredField(name);
@@ -753,7 +762,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
      * @return the temp file path, for cleanup after the archive is written
      */
     private Path writeBomToArchive(Bom bom, String baseDirPrefix, Archiver archiver)
-            throws IOException, org.cyclonedx.exception.GeneratorException {
+            throws IOException, GeneratorException {
         Path targetDir = Path.of(project.getBuild().getDirectory());
         Files.createDirectories(targetDir);
         Path tempFile = Files.createTempFile(targetDir, "assembly-sbom", ".cdx." + format);
@@ -769,7 +778,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
      * Serializes the BOM in the configured format.
      */
     private void writeBom(Bom bom, Path output)
-            throws IOException, org.cyclonedx.exception.GeneratorException {
+            throws IOException, GeneratorException {
         BomWriter.write(bom, output, format, prettyPrint, resolvedSchemaVersion);
     }
 
@@ -777,14 +786,14 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
      * Logs a summary of the generated BOM.
      */
     private void logBomSummary(Bom bom) {
-        List<org.cyclonedx.model.Component> components = bom.getComponents();
+        List<Component> components = bom.getComponents();
         if (components == null) {
             log.debug("SBOM: 0 components, {} dependency entries",
                     bom.getDependencies() != null ? bom.getDependencies().size() : 0);
             return;
         }
         long libCount = components.stream()
-                .filter(c -> c.getType() == org.cyclonedx.model.Component.Type.LIBRARY).count();
+                .filter(c -> c.getType() == Component.Type.LIBRARY).count();
         long fileCount = components.size() - libCount;
         log.debug("SBOM: {} libraries, {} files, {} dependency entries",
                 libCount, fileCount,
@@ -935,6 +944,19 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     @SuppressWarnings("unused")
     public void setFailOnDuplicateHash(boolean failOnDuplicateHash) {
         this.failOnDuplicateHash = failOnDuplicateHash;
+    }
+
+    /**
+     * Controls whether components this handler identifies carry CycloneDX
+     * identity evidence. When {@code false}, no identity evidence of its own
+     * is emitted; identity evidence from external or embedded SBOMs is
+     * preserved, and occurrences are unaffected.
+     *
+     * @param identityEvidence whether to emit identity evidence
+     */
+    @SuppressWarnings("unused")
+    public void setIdentityEvidence(boolean identityEvidence) {
+        this.identityEvidence = identityEvidence;
     }
 
     /**

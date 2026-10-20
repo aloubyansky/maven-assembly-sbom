@@ -26,6 +26,7 @@ public final class SbomPipeline {
     private ShadedJarDetection.JarLocator jarLocator;
     private LicenseSource licenseSource;
     private boolean failOnMissingLicense;
+    private boolean identityEvidence = true;
 
     private SbomPipeline(AssemblyComponents model) {
         this.model = model;
@@ -77,6 +78,20 @@ public final class SbomPipeline {
     }
 
     /**
+     * Sets whether this library's own transforms (shaded detection) record an
+     * {@link Identification} on the components they add. Identification a
+     * producer put on the model is rendered either way. Defaults to
+     * {@code true}.
+     *
+     * @param enabled whether to emit identity evidence
+     * @return this pipeline
+     */
+    public SbomPipeline identityEvidence(boolean enabled) {
+        this.identityEvidence = enabled;
+        return this;
+    }
+
+    /**
      * Runs the enabled transforms over the model in the standard order
      * (shaded detection, then license enrichment) and returns it.
      *
@@ -84,7 +99,7 @@ public final class SbomPipeline {
      */
     public AssemblyComponents enrich() {
         if (jarLocator != null) {
-            new ShadedJarDetection(jarLocator).apply(model);
+            new ShadedJarDetection(jarLocator, identityEvidence).apply(model);
         }
         if (licenseSource != null) {
             new LicenseEnrichment(licenseSource, failOnMissingLicense).apply(model);

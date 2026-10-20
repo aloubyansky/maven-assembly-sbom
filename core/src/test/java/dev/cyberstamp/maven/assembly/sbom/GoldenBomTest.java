@@ -7,13 +7,20 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
+import java.util.stream.Collectors;
 
+import org.cyclonedx.Format;
 import org.cyclonedx.Version;
+import org.cyclonedx.exception.ParseException;
 import org.cyclonedx.model.Bom;
+import org.cyclonedx.parsers.JsonParser;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -87,6 +94,70 @@ class GoldenBomTest {
                         + "intentional, regenerate with -Dgolden.regenerate=true and review the diff.");
     }
 
+    /**
+     * Schema conformance guard: the rendered document must validate against the
+     * official CycloneDX JSON schema for <em>every</em> version this producer
+     * can be asked to emit — not just the {@value #SCHEMA_VERSION} the golden
+     * pins, since the plugin default is {@link SchemaVersions#latest()}.
+     *
+     * <p>
+     * {@link #renderedBomMatchesGolden()} only pins the bytes, so a golden that
+     * is itself schema-invalid would be regenerated and committed without
+     * complaint. This test is what makes the golden meaningful.
+     * </p>
+     */
+    @ParameterizedTest(name = "CycloneDX {0}")
+    @MethodSource("supportedVersions")
+    void renderedBomIsSchemaValid(Version schemaVersion) throws Exception {
+        Bom bom = new BomRenderer().render(buildFixedModel());
+        Path out = tempDir.resolve("validate-" + schemaVersion.getVersionString() + ".cdx.json");
+        BomWriter.writeJson(bom, out, true, schemaVersion);
+
+        List<ParseException> errors = new JsonParser().validate(out.toFile(), schemaVersion);
+        assertTrue(errors.isEmpty(),
+                () -> "Rendered BOM is not valid against CycloneDX "
+                        + schemaVersion.getVersionString() + ":\n"
+                        + errors.stream().map(Throwable::getMessage)
+                                .collect(Collectors.joining("\n")));
+    }
+
+    /**
+     * The schema versions this producer can emit JSON for, so adding a version
+     * to the CycloneDX library automatically widens this guard.
+     *
+     * <p>
+     * Versions below 1.4 are excluded: 1.0 and 1.1 have no JSON binding at all,
+     * and 1.2/1.3 make {@code component.version} mandatory, which a FILE
+     * component scanned out of an archive has no value for. Emitting those two
+     * is a pre-existing limitation, not something this guard should assert.
+     * </p>
+     */
+    static List<Version> supportedVersions() {
+        return Arrays.stream(Version.values())
+                .filter(v -> v.getFormats().contains(Format.JSON))
+                .filter(v -> v.getVersion() >= 1.4d)
+                .toList();
+    }
+
+    /**
+     * Guards the checked-in golden resource itself, so a hand-edit or a
+     * regeneration from a broken renderer cannot leave an invalid document in
+     * the repository.
+     */
+    @Test
+    void goldenResourceIsSchemaValid() throws Exception {
+        Path copy = tempDir.resolve("golden-copy.cdx.json");
+        Files.writeString(copy, readGolden(), StandardCharsets.UTF_8);
+
+        List<ParseException> errors = new JsonParser()
+                .validate(copy.toFile(), SchemaVersions.resolve(SCHEMA_VERSION));
+        assertTrue(errors.isEmpty(),
+                () -> "Golden document " + GOLDEN_RESOURCE + " is not valid against CycloneDX "
+                        + SCHEMA_VERSION + ":\n"
+                        + errors.stream().map(Throwable::getMessage)
+                                .collect(Collectors.joining("\n")));
+    }
+
     private String readGolden() throws Exception {
         try (InputStream in = getClass().getResourceAsStream(GOLDEN_RESOURCE)) {
             assertNotNull(in, "Golden resource " + GOLDEN_RESOURCE + " is missing; "
@@ -124,17 +195,19 @@ class GoldenBomTest {
         ArtifactCoords alpha = ArtifactCoords.of("org.example", "alpha", "1.0");
         ArtifactCoords beta = ArtifactCoords.of("org.example", "beta", "2.0");
 
-        // A shaded/bundled dependency nested under alpha.
+        // A shaded/bundled dependency nested under alpha, identified from its
+        // own pom.properties.
         PackageComponent bundled = new PackageComponent(
                 ArtifactCoords.of("com.bundled", "shaded-dep", "3.1"),
-                "lib/alpha.jar", null, List.of(), List.of());
+                "lib/alpha.jar", null, List.of(), List.of(), true, Identification.pomProperties());
 
-        // Top-level alpha with a nested component and an SPDX-id license.
+        // Top-level alpha, identified by hash, with a nested component and an
+        // SPDX-id license.
         model.addComponent(new PackageComponent(alpha, "lib/alpha.jar",
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 List.of(LicenseInfo.spdx("Apache-2.0",
                         "https://www.apache.org/licenses/LICENSE-2.0")),
-                List.of(bundled)));
+                List.of(bundled), true, Identification.hashMatch()));
 
         // Same PURL again at a second path with no license -> occurrence merge,
         // first-wins licenses.
@@ -142,7 +215,8 @@ class GoldenBomTest {
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 List.of(), List.of()));
 
-        // Top-level beta with an SPDX-expression license.
+        // Top-level beta with an SPDX-expression license and no identification,
+        // so it renders no identity evidence.
         model.addComponent(new PackageComponent(beta, "lib/beta.jar",
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 List.of(LicenseInfo.expression("(MIT OR Apache-2.0)")), List.of()));
