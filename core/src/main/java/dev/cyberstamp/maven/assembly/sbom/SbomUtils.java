@@ -14,6 +14,7 @@ import java.util.HexFormat;
 
 import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Hash;
+import org.eclipse.aether.artifact.DefaultArtifact;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -123,7 +124,7 @@ final class SbomUtils {
      * when no explicit classifier is present.
      * </p>
      */
-    static org.eclipse.aether.artifact.DefaultArtifact toAetherArtifact(
+    static DefaultArtifact toAetherArtifact(
             String groupId, String artifactId, String version,
             String type, String classifier) {
         if (type == null || type.isEmpty()) {
@@ -137,7 +138,7 @@ final class SbomUtils {
                 classifier = handlerClassifier;
             }
         }
-        return new org.eclipse.aether.artifact.DefaultArtifact(
+        return new DefaultArtifact(
                 groupId, artifactId,
                 classifier != null ? classifier : "",
                 extension, version);

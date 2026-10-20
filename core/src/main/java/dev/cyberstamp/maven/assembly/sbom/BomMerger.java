@@ -652,9 +652,9 @@ public final class BomMerger {
             }
         }
         topEvidence.setOccurrences(remaining);
+        // Identity already in the BOM wins over the incoming SBOM's, as in
+        // mergeComponentData: it describes the same component.
         if (nested.getEvidence() != null
-                && (nested.getEvidence().getIdentities() == null
-                        || nested.getEvidence().getIdentities().isEmpty())
                 && topEvidence.getIdentities() != null
                 && !topEvidence.getIdentities().isEmpty()) {
             nested.getEvidence().setIdentities(topEvidence.getIdentities());

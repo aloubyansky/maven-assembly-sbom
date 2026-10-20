@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 
+import org.apache.maven.model.License;
+import org.apache.maven.model.Model;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -17,8 +19,8 @@ class EffectiveModelLicenseSourceTest {
      */
     @Test
     void mapsModelLicensesToRawLicenses() {
-        org.apache.maven.model.Model model = new org.apache.maven.model.Model();
-        org.apache.maven.model.License l = new org.apache.maven.model.License();
+        Model model = new Model();
+        License l = new License();
         l.setName("Apache License 2.0");
         l.setUrl("https://www.apache.org/licenses/LICENSE-2.0");
         model.addLicense(l);
@@ -43,7 +45,7 @@ class EffectiveModelLicenseSourceTest {
      */
     @Test
     void returnsEmptyWhenModelHasNullLicenses() {
-        org.apache.maven.model.Model model = new org.apache.maven.model.Model();
+        Model model = new Model();
         EffectiveModelLicenseSource source = EffectiveModelLicenseSource.forTesting(coords -> model);
         assertTrue(source.licensesFor("g", "a", "1").isEmpty());
     }
@@ -53,13 +55,13 @@ class EffectiveModelLicenseSourceTest {
      */
     @Test
     void preservesLicenseOrder() {
-        org.apache.maven.model.Model model = new org.apache.maven.model.Model();
-        org.apache.maven.model.License l1 = new org.apache.maven.model.License();
+        Model model = new Model();
+        License l1 = new License();
         l1.setName("MIT");
         l1.setUrl("https://opensource.org/licenses/MIT");
         model.addLicense(l1);
 
-        org.apache.maven.model.License l2 = new org.apache.maven.model.License();
+        License l2 = new License();
         l2.setName("Apache-2.0");
         l2.setUrl("https://www.apache.org/licenses/LICENSE-2.0");
         model.addLicense(l2);

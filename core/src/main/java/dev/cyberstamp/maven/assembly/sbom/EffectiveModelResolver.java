@@ -12,6 +12,7 @@ import javax.inject.Inject;
 import javax.inject.Named;
 import javax.inject.Singleton;
 
+import org.apache.maven.model.Dependency;
 import org.apache.maven.model.Model;
 import org.apache.maven.model.Parent;
 import org.apache.maven.model.Repository;
@@ -229,7 +230,7 @@ public class EffectiveModelResolver {
         }
 
         @Override
-        public ModelSource resolveModel(org.apache.maven.model.Dependency dependency)
+        public ModelSource resolveModel(Dependency dependency)
                 throws UnresolvableModelException {
             return resolveModel(
                     dependency.getGroupId(), dependency.getArtifactId(), dependency.getVersion());

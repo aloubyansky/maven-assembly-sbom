@@ -8,6 +8,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.eclipse.aether.artifact.Artifact;
+import org.eclipse.aether.artifact.DefaultArtifact;
 import org.eclipse.aether.collection.DependencyCollectionContext;
 import org.eclipse.aether.collection.DependencySelector;
 import org.eclipse.aether.graph.Dependency;
@@ -34,9 +36,9 @@ class EdgeCollectorSelectorFactoryTest {
     @Test
     void selectorRecordsCompileScopedEdge() {
         Map<ArtifactCoords, Set<ArtifactCoords>> edges = new ConcurrentHashMap<>();
-        org.eclipse.aether.artifact.Artifact parentArtifact = new org.eclipse.aether.artifact.DefaultArtifact("org.parent",
+        Artifact parentArtifact = new DefaultArtifact("org.parent",
                 "parent", "jar", "1.0");
-        org.eclipse.aether.artifact.Artifact childArtifact = new org.eclipse.aether.artifact.DefaultArtifact("org.child",
+        Artifact childArtifact = new DefaultArtifact("org.child",
                 "child", "jar", "2.0");
 
         when(delegate.selectDependency(any())).thenReturn(true);
@@ -59,9 +61,9 @@ class EdgeCollectorSelectorFactoryTest {
     @Test
     void testScopedDependencyNotRecorded() {
         Map<ArtifactCoords, Set<ArtifactCoords>> edges = new ConcurrentHashMap<>();
-        org.eclipse.aether.artifact.Artifact parentArtifact = new org.eclipse.aether.artifact.DefaultArtifact("org.parent",
+        Artifact parentArtifact = new DefaultArtifact("org.parent",
                 "parent", "jar", "1.0");
-        org.eclipse.aether.artifact.Artifact testArtifact = new org.eclipse.aether.artifact.DefaultArtifact("org.test",
+        Artifact testArtifact = new DefaultArtifact("org.test",
                 "test-lib", "jar", "1.0");
 
         when(delegate.selectDependency(any())).thenReturn(true);
@@ -80,9 +82,9 @@ class EdgeCollectorSelectorFactoryTest {
     @Test
     void selectorPreservesDelegateDecision() {
         Map<ArtifactCoords, Set<ArtifactCoords>> edges = new ConcurrentHashMap<>();
-        org.eclipse.aether.artifact.Artifact parentArtifact = new org.eclipse.aether.artifact.DefaultArtifact("org.parent",
+        Artifact parentArtifact = new DefaultArtifact("org.parent",
                 "parent", "jar", "1.0");
-        org.eclipse.aether.artifact.Artifact childArtifact = new org.eclipse.aether.artifact.DefaultArtifact("org.child",
+        Artifact childArtifact = new DefaultArtifact("org.child",
                 "child", "jar", "2.0");
 
         when(delegate.selectDependency(any())).thenReturn(false);
@@ -115,7 +117,7 @@ class EdgeCollectorSelectorFactoryTest {
     @Test
     void selectorEqualsAndHashCode() {
         Map<ArtifactCoords, Set<ArtifactCoords>> edges = new ConcurrentHashMap<>();
-        org.eclipse.aether.artifact.Artifact artifact = new org.eclipse.aether.artifact.DefaultArtifact("org.a", "a", "jar",
+        Artifact artifact = new DefaultArtifact("org.a", "a", "jar",
                 "1.0");
 
         var a = new EdgeCollectorSelectorFactory.EdgeCollectorSelector(delegate, edges, artifact);
@@ -126,7 +128,7 @@ class EdgeCollectorSelectorFactoryTest {
     }
 
     private static DependencyCollectionContext mockContext(
-            org.eclipse.aether.artifact.Artifact artifact) {
+            Artifact artifact) {
         DependencyCollectionContext ctx = mock(DependencyCollectionContext.class);
         lenient().when(ctx.getArtifact()).thenReturn(artifact);
         return ctx;

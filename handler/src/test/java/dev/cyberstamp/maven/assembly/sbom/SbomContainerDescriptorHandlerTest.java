@@ -10,10 +10,15 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
+import java.util.zip.ZipFile;
 
 import org.apache.maven.artifact.Artifact;
 import org.apache.maven.artifact.DefaultArtifact;
@@ -31,7 +36,13 @@ import org.codehaus.plexus.components.io.fileselectors.FileInfo;
 import org.codehaus.plexus.util.xml.Xpp3Dom;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
+import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.Hash;
+import org.cyclonedx.model.Metadata;
+import org.cyclonedx.model.component.evidence.Identity;
+import org.cyclonedx.model.component.evidence.Method;
+import org.cyclonedx.model.component.evidence.Occurrence;
+import org.cyclonedx.parsers.JsonParser;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.collection.CollectResult;
@@ -585,7 +596,7 @@ class SbomContainerDescriptorHandlerTest {
         String externalContent = Files.readString(externalBom);
         assertTrue(externalContent.contains("CycloneDX"));
 
-        try (java.util.zip.ZipFile zf = new java.util.zip.ZipFile(archivePath.toFile())) {
+        try (ZipFile zf = new ZipFile(archivePath.toFile())) {
             var bomEntry = zf.stream()
                     .filter(e -> e.getName().endsWith(".cdx.json"))
                     .findFirst().orElse(null);
@@ -738,7 +749,7 @@ class SbomContainerDescriptorHandlerTest {
 
         Path bomFile = tempDir.resolve("main-lic.zip.cdx.json");
         String json = Files.readString(bomFile);
-        org.cyclonedx.parsers.JsonParser parser = new org.cyclonedx.parsers.JsonParser();
+        JsonParser parser = new JsonParser();
         Bom bom = parser.parse(json.getBytes(StandardCharsets.UTF_8));
 
         Component main = bom.getMetadata().getComponent();
@@ -860,6 +871,87 @@ class SbomContainerDescriptorHandlerTest {
                 "regular files should pass through");
     }
 
+    /**
+     * The handler is a first-class entry point, not a wrapper around the mojo,
+     * so {@code identityEvidence} is covered here too.
+     */
+    @Test
+    void identityEvidenceOnByDefaultEmitsIdentity() throws Exception {
+        Path jarFile = createTestJar("ident-on-1.0.jar", "ident-on-content");
+        Artifact artifact = createArtifact("org.example", "ident-on", "1.0", "jar", jarFile.toFile());
+        when(project.getArtifacts()).thenReturn(Set.of(artifact));
+
+        ZipArchiver archiver = buildArchiver("base/lib/ident-on-1.0.jar", jarFile);
+        handler.finalizeArchiveCreation(archiver);
+
+        Component lib = findComponent(readBomFromArchiver(archiver), Component.Type.LIBRARY, "ident-on");
+        assertEquals(Method.Technique.HASH_COMPARISON,
+                lib.getEvidence().getIdentities().get(0).getMethods().get(0).getTechnique());
+    }
+
+    @Test
+    void setIdentityEvidenceFalseSuppressesIdentityButKeepsOccurrences() throws Exception {
+        handler.setIdentityEvidence(false);
+        Path jarFile = createTestJar("ident-off-1.0.jar", "ident-off-content");
+        Artifact artifact = createArtifact("org.example", "ident-off", "1.0", "jar", jarFile.toFile());
+        when(project.getArtifacts()).thenReturn(Set.of(artifact));
+
+        ZipArchiver archiver = buildArchiver("base/lib/ident-off-1.0.jar", jarFile);
+        handler.finalizeArchiveCreation(archiver);
+
+        Component lib = findComponent(readBomFromArchiver(archiver), Component.Type.LIBRARY, "ident-off");
+        assertEquals("lib/ident-off-1.0.jar", lib.getEvidence().getOccurrences().get(0).getLocation());
+        assertTrue(lib.getEvidence().getIdentities() == null || lib.getEvidence().getIdentities().isEmpty(),
+                "setIdentityEvidence(false) must suppress this tool's identity evidence");
+    }
+
+    @Test
+    void setIdentityEvidenceFalseKeepsExternalSbomIdentity() throws Exception {
+        handler.setIdentityEvidence(false);
+        when(project.getArtifacts()).thenReturn(Set.of());
+        lenient().when(project.getBasedir()).thenReturn(tempDir.toFile());
+        Path libFile = createTestFile("upstream-lib-1.0.jar", "upstream-lib-data");
+
+        Method method = new Method();
+        method.setTechnique(Method.Technique.MANIFEST_ANALYSIS);
+        method.setConfidence(0.7);
+        Identity identity = new Identity();
+        identity.setField(Identity.Field.PURL);
+        identity.setConfidence(0.7);
+        identity.setMethods(List.of(method));
+        Occurrence occ = new Occurrence();
+        occ.setLocation("lib/upstream-lib-1.0.jar");
+        Evidence evidence = new Evidence();
+        evidence.addOccurrence(occ);
+        evidence.setIdentities(List.of(identity));
+        Component extComp = new Component();
+        extComp.setType(Component.Type.LIBRARY);
+        extComp.setGroup("com.upstream");
+        extComp.setName("upstream-lib");
+        extComp.setVersion("1.0");
+        extComp.setPurl("pkg:maven/com.upstream/upstream-lib@1.0");
+        extComp.setBomRef("pkg:maven/com.upstream/upstream-lib@1.0");
+        extComp.setEvidence(evidence);
+        Bom externalBom = new Bom();
+        externalBom.addComponent(extComp);
+        Path bomFile = tempDir.resolve("upstream.cdx.json");
+        BomWriter.writeJson(externalBom, bomFile, true);
+        handler.setExternalSboms(bomFile.toString());
+
+        ZipArchiver archiver = buildArchiver("base/lib/upstream-lib-1.0.jar", libFile);
+        handler.finalizeArchiveCreation(archiver);
+
+        Component merged = allComponentsRecursive(readBomFromArchiver(archiver)).stream()
+                .filter(c -> "upstream-lib".equals(c.getName()) && "com.upstream".equals(c.getGroup()))
+                .findFirst().orElseThrow(() -> new AssertionError("external component should be merged"));
+        var identities = merged.getEvidence().getIdentities();
+        assertNotNull(identities, "upstream identity must survive identityEvidence=false");
+        assertEquals(1, identities.size());
+        assertEquals(0.7, identities.get(0).getConfidence());
+        assertEquals(Method.Technique.MANIFEST_ANALYSIS,
+                identities.get(0).getMethods().get(0).getTechnique());
+    }
+
     @Test
     void externalSbomComponentFilteredWhenOccurrenceNotInArchive() throws Exception {
         when(project.getArtifacts()).thenReturn(Set.of());
@@ -880,8 +972,8 @@ class SbomContainerDescriptorHandlerTest {
         extComp.setBomRef("pkg:maven/com.google.guava/failureaccess@1.0");
         extComp.addHash(new Hash("SHA-256",
                 "0000000000000000000000000000000000000000000000000000000000000000"));
-        org.cyclonedx.model.Evidence evidence = new org.cyclonedx.model.Evidence();
-        org.cyclonedx.model.component.evidence.Occurrence occ = new org.cyclonedx.model.component.evidence.Occurrence();
+        Evidence evidence = new Evidence();
+        Occurrence occ = new Occurrence();
         occ.setLocation("WEB-INF/lib/failureaccess-1.0.jar");
         evidence.addOccurrence(occ);
         extComp.setEvidence(evidence);
@@ -921,8 +1013,8 @@ class SbomContainerDescriptorHandlerTest {
         react.setPurl("pkg:npm/react@18.3.1");
         react.setBomRef("pkg:npm/react@18.3.1");
         react.addHash(new Hash("SHA-512", "abc123"));
-        org.cyclonedx.model.Evidence evidence = new org.cyclonedx.model.Evidence();
-        org.cyclonedx.model.component.evidence.Occurrence occ = new org.cyclonedx.model.component.evidence.Occurrence();
+        Evidence evidence = new Evidence();
+        Occurrence occ = new Occurrence();
         occ.setLocation("packages/my-plugin/src/App.tsx");
         evidence.addOccurrence(occ);
         react.setEvidence(evidence);
@@ -993,8 +1085,8 @@ class SbomContainerDescriptorHandlerTest {
         Bom bom = readBomFromArchiver(archiver);
 
         // Collect all bom-refs recursively
-        List<String> allRefs = new java.util.ArrayList<>();
-        java.util.function.Consumer<List<Component>> collectRefs = new java.util.function.Consumer<>() {
+        List<String> allRefs = new ArrayList<>();
+        Consumer<List<Component>> collectRefs = new Consumer<>() {
             @Override
             public void accept(List<Component> comps) {
                 for (Component c : comps) {
@@ -1011,15 +1103,15 @@ class SbomContainerDescriptorHandlerTest {
             collectRefs.accept(bom.getComponents());
         }
 
-        Set<String> unique = new java.util.HashSet<>(allRefs);
+        Set<String> unique = new HashSet<>(allRefs);
         assertEquals(allRefs.size(), unique.size(),
                 "all bom-refs must be unique, but found duplicates: "
                         + allRefs.stream()
-                                .filter(r -> java.util.Collections.frequency(allRefs, r) > 1)
+                                .filter(r -> Collections.frequency(allRefs, r) > 1)
                                 .distinct().toList());
 
         // Every component bom-ref must have a matching dependency entry
-        Set<String> depRefs = new java.util.HashSet<>();
+        Set<String> depRefs = new HashSet<>();
         if (bom.getDependencies() != null) {
             for (org.cyclonedx.model.Dependency dep : bom.getDependencies()) {
                 depRefs.add(dep.getRef());
@@ -1064,7 +1156,7 @@ class SbomContainerDescriptorHandlerTest {
         String hash = "ca70c90a5d1ce1511880ce9c93d4ad22108f61111d3daf91eb52762b571bd179";
 
         Bom bom = new Bom();
-        org.cyclonedx.model.Metadata meta = new org.cyclonedx.model.Metadata();
+        Metadata meta = new Metadata();
         Component main = new Component();
         main.setType(Component.Type.APPLICATION);
         main.setName("app");
@@ -1088,7 +1180,7 @@ class SbomContainerDescriptorHandlerTest {
         libComp.setPurl("pkg:maven/com.github.ben-manes.caffeine/caffeine@3.2.3");
         libComp.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
 
-        bom.setComponents(new java.util.ArrayList<>(List.of(fileComp, libComp)));
+        bom.setComponents(new ArrayList<>(List.of(fileComp, libComp)));
 
         org.cyclonedx.model.Dependency mainDep = new org.cyclonedx.model.Dependency(main.getBomRef());
         mainDep.addDependency(new org.cyclonedx.model.Dependency(
@@ -1133,7 +1225,7 @@ class SbomContainerDescriptorHandlerTest {
         String hash = "ab12cd34ef56789000000000000000000000000000000000000000000000abcd";
 
         Bom bom = new Bom();
-        org.cyclonedx.model.Metadata meta = new org.cyclonedx.model.Metadata();
+        Metadata meta = new Metadata();
         Component main = new Component();
         main.setType(Component.Type.APPLICATION);
         main.setName("app");
@@ -1161,7 +1253,7 @@ class SbomContainerDescriptorHandlerTest {
         libComp.setBomRef("pkg:maven/com.google.guava/guava@33.0");
         libComp.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
 
-        bom.setComponents(new java.util.ArrayList<>(
+        bom.setComponents(new ArrayList<>(
                 List.of(fileComp1, fileComp2, libComp)));
 
         org.cyclonedx.model.Dependency mainDep = new org.cyclonedx.model.Dependency(main.getBomRef());
@@ -1227,7 +1319,7 @@ class SbomContainerDescriptorHandlerTest {
     }
 
     private static List<Component> allComponentsRecursive(Bom bom) {
-        List<Component> result = new java.util.ArrayList<>();
+        List<Component> result = new ArrayList<>();
         if (bom.getComponents() != null) {
             collectComponents(bom.getComponents(), result);
         }
@@ -1349,7 +1441,7 @@ class SbomContainerDescriptorHandlerTest {
         Path bomFile = tempDir.resolve("ignore-test.zip.cdx.json");
         assertTrue(Files.exists(bomFile), "external BOM should be written");
         String json = Files.readString(bomFile);
-        org.cyclonedx.parsers.JsonParser parser = new org.cyclonedx.parsers.JsonParser();
+        JsonParser parser = new JsonParser();
         Bom bom = parser.parse(json.getBytes(StandardCharsets.UTF_8));
 
         Component file = findComponent(bom, Component.Type.FILE, "bom.cdx.json");
@@ -1418,8 +1510,8 @@ class SbomContainerDescriptorHandlerTest {
         upstreamWar.setVersion("1.0");
         upstreamWar.setPurl("pkg:maven/org.upstream/upstream-war@1.0?type=war");
         upstreamWar.setBomRef("pkg:maven/org.upstream/upstream-war@1.0?type=war");
-        org.cyclonedx.model.Evidence warEvidence = new org.cyclonedx.model.Evidence();
-        org.cyclonedx.model.component.evidence.Occurrence warOcc = new org.cyclonedx.model.component.evidence.Occurrence();
+        Evidence warEvidence = new Evidence();
+        Occurrence warOcc = new Occurrence();
         warOcc.setLocation("");
         warEvidence.addOccurrence(warOcc);
         upstreamWar.setEvidence(warEvidence);
@@ -1457,8 +1549,8 @@ class SbomContainerDescriptorHandlerTest {
         mavenLib.setVersion("1.0");
         mavenLib.setPurl("pkg:maven/io.hawt/hawtio@1.0");
         mavenLib.setBomRef("pkg:maven/io.hawt/hawtio@1.0");
-        org.cyclonedx.model.Evidence libEvidence = new org.cyclonedx.model.Evidence();
-        org.cyclonedx.model.component.evidence.Occurrence libOcc = new org.cyclonedx.model.component.evidence.Occurrence();
+        Evidence libEvidence = new Evidence();
+        Occurrence libOcc = new Occurrence();
         libOcc.setLocation("WEB-INF/lib/hawtio-1.0.jar");
         libEvidence.addOccurrence(libOcc);
         mavenLib.setEvidence(libEvidence);
@@ -1614,8 +1706,8 @@ class SbomContainerDescriptorHandlerTest {
         upstreamWar.setVersion("1.0");
         upstreamWar.setPurl("pkg:maven/org.upstream/inner-war@1.0?type=war");
         upstreamWar.setBomRef("pkg:maven/org.upstream/inner-war@1.0?type=war");
-        org.cyclonedx.model.Evidence warEvidence = new org.cyclonedx.model.Evidence();
-        org.cyclonedx.model.component.evidence.Occurrence warOcc = new org.cyclonedx.model.component.evidence.Occurrence();
+        Evidence warEvidence = new Evidence();
+        Occurrence warOcc = new Occurrence();
         warOcc.setLocation("");
         warEvidence.addOccurrence(warOcc);
         upstreamWar.setEvidence(warEvidence);
@@ -1900,14 +1992,14 @@ class SbomContainerDescriptorHandlerTest {
     private Bom readBomFromArchiver(ZipArchiver archiver) throws Exception {
         archiver.createArchive();
         File zipFile = archiver.getDestFile();
-        try (java.util.zip.ZipFile zf = new java.util.zip.ZipFile(zipFile)) {
+        try (ZipFile zf = new ZipFile(zipFile)) {
             var entry = zf.stream()
                     .filter(e -> e.getName().endsWith(".cdx.json") || e.getName().endsWith(".cdx.xml"))
                     .findFirst().orElse(null);
             if (entry == null)
                 return null;
             String json = new String(zf.getInputStream(entry).readAllBytes(), StandardCharsets.UTF_8);
-            org.cyclonedx.parsers.JsonParser parser = new org.cyclonedx.parsers.JsonParser();
+            JsonParser parser = new JsonParser();
             return parser.parse(json.getBytes(StandardCharsets.UTF_8));
         }
     }

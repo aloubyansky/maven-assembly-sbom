@@ -5,6 +5,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.eclipse.aether.artifact.Artifact;
 import org.eclipse.aether.collection.DependencyCollectionContext;
 import org.eclipse.aether.collection.DependencySelector;
 import org.eclipse.aether.graph.Dependency;
@@ -81,11 +82,11 @@ class EdgeCollectorSelectorFactory implements DependencySelector {
 
         private final DependencySelector delegate;
         private final Map<ArtifactCoords, Set<ArtifactCoords>> edges;
-        private final org.eclipse.aether.artifact.Artifact parent;
+        private final Artifact parent;
 
         EdgeCollectorSelector(DependencySelector delegate,
                 Map<ArtifactCoords, Set<ArtifactCoords>> edges,
-                org.eclipse.aether.artifact.Artifact parent) {
+                Artifact parent) {
             this.delegate = Objects.requireNonNull(delegate);
             this.edges = edges;
             this.parent = parent;

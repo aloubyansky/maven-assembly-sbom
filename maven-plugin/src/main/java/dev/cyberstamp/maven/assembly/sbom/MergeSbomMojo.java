@@ -1,6 +1,7 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.List;
 
 import org.apache.maven.plugin.AbstractMojo;
@@ -152,7 +153,7 @@ public class MergeSbomMojo extends AbstractMojo {
         try {
             BomWriter.write(bom, outputFile.toPath(), format, prettyPrint,
                     SchemaVersions.resolve(schemaVersion));
-        } catch (java.io.IOException | GeneratorException e) {
+        } catch (IOException | GeneratorException e) {
             throw new MojoExecutionException("Failed to write merged BOM to " + outputFile, e);
         }
 

@@ -45,14 +45,28 @@ public final class ShadedJarDetection {
     }
 
     private final JarLocator locator;
+    private final boolean identityEvidence;
+
+    /**
+     * Creates a detector that locates artifacts via the given locator and
+     * records how bundled artifacts were identified.
+     *
+     * @param locator locates the artifact file for a component's coordinates
+     */
+    public ShadedJarDetection(JarLocator locator) {
+        this(locator, true);
+    }
 
     /**
      * Creates a detector that locates artifacts via the given locator.
      *
      * @param locator locates the artifact file for a component's coordinates
+     * @param identityEvidence whether bundled artifacts carry their
+     *        {@link Identification}
      */
-    public ShadedJarDetection(JarLocator locator) {
+    public ShadedJarDetection(JarLocator locator, boolean identityEvidence) {
         this.locator = locator;
+        this.identityEvidence = identityEvidence;
     }
 
     /**
@@ -94,7 +108,9 @@ public final class ShadedJarDetection {
                 // Bundled artifacts are discovered from embedded pom.properties;
                 // their transitive dependencies are not resolved, so they are
                 // marked as having unknown dependencies (not an empty leaf).
-                nested.add(PackageComponent.of(coords, null, null, false));
+                // Their coordinates are read verbatim from those descriptors.
+                nested.add(PackageComponent.of(coords, null, null, false,
+                        identityEvidence ? Identification.pomProperties() : null));
             }
         }
         return pkg.withNested(nested);

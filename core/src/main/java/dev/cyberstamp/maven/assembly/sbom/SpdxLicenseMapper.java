@@ -1,5 +1,6 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
+import org.cyclonedx.model.License;
 import org.cyclonedx.model.LicenseChoice;
 import org.cyclonedx.util.LicenseResolver;
 
@@ -73,7 +74,7 @@ final class SpdxLicenseMapper {
         }
         if (choice.getLicenses() != null && !choice.getLicenses().isEmpty()
                 && choice.getLicenses().get(0).getId() != null) {
-            org.cyclonedx.model.License resolved = choice.getLicenses().get(0);
+            License resolved = choice.getLicenses().get(0);
             return LicenseInfo.spdx(resolved.getId(), resolved.getUrl());
         }
         if (choice.getExpression() != null && choice.getExpression().getValue() != null) {

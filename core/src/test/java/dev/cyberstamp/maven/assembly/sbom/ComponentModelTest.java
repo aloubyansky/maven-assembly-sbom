@@ -20,6 +20,25 @@ class ComponentModelTest {
     }
 
     @Test
+    void legacyEntryPointsHaveNoIdentification() {
+        ArtifactCoords coords = ArtifactCoords.of("org.example", "foo", "1.0");
+        assertNull(new PackageComponent(coords, null, null, List.of(), List.of()).identification());
+        assertNull(new PackageComponent(coords, null, null, List.of(), List.of(), false).identification());
+        assertNull(PackageComponent.of(coords, null, null).identification());
+        assertNull(PackageComponent.of(coords, null, null, false).identification());
+    }
+
+    @Test
+    void identificationSurvivesWithLicensesAndWithNested() {
+        PackageComponent pc = PackageComponent.of(ArtifactCoords.of("org.example", "foo", "1.0"),
+                "lib/foo.jar", "abc123", true, Identification.hashMatch());
+        PackageComponent enriched = pc
+                .withLicenses(List.of(LicenseInfo.spdx("MIT", null)))
+                .withNested(List.of(PackageComponent.of(ArtifactCoords.of("g", "n", "1"), null, null)));
+        assertEquals(Identification.hashMatch(), enriched.identification());
+    }
+
+    @Test
     void packageComponentRequiresRef() {
         assertThrows(NullPointerException.class,
                 () -> new PackageComponent(null, null, null, List.of(), List.of()));
