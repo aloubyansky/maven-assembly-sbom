@@ -36,7 +36,7 @@ import org.cyclonedx.model.metadata.ToolInformation;
  * {@link PackageComponent}s share the same {@code ref.toPurl().toString()},
  * only the first creates a component and subsequent occurrences append an
  * {@link Occurrence} to the existing component's evidence (first-wins for
- * hash/licenses/identity). Nested components are emitted per-instance without
+ * hash/licenses, first non-null for identity). Nested components are emitted per-instance without
  * deduplication.
  * </p>
  */
@@ -127,8 +127,10 @@ public class BomRenderer {
                 String purl = pkg.ref().toPurl().toString();
                 Component existing = ctx.componentsById.get(purl);
                 if (existing != null) {
-                    // Occurrence merge: append occurrence, first-wins for licenses
+                    // Occurrence merge: append occurrence, first-wins for licenses,
+                    // first non-null for identity
                     appendOccurrence(existing, pkg.archivePath());
+                    applyIdentityIfAbsent(existing, pkg);
                     applyLicensesIfAbsent(existing, CycloneDxLicenses.toLicenseChoice(pkg.licenses()));
                 } else {
                     Component comp = createPackageComponent(pkg, ctx);
@@ -171,7 +173,7 @@ public class BomRenderer {
         if (pkg.hash() != null) {
             comp.addHash(new Hash(ctx.hashAlgorithm, pkg.hash()));
         }
-        comp.setEvidence(buildMavenEvidence(pkg.archivePath()));
+        comp.setEvidence(buildPackageEvidence(pkg));
         LicenseChoice licenses = CycloneDxLicenses.toLicenseChoice(pkg.licenses());
         applyLicensesIfAbsent(comp, licenses);
 
@@ -209,39 +211,66 @@ public class BomRenderer {
     }
 
     /**
-     * Builds evidence for a Maven artifact including an identity assertion
-     * and an optional occurrence.
-     *
-     * <p>
-     * Ported verbatim from {@code BomBuilder#buildMavenEvidence}.
-     * </p>
+     * Builds evidence for a package component: an optional occurrence, and an
+     * identity only when the component carries an {@link Identification}.
+     * Returns {@code null} when there is nothing to say, rather than an empty
+     * evidence object.
      */
-    private Evidence buildMavenEvidence(String archivePath) {
+    private Evidence buildPackageEvidence(PackageComponent pkg) {
+        Identity identity = identityOf(pkg);
+        if (pkg.archivePath() == null && identity == null) {
+            return null;
+        }
         Evidence evidence = new Evidence();
-        if (archivePath != null) {
+        if (pkg.archivePath() != null) {
             Occurrence occ = new Occurrence();
-            occ.setLocation(archivePath);
+            occ.setLocation(pkg.archivePath());
             evidence.addOccurrence(occ);
         }
-        evidence.setIdentities(List.of(buildMavenIdentity()));
+        if (identity != null) {
+            evidence.setIdentities(List.of(identity));
+        }
         return evidence;
     }
 
     /**
-     * Creates an identity assertion for Maven manifest analysis with
-     * full confidence.
-     *
-     * <p>
-     * Ported verbatim from {@code BomBuilder#buildMavenIdentity}.
-     * </p>
+     * Sets the identity of a later instance of an already-rendered component
+     * when the rendered one has none.
      */
-    private Identity buildMavenIdentity() {
+    private void applyIdentityIfAbsent(Component component, PackageComponent pkg) {
+        Evidence evidence = component.getEvidence();
+        if (evidence != null && evidence.getIdentities() != null && !evidence.getIdentities().isEmpty()) {
+            return;
+        }
+        Identity identity = identityOf(pkg);
+        if (identity == null) {
+            return;
+        }
+        if (evidence == null) {
+            evidence = new Evidence();
+            component.setEvidence(evidence);
+        }
+        evidence.setIdentities(List.of(identity));
+    }
+
+    /**
+     * Maps a component's {@link Identification} to a CycloneDX purl identity
+     * with a single method and no value, or {@code null} when the component
+     * has none. The CycloneDX schema requires
+     * {@code confidence} on each method as well as on the identity.
+     */
+    private Identity identityOf(PackageComponent pkg) {
+        Identification identification = pkg.identification();
+        if (identification == null) {
+            return null;
+        }
+        Method method = new Method();
+        method.setTechnique(Method.Technique.valueOf(identification.technique().name()));
+        method.setConfidence(identification.confidence());
+
         Identity identity = new Identity();
         identity.setField(Identity.Field.PURL);
-        identity.setConfidence(1.0);
-        Method method = new Method();
-        method.setTechnique(Method.Technique.MANIFEST_ANALYSIS);
-        method.setValue("maven-pom-analysis");
+        identity.setConfidence(identification.confidence());
         identity.setMethods(List.of(method));
         return identity;
     }

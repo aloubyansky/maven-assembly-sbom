@@ -3,6 +3,7 @@ package dev.cyberstamp.maven.assembly.sbom;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -122,7 +123,7 @@ class ArchiveAnalyzerTest {
         when(project.getArtifacts()).thenReturn(Set.of());
 
         String hash = SbomUtils.computeHash(digest,
-                new java.io.ByteArrayInputStream("config-data".getBytes(StandardCharsets.UTF_8)));
+                new ByteArrayInputStream("config-data".getBytes(StandardCharsets.UTF_8)));
         List<FileEntry> entries = List.of(
                 new FileEntry("conf/app.properties", hash));
 
@@ -243,7 +244,7 @@ class ArchiveAnalyzerTest {
 
         String knownHash = SbomUtils.computeHash(digest, jarFile);
         String unknownHash = SbomUtils.computeHash(digest,
-                new java.io.ByteArrayInputStream("unknown-content".getBytes(StandardCharsets.UTF_8)));
+                new ByteArrayInputStream("unknown-content".getBytes(StandardCharsets.UTF_8)));
 
         List<FileEntry> entries = List.of(
                 new FileEntry("lib/known-1.0.jar", knownHash),
@@ -1019,5 +1020,187 @@ class ArchiveAnalyzerTest {
             }
         }
         return count;
+    }
+
+    // ---- Identification ----
+
+    @Test
+    void hashMatchedEntryRecordsHashComparison() throws Exception {
+        Path jarFile = createTestJar("lib-x-1.0.jar", "content-x");
+        Artifact artifact = createArtifact("org.example", "lib-x", "1.0", "jar", jarFile.toFile());
+        when(project.getArtifacts()).thenReturn(Set.of(artifact));
+
+        String hash = SbomUtils.computeHash(digest, jarFile);
+        AssemblyComponents model = createAnalyzer().analyze(
+                List.of(new FileEntry("lib/lib-x-1.0.jar", hash)), null);
+
+        List<PackageComponent> packages = extractPackageComponents(model);
+        assertEquals(1, packages.size());
+        assertEquals(Identification.hashMatch(), packages.get(0).identification());
+    }
+
+    @Test
+    void pomPropertiesIdentifiedJarRecordsManifestAnalysis() throws Exception {
+        Path jarFile = createJarWithPomProperties("lib-y-2.0.jar",
+                "org.example", "lib-y", "2.0", "content-y");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        String hash = SbomUtils.computeHash(digest, jarFile);
+        AssemblyComponents model = createAnalyzer().analyze(
+                List.of(new FileEntry("lib/lib-y-2.0.jar", hash, jarFile.toFile())), null);
+
+        List<PackageComponent> packages = extractPackageComponents(model);
+        assertEquals(1, packages.size());
+        assertEquals(Identification.pomProperties(), packages.get(0).identification());
+    }
+
+    @Test
+    void filenameResolvedShadedOwnerRecordsReducedConfidence() throws Exception {
+        Path shadedJar = createShadedJarWithMultiplePomProperties("lib-z-3.0.jar",
+                "org.example", "lib-z", "3.0",
+                "com.bundled", "shaded-a", "1.5",
+                "shaded-content");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        String hash = SbomUtils.computeHash(digest, shadedJar);
+        AssemblyComponents model = createAnalyzer().analyze(
+                List.of(new FileEntry("lib/lib-z-3.0.jar", hash, shadedJar.toFile())), null);
+
+        List<PackageComponent> packages = extractPackageComponents(model);
+        assertEquals(1, packages.size());
+        assertEquals(Identification.pomPropertiesFilenameOwner(), packages.get(0).identification());
+    }
+
+    /**
+     * The filename heuristic decides which descriptor is the jar itself, i.e.
+     * the owner's identity; a bundled dep's coordinates are read verbatim from
+     * its own descriptor whichever owner was chosen.
+     */
+    @Test
+    void bundledDepOfFilenameResolvedOwnerHasFullConfidence() throws Exception {
+        Path shadedJar = createShadedJarWithMultiplePomProperties("lib-w-4.0.jar",
+                "org.example", "lib-w", "4.0",
+                "com.bundled", "shaded-b", "2.1",
+                "shaded-content-w");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        String hash = SbomUtils.computeHash(digest, shadedJar);
+        AssemblyComponents model = createAnalyzer().analyze(
+                List.of(new FileEntry("lib/lib-w-4.0.jar", hash, shadedJar.toFile())), null);
+
+        assertEquals(Identification.pomPropertiesFilenameOwner(),
+                extractPackageComponents(model).get(0).identification());
+        List<PackageComponent> nested = extractNestedPackages(model);
+        assertEquals(1, nested.size());
+        assertEquals("shaded-b", ((ArtifactCoords) nested.get(0).ref()).artifactId());
+        assertEquals(Identification.pomProperties(), nested.get(0).identification());
+    }
+
+    @Test
+    void bundledDepOfHashMatchedOwnerKeepsFullConfidence() throws Exception {
+        Path shadedJar = createShadedJarWithMultiplePomProperties("lib-v-5.0.jar",
+                "org.example", "lib-v", "5.0",
+                "com.bundled", "shaded-c", "3.2",
+                "shaded-content-v");
+        Artifact artifact = createArtifact("org.example", "lib-v", "5.0", "jar", shadedJar.toFile());
+        when(project.getArtifacts()).thenReturn(Set.of(artifact));
+
+        String hash = SbomUtils.computeHash(digest, shadedJar);
+        AssemblyComponents model = createAnalyzer().analyze(
+                List.of(new FileEntry("lib/lib-v-5.0.jar", hash)), null);
+
+        List<PackageComponent> nested = extractNestedPackages(model);
+        assertEquals(1, nested.size());
+        assertEquals("shaded-c", ((ArtifactCoords) nested.get(0).ref()).artifactId());
+        assertEquals(Identification.pomProperties(), nested.get(0).identification());
+    }
+
+    @Test
+    void unpackedArtifactReducesConfidence() throws Exception {
+        Path entryFile = createTestFile("unpacked-entry.txt", "unpacked-entry-data");
+        byte[] entryBytes = Files.readAllBytes(entryFile);
+        Path warFile = tempDir.resolve("mywar-unpacked-1.0.war");
+        try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(warFile))) {
+            jos.putNextEntry(new JarEntry("WEB-INF/unpacked-entry.txt"));
+            jos.write(entryBytes);
+            jos.closeEntry();
+        }
+        Artifact warArtifact = createArtifact("org.example", "mywar-unpacked", "1.0", "war", warFile.toFile());
+        when(project.getArtifacts()).thenReturn(Set.of(warArtifact));
+
+        String entryHash = SbomUtils.computeHash(digest, entryFile);
+        AssemblyComponents model = createAnalyzer().analyze(
+                List.of(new FileEntry("web/unpacked-entry.txt", entryHash)), null);
+
+        List<PackageComponent> packages = extractPackageComponents(model);
+        assertEquals(1, packages.size());
+        assertEquals("mywar-unpacked", ((ArtifactCoords) packages.get(0).ref()).artifactId());
+        assertEquals(Identification.unpackedContentMatch(), packages.get(0).identification());
+    }
+
+    /**
+     * The filename heuristic could not choose an owner, so the descriptors are
+     * nested under the file; each one's coordinates are still read verbatim
+     * from its own pom.properties.
+     */
+    @Test
+    void unresolvedShadedJarContentsGetManifestAnalysis() throws Exception {
+        Path shadedJar = createShadedJarWithMultiplePomProperties("ambiguous-ab-1.0.jar",
+                "com.example", "ab", "1.0",
+                "com.other", "ab", "2.0", // ambiguous: both artifactIds match the filename
+                "ambiguous-content");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        String hash = SbomUtils.computeHash(digest, shadedJar);
+        AssemblyComponents model = createAnalyzer().analyze(
+                List.of(new FileEntry("lib/ambiguous-ab-1.0.jar", hash, shadedJar.toFile())), null);
+
+        List<FileComponent> files = extractFileComponents(model);
+        assertEquals(1, files.size(), "unresolved shaded JAR should be a file component");
+        assertEquals(2, countFileNestedPackages(model));
+        for (AssemblyComponent nested : files.get(0).nested()) {
+            assertEquals(Identification.pomProperties(), ((PackageComponent) nested).identification());
+        }
+    }
+
+    @Test
+    void identityEvidenceOffRecordsNoIdentification() throws Exception {
+        Path jarFile = createTestJar("lib-off-1.0.jar", "content-off");
+        Artifact artifact = createArtifact("org.example", "lib-off", "1.0", "jar", jarFile.toFile());
+        when(project.getArtifacts()).thenReturn(Set.of(artifact));
+
+        ArchiveAnalyzer analyzer = createAnalyzer();
+        analyzer.setIdentityEvidence(false);
+        AssemblyComponents model = analyzer.analyze(
+                List.of(new FileEntry("lib/lib-off-1.0.jar", SbomUtils.computeHash(digest, jarFile))), null);
+
+        assertNull(extractPackageComponents(model).get(0).identification());
+    }
+
+    @Test
+    void reclassifiedUnpackedChildKeepsItsIdentification() throws Exception {
+        Path resFile = createTestFile("res.txt", "war-marker-content");
+        byte[] resBytes = Files.readAllBytes(resFile);
+        Path warFile = tempDir.resolve("app-1.0.war");
+        try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(warFile))) {
+            jos.putNextEntry(new JarEntry("res.txt"));
+            jos.write(resBytes);
+            jos.closeEntry();
+        }
+        Artifact warArtifact = createArtifact("org.example", "app", "1.0", "war", warFile.toFile());
+        Path extraJar = createTestJar("extra-1.0.jar", "extra-content");
+        Artifact extraArtifact = createArtifact("org.example", "extra", "1.0", "jar", extraJar.toFile());
+        when(project.getArtifacts()).thenReturn(Set.of(warArtifact, extraArtifact));
+
+        AssemblyComponents model = createAnalyzer().analyze(List.of(
+                new FileEntry("web/app/res.txt", SbomUtils.computeHash(digest, resFile)),
+                new FileEntry("web/app/extra-1.0.jar", SbomUtils.computeHash(digest, extraJar))), null);
+
+        assertTrue(isNestedUnder(model, "extra", "app"));
+        PackageComponent extra = extractNestedPackages(model).stream()
+                .filter(p -> "extra".equals(((ArtifactCoords) p.ref()).artifactId()))
+                .findFirst().orElseThrow();
+        assertEquals(Identification.hashMatch(), extra.identification(),
+                "reclassification must carry the hash match with the moved entry");
     }
 }

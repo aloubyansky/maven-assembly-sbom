@@ -9,6 +9,7 @@ import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.jar.JarEntry;
@@ -25,6 +26,7 @@ import org.apache.maven.project.MavenProjectHelper;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
 import org.cyclonedx.model.ExternalReference;
+import org.cyclonedx.model.component.evidence.Method;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.collection.DependencySelector;
@@ -140,7 +142,7 @@ class GenerateSbomMojoTest {
         react.setVersion("18.3.1");
         react.setBomRef("pkg:npm/react@18.3.1");
         react.setPurl("pkg:npm/react@18.3.1");
-        npmBom.setComponents(new java.util.ArrayList<>(List.of(react)));
+        npmBom.setComponents(new ArrayList<>(List.of(react)));
         Path npmBomFile = tempDir.resolve("npm-bom.cdx.json");
         BomWriter.writeJson(npmBom, npmBomFile, false);
 
@@ -287,7 +289,7 @@ class GenerateSbomMojoTest {
         assertNotNull(plugin.getExternalReferences(),
                 "link mode should add external BOM reference");
         assertTrue(plugin.getExternalReferences().stream()
-                .anyMatch(r -> r.getType() == org.cyclonedx.model.ExternalReference.Type.BOM),
+                .anyMatch(r -> r.getType() == ExternalReference.Type.BOM),
                 "external reference should be of type BOM");
     }
 
@@ -393,10 +395,10 @@ class GenerateSbomMojoTest {
 
         Path bomJson = tempDir.resolve("tmp-embedded.cdx.json");
         BomWriter.writeJson(embeddedBom, bomJson, false);
-        byte[] bomBytes = java.nio.file.Files.readAllBytes(bomJson);
+        byte[] bomBytes = Files.readAllBytes(bomJson);
 
         Path jarPath = inputDir.resolve(relativePath);
-        java.nio.file.Files.createDirectories(jarPath.getParent());
+        Files.createDirectories(jarPath.getParent());
         try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(jarPath))) {
             jos.putNextEntry(new JarEntry("data.txt"));
             jos.write(content.getBytes(StandardCharsets.UTF_8));
@@ -428,6 +430,61 @@ class GenerateSbomMojoTest {
         return artifact;
     }
 
+    /**
+     * The default is injected by Maven from the generated plugin descriptor,
+     * never by instantiating the mojo directly, so the descriptor itself is
+     * what has to be asserted.
+     */
+    @Test
+    void identityEvidenceDefaultsToTrueInThePluginDescriptor() throws Exception {
+        String descriptor;
+        try (var in = GenerateSbomMojo.class.getResourceAsStream("/META-INF/maven/plugin.xml")) {
+            assertNotNull(in, "the generated plugin descriptor should be on the classpath");
+            descriptor = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        assertTrue(descriptor.contains(
+                "<identityEvidence implementation=\"boolean\" default-value=\"true\"/>"),
+                "identity evidence must be on unless the user turns it off");
+    }
+
+    @Test
+    void identityEvidenceEnabledEmitsIdentity() throws Exception {
+        Path jarFile = createTestJar("WEB-INF/lib/foo-1.0.jar", "foo-content");
+        Artifact artifact = createArtifact("org.example", "foo", "1.0", "jar", jarFile.toFile());
+        when(project.getArtifacts()).thenReturn(Set.of(artifact));
+
+        File output = tempDir.resolve("output.cdx.json").toFile();
+        createMojo(output).execute();
+
+        Component foo = findByName(BomReader.readBom(output), "foo");
+        assertEquals(Method.Technique.HASH_COMPARISON,
+                foo.getEvidence().getIdentities().get(0).getMethods().get(0).getTechnique());
+    }
+
+    @Test
+    void identityEvidenceDisabledSuppressesIdentityKeepsOccurrences() throws Exception {
+        Path jarFile = createTestJar("WEB-INF/lib/bar-2.0.jar", "bar-content");
+        Artifact artifact = createArtifact("org.example", "bar", "2.0", "jar", jarFile.toFile());
+        when(project.getArtifacts()).thenReturn(Set.of(artifact));
+
+        File output = tempDir.resolve("output.cdx.json").toFile();
+        GenerateSbomMojo mojo = createMojo(output);
+        setField(mojo, "identityEvidence", false);
+        mojo.execute();
+
+        Component bar = findByName(BomReader.readBom(output), "bar");
+        assertEquals("WEB-INF/lib/bar-2.0.jar", bar.getEvidence().getOccurrences().get(0).getLocation());
+        assertTrue(bar.getEvidence().getIdentities() == null || bar.getEvidence().getIdentities().isEmpty(),
+                "identityEvidence=false should suppress identity evidence");
+    }
+
+    private static Component findByName(Bom bom, String name) {
+        return bom.getComponents().stream()
+                .filter(c -> name.equals(c.getName()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no component named " + name));
+    }
+
     private GenerateSbomMojo createMojo(File output) {
         GenerateSbomMojo mojo = new GenerateSbomMojo();
         setField(mojo, "project", project);
@@ -443,6 +500,9 @@ class GenerateSbomMojoTest {
         setField(mojo, "embeddedSboms", "merge");
         setField(mojo, "failOnMissingLicense", false);
         setField(mojo, "failOnDuplicateHash", true);
+        // The documented default; Maven's own defaulting is asserted against
+        // the plugin descriptor in identityEvidenceDefaultsToTrueInThePluginDescriptor.
+        setField(mojo, "identityEvidence", true);
         setField(mojo, "attach", false);
         return mojo;
     }

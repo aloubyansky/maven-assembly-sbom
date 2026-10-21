@@ -3,6 +3,7 @@ package dev.cyberstamp.maven.assembly.sbom;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 import org.cyclonedx.Version;
@@ -152,7 +153,7 @@ class CbomMergeRoundTripTest {
         cryptoProps.setOid(CRYPTO_OID);
         crypto.setCryptoProperties(cryptoProps);
 
-        bom.setComponents(new java.util.ArrayList<>(List.of(bc, crypto)));
+        bom.setComponents(new ArrayList<>(List.of(bc, crypto)));
 
         Dependency bcDep = new Dependency(BC_REF);
         bcDep.addDependency(new Dependency(CRYPTO_REF));

@@ -117,7 +117,7 @@ The generated SBOM describes every file in the archive. Maven artifacts are iden
       "hashes": [{ "alg": "SHA-256", "content": "dfc18..." }],
       "evidence": {
         "occurrences": [{ "location": "lib/commons-lang3-3.17.0.jar" }],
-        "identity": [{ "field": "purl", "confidence": 1.0, "methods": [{ "technique": "manifest-analysis" }] }]
+        "identity": [{ "field": "purl", "confidence": 1.0, "methods": [{ "technique": "hash-comparison", "confidence": 1.0 }] }]
       }
     },
     {
@@ -155,6 +155,7 @@ Options are set inside the `<containerDescriptorHandler>` block in the assembly 
 | `failOnMissingLicense` | `false` | When `true`, the build fails if any library component has no license information in its POM |
 | `hashAlgorithm` | `SHA-256` | The hash algorithm used for content hashes. Must be supported by both `java.security.MessageDigest` and the [CycloneDX specification](https://cyclonedx.org/docs/1.6/json/#hash-alg) (MD5, SHA-1, SHA-256, SHA-384, SHA-512, SHA3-256, SHA3-384, SHA3-512, BLAKE2b-256, BLAKE2b-384, BLAKE2b-512, BLAKE3) |
 | `failOnDuplicateHash` | `true` | When `true`, the build fails if two distinct artifacts have identical content hashes. Set to `false` to log a warning instead |
+| `identityEvidence` | `true` | When `true`, components this tool identifies carry identity evidence (see [Evidence](#evidence)). Set to `false` to emit none of its own; identity from external or embedded SBOMs is preserved |
 | `embeddedSboms` | `merge` | How to handle CycloneDX SBOM files (`.cdx.json`, `.cdx.xml`) found inside the archive: `merge` (import components as nested sub-components of the containing artifact), `link` (add an external reference of type `bom` to the containing artifact), or `ignore` |
 | `externalSboms` | _(none)_ | Comma-separated list of file paths to external CycloneDX SBOMs to merge into the distribution SBOM. Relative paths are resolved against the project base directory. External SBOM component hashes also participate in archive entry matching |
 | `librariesOnly` | `false` | When `true`, generic file components are removed from the generated SBOM, keeping only library components (Maven, npm, etc.). Filtering is applied after embedded and external SBOMs have been merged, so files recognized as libraries by those SBOMs are retained |
@@ -260,6 +261,7 @@ Scans an exploded directory (e.g., an exploded WAR produced by `maven-war-plugin
 | `externalSboms` | _(none)_ | Comma-separated paths to external SBOMs to merge |
 | `failOnMissingLicense` | `false` | Fail the build if any library has no license info |
 | `failOnDuplicateHash` | `true` | Fail the build on duplicate artifact hashes |
+| `identityEvidence` | `true` | Emit identity evidence for components this tool identifies (see [Evidence](#evidence)) |
 | `librariesOnly` | `false` | Exclude generic file components from the output |
 | `attach` | `false` | Attach the generated SBOM to the Maven project as an artifact with type `cdx.json` or `cdx.xml` and classifier `cyclonedx` |
 | `schemaVersion` | _(latest)_ | CycloneDX schema version to use for SBOM output and serial-number computation, e.g. `1.5` or `1.6`. Defaults to the latest version supported by the integrated CycloneDX Java library |
@@ -384,7 +386,7 @@ The `embeddedSboms` option controls what happens with detected SBOMs:
 The `externalSboms` option accepts a comma-separated list of file paths to CycloneDX SBOMs generated outside the Maven build (e.g., by `cdxgen`, `@cyclonedx/cyclonedx-npm`, or pnpm). These SBOMs are:
 
 1. **Used for archive entry matching** — component hashes from external SBOMs are checked against unmatched archive entries. If a match is found, the entry is identified from the external SBOM rather than appearing as an unidentified FILE component.
-2. **Merged flat as top-level components** — external SBOM components are added as peers of the distribution's own components (not nested under the main component). Their dependency entries are imported into the BOM's dependency section, and the external SBOM's top-level dependencies are linked under the distribution's main component. A Maven component from an external SBOM that is verified present in the archive also gains a `manifest-analysis` identity (see [Evidence](#evidence)).
+2. **Merged flat as top-level components** — external SBOM components are added as peers of the distribution's own components (not nested under the main component). Their dependency entries are imported into the BOM's dependency section, and the external SBOM's top-level dependencies are linked under the distribution's main component. A component from an external SBOM keeps the identity evidence its SBOM carried, if any; this tool adds none (see [Evidence](#evidence)).
 
 Example configuration:
 
@@ -463,7 +465,26 @@ The main `application` component's PURL includes the archive type derived from t
 
 ### Evidence
 
-Each component includes CycloneDX `evidence` with `occurrence` entries recording where it appears in the archive. Maven `library` components carry an `identity` with technique `manifest-analysis`, asserting the component was confirmed present in the assembly through Maven artifact metadata — whether identified directly by content-hash/`pom.properties` analysis or adopted from an external/embedded SBOM and then verified against the archive contents.
+Each component includes CycloneDX `evidence` with `occurrence` entries recording where it appears in the archive.
+
+Components this tool identifies also carry a purl `identity` recording how they were identified: a single method with the technique that actually identified the component and a confidence reflecting how strong that evidence is. No `value` is emitted.
+
+| Situation | Technique | Confidence |
+|---|---|---|
+| Archive entry's hash matched a resolved Maven artifact | `hash-comparison` | 1.0 |
+| Coordinates read from the jar's own `pom.properties`, owner unambiguous | `manifest-analysis` | 1.0 |
+| Unpacked artifact, matched on its member files | `hash-comparison` | 0.8 |
+| Shaded jar whose owner was chosen by matching its filename against the embedded `artifactId`s | `manifest-analysis` | 0.5 |
+| Bundled dependency, coordinates from its own `pom.properties` | `manifest-analysis` | 1.0 |
+| Shaded jar with no resolvable owner: each embedded artifact, nested under the file | `manifest-analysis` | 1.0 |
+
+Components that were not identified by this tool get no identity of its making:
+
+- Components from external or embedded SBOMs carry the identity evidence their SBOM provided, or none. Where such a component merges with one this tool already identified, this tool's identity is kept.
+- Components built directly through the `assembly-sbom-core` model API carry identity evidence only if the producer supplies an `Identification`.
+- Non-Maven components (`file`, generic, npm) carry occurrences only.
+
+Set `identityEvidence` to `false` to emit no identity evidence of this tool's own; identity from external or embedded SBOMs is still preserved.
 
 ## Requirements
 

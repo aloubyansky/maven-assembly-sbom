@@ -21,8 +21,6 @@ import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Dependency;
 import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.Hash;
-import org.cyclonedx.model.component.evidence.Identity;
-import org.cyclonedx.model.component.evidence.Method;
 import org.cyclonedx.model.component.evidence.Occurrence;
 import org.eclipse.aether.DefaultRepositorySystemSession;
 import org.eclipse.aether.RepositorySystem;
@@ -60,6 +58,7 @@ public class SbomGenerator {
     private final Version schemaVersion;
 
     private ProductInfo product;
+    private boolean identityEvidence = true;
     private LicenseEnrichment licenseEnrichment;
     private List<org.eclipse.aether.graph.Dependency> cachedManagedDeps;
     private ArchiveAnalyzer lastAnalyzer;
@@ -95,6 +94,14 @@ public class SbomGenerator {
      */
     void setProduct(ProductInfo product) {
         this.product = product;
+    }
+
+    /**
+     * Sets whether this tool emits identity evidence for the components it
+     * identifies. Identity from external or embedded SBOMs is unaffected.
+     */
+    void setIdentityEvidence(boolean identityEvidence) {
+        this.identityEvidence = identityEvidence;
     }
 
     /**
@@ -144,6 +151,7 @@ public class SbomGenerator {
         Bom bom = SbomPipeline.forModel(model)
                 .licenseSource(new EffectiveModelLicenseSource(effectiveModelResolver))
                 .failOnMissingLicense(failOnMissingLicense)
+                .identityEvidence(identityEvidence)
                 .render();
 
         // Post-processing (detected/external SBOMs, filtering, dedup)
@@ -168,6 +176,7 @@ public class SbomGenerator {
                 effectiveModelResolver, repoSystem,
                 project, session, messageDigest, failOnDuplicateHash,
                 externalBoms, detectEmbeddedSboms);
+        lastAnalyzer.setIdentityEvidence(identityEvidence);
         return lastAnalyzer.analyze(entries, baseDirPrefix);
     }
 
@@ -188,7 +197,6 @@ public class SbomGenerator {
             ComponentView cv = new ComponentView(comp, index.normalizedAlg());
             if (matchesArchive(cv, index)) {
                 correctOccurrences(cv, index);
-                ensureMavenManifestIdentity(comp);
                 filtered.add(comp);
                 collectBomRefs(comp, survivingRefs);
             } else {
@@ -288,43 +296,6 @@ public class SbomGenerator {
             }
         }
         return false;
-    }
-
-    /**
-     * Adds a {@code manifest-analysis} identity to a Maven component from an
-     * external/embedded SBOM that survived archive filtering (i.e. was verified
-     * present in the distribution) but carries no identity of its own — for
-     * example a Quarkus-generated SBOM component, which brings a rich
-     * description/publisher but no evidence identity. This restores the same
-     * provenance the analyzer records for components it identifies directly.
-     *
-     * <p>
-     * Only Maven components are affected; components already carrying an
-     * identity, and non-Maven (e.g. npm) components, are left untouched.
-     * </p>
-     */
-    private static void ensureMavenManifestIdentity(Component comp) {
-        String purl = comp.getPurl();
-        if (purl == null || !purl.startsWith("pkg:maven/")) {
-            return;
-        }
-        Evidence evidence = comp.getEvidence();
-        if (evidence != null && evidence.getIdentities() != null
-                && !evidence.getIdentities().isEmpty()) {
-            return;
-        }
-        if (evidence == null) {
-            evidence = new Evidence();
-            comp.setEvidence(evidence);
-        }
-        Identity identity = new Identity();
-        identity.setField(Identity.Field.PURL);
-        identity.setConfidence(1.0);
-        Method method = new Method();
-        method.setTechnique(Method.Technique.MANIFEST_ANALYSIS);
-        method.setValue("maven-pom-analysis");
-        identity.setMethods(List.of(method));
-        evidence.setIdentities(List.of(identity));
     }
 
     /**

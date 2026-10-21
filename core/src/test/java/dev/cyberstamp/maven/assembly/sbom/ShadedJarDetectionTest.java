@@ -55,6 +55,40 @@ class ShadedJarDetectionTest {
     }
 
     @Test
+    void identityEvidenceOffRecordsNoIdentification() throws Exception {
+        Path jar = jarWithPomProperties("owner-1.0.jar",
+                new String[] { "com.example", "owner", "1.0" },
+                new String[] { "com.bundled", "dep", "2.0" });
+
+        ArtifactCoords owner = ArtifactCoords.of("com.example", "owner", "1.0");
+        AssemblyComponents model = new AssemblyComponents();
+        model.addComponent(PackageComponent.of(owner, "lib/owner.jar", "hash"));
+
+        new ShadedJarDetection(c -> c.equals(owner) ? jar : null, false).apply(model);
+
+        PackageComponent nested = (PackageComponent) ((PackageComponent) model.components().get(0))
+                .nested().get(0);
+        assertNull(nested.identification());
+    }
+
+    @Test
+    void bundledDepsGetManifestAnalysis() throws Exception {
+        Path jar = jarWithPomProperties("owner-1.0.jar",
+                new String[] { "com.example", "owner", "1.0" },
+                new String[] { "com.bundled", "dep", "2.0" });
+
+        ArtifactCoords owner = ArtifactCoords.of("com.example", "owner", "1.0");
+        AssemblyComponents model = new AssemblyComponents();
+        model.addComponent(PackageComponent.of(owner, "lib/owner.jar", "hash"));
+
+        new ShadedJarDetection(c -> c.equals(owner) ? jar : null).apply(model);
+
+        PackageComponent nested = (PackageComponent) ((PackageComponent) model.components().get(0))
+                .nested().get(0);
+        assertEquals(Identification.pomProperties(), nested.identification());
+    }
+
+    @Test
     void bundledArtifactsHaveUnknownDependencies() throws Exception {
         // A bundle is discovered from embedded pom.properties, not from a resolved
         // dependency tree, so its dependencies must be marked unknown so the

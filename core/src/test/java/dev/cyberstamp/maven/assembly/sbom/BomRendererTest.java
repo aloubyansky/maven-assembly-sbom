@@ -9,10 +9,13 @@ import java.util.Date;
 import java.util.List;
 
 import org.cyclonedx.model.Bom;
+import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Dependency;
 import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.Hash;
 import org.cyclonedx.model.License;
+import org.cyclonedx.model.component.evidence.Identity;
+import org.cyclonedx.model.component.evidence.Method;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -43,7 +46,7 @@ class BomRendererTest {
                 "lib/lib-2.0.0.jar",
                 "abc123",
                 List.of(LicenseInfo.spdx("Apache-2.0")),
-                List.of());
+                List.of(), true, Identification.hashMatch());
         model.addComponent(pkg);
 
         BomRenderer renderer = new BomRenderer();
@@ -54,11 +57,11 @@ class BomRendererTest {
         assertNotNull(bom.getComponents());
         assertEquals(1, bom.getComponents().size());
 
-        org.cyclonedx.model.Component comp = bom.getComponents().get(0);
+        Component comp = bom.getComponents().get(0);
         assertEquals("com.example", comp.getGroup());
         assertEquals("lib", comp.getName());
         assertEquals("2.0.0", comp.getVersion());
-        assertEquals(org.cyclonedx.model.Component.Type.LIBRARY, comp.getType());
+        assertEquals(Component.Type.LIBRARY, comp.getType());
 
         String expectedPurl = "pkg:maven/com.example/lib@2.0.0";
         assertEquals(expectedPurl, comp.getPurl());
@@ -78,9 +81,14 @@ class BomRendererTest {
 
         assertNotNull(evidence.getIdentities());
         assertEquals(1, evidence.getIdentities().size());
-        assertEquals(org.cyclonedx.model.component.evidence.Identity.Field.PURL,
+        assertEquals(Identity.Field.PURL,
                 evidence.getIdentities().get(0).getField());
         assertEquals(1.0, evidence.getIdentities().get(0).getConfidence());
+        Method method = evidence.getIdentities().get(0).getMethods().get(0);
+        assertEquals(Method.Technique.HASH_COMPARISON,
+                method.getTechnique());
+        assertEquals(1.0, method.getConfidence());
+        assertNull(method.getValue(), "this tool never emits methods[].value");
 
         assertNotNull(comp.getLicenses());
         assertNotNull(comp.getLicenses().getLicenses());
@@ -129,7 +137,7 @@ class BomRendererTest {
         // Should result in a single component
         assertEquals(1, bom.getComponents().size());
 
-        org.cyclonedx.model.Component comp = bom.getComponents().get(0);
+        Component comp = bom.getComponents().get(0);
         assertEquals("com.example", comp.getGroup());
         assertEquals("lib", comp.getName());
         assertEquals("2.0.0", comp.getVersion());
@@ -184,13 +192,13 @@ class BomRendererTest {
         Bom bom = renderer.render(model);
 
         assertEquals(1, bom.getComponents().size());
-        org.cyclonedx.model.Component parentComp = bom.getComponents().get(0);
+        Component parentComp = bom.getComponents().get(0);
         assertEquals("com.example", parentComp.getGroup());
         assertEquals("parent", parentComp.getName());
 
         assertNotNull(parentComp.getComponents());
         assertEquals(1, parentComp.getComponents().size());
-        org.cyclonedx.model.Component nestedComp = parentComp.getComponents().get(0);
+        Component nestedComp = parentComp.getComponents().get(0);
         assertEquals("com.nested", nestedComp.getGroup());
         assertEquals("dep", nestedComp.getName());
         assertEquals("1.0", nestedComp.getVersion());
@@ -222,8 +230,8 @@ class BomRendererTest {
         Bom bom = renderer.render(model);
 
         assertEquals(1, bom.getComponents().size());
-        org.cyclonedx.model.Component comp = bom.getComponents().get(0);
-        assertEquals(org.cyclonedx.model.Component.Type.FILE, comp.getType());
+        Component comp = bom.getComponents().get(0);
+        assertEquals(Component.Type.FILE, comp.getType());
         assertEquals("script.sh", comp.getName());
         assertEquals("file:bin/script.sh", comp.getBomRef());
 
@@ -264,11 +272,11 @@ class BomRendererTest {
 
         Bom bom = new BomRenderer().render(model);
 
-        org.cyclonedx.model.Component comp = bom.getComponents().stream()
+        Component comp = bom.getComponents().stream()
                 .filter(c -> "jboss-cli-client".equals(c.getName()))
                 .findFirst().orElse(null);
         assertNotNull(comp);
-        assertEquals(org.cyclonedx.model.Component.Type.LIBRARY, comp.getType());
+        assertEquals(Component.Type.LIBRARY, comp.getType());
         assertEquals("31.0.0.Final", comp.getVersion());
         assertEquals("pkg:generic/jboss-cli-client@31.0.0.Final", comp.getPurl());
         assertEquals("pkg:generic/jboss-cli-client@31.0.0.Final", comp.getBomRef());
@@ -299,7 +307,7 @@ class BomRendererTest {
 
         Bom bom = new BomRenderer().render(model);
 
-        org.cyclonedx.model.Component main = bom.getMetadata().getComponent();
+        Component main = bom.getMetadata().getComponent();
         assertEquals("JBoss EAP", main.getName());
         assertEquals("8.1 Update 7.1", main.getVersion());
         assertEquals("pkg:generic/jboss-eap@8.1-update-7.1", main.getPurl());
@@ -511,7 +519,7 @@ class BomRendererTest {
         assertEquals(2, bom.getComponents().size());
 
         // Parent should have 2 occurrences
-        org.cyclonedx.model.Component parentComp = bom.getComponents().stream()
+        Component parentComp = bom.getComponents().stream()
                 .filter(c -> "parent".equals(c.getName()))
                 .findFirst()
                 .orElse(null);
@@ -529,4 +537,78 @@ class BomRendererTest {
         assertEquals("pkg:maven/com.example/child@2.0", parentDep.getDependencies().get(0).getRef());
     }
 
+    // ---- Identity evidence ----
+
+    private static Bom renderPackages(BomRenderer renderer, PackageComponent... pkgs) {
+        AssemblyComponents model = new AssemblyComponents();
+        AssemblyMetadata metadata = new AssemblyMetadata();
+        metadata.setProjectGroupId("org.example");
+        metadata.setProjectArtifactId("my-app");
+        metadata.setProjectVersion("1.0.0");
+        metadata.setHashAlgorithmSpec("SHA-256");
+        metadata.setTimestamp(new Date(1234567890000L));
+        model.setMetadata(metadata);
+        for (PackageComponent pkg : pkgs) {
+            model.addComponent(pkg);
+        }
+        return renderer.render(model);
+    }
+
+    private static List<Identity> identities(Bom bom) {
+        Evidence evidence = bom.getComponents().get(0).getEvidence();
+        return evidence == null ? null : evidence.getIdentities();
+    }
+
+    @Test
+    void componentWithoutIdentificationHasNoIdentity() {
+        Bom bom = renderPackages(new BomRenderer(),
+                PackageComponent.of(ArtifactCoords.of("com.example", "a", "1"), "lib/a.jar", "h"));
+        Evidence evidence = bom.getComponents().get(0).getEvidence();
+        assertEquals("lib/a.jar", evidence.getOccurrences().get(0).getLocation());
+        assertTrue(evidence.getIdentities() == null || evidence.getIdentities().isEmpty());
+    }
+
+    @Test
+    void genericComponentRendersProducerIdentification() {
+        Bom bom = renderPackages(new BomRenderer(), new PackageComponent(
+                new GenericPackageRef("shaded-thing", "1.0"), "lib/s.jar", null,
+                List.of(), List.of(), false, new Identification(Technique.ATTESTATION, 0.9)));
+        var identity = identities(bom).get(0);
+        assertEquals(0.9, identity.getConfidence());
+        assertEquals(Method.Technique.ATTESTATION,
+                identity.getMethods().get(0).getTechnique());
+        assertEquals(0.9, identity.getMethods().get(0).getConfidence());
+    }
+
+    @Test
+    void everyTechniqueMapsToCycloneDx() {
+        for (Technique technique : Technique.values()) {
+            Bom bom = renderPackages(new BomRenderer(), PackageComponent.of(
+                    ArtifactCoords.of("com.example", "a", "1"), "lib/a.jar", null, true,
+                    new Identification(technique, 0.5)));
+            assertEquals(technique.name(), identities(bom).get(0).getMethods().get(0).getTechnique().name());
+        }
+    }
+
+    @Test
+    void laterInstanceSuppliesIdentityWhenFirstHasNone() {
+        ArtifactCoords coords = ArtifactCoords.of("com.example", "x", "1");
+        Bom bom = renderPackages(new BomRenderer(),
+                PackageComponent.of(coords, "a/x.jar", null),
+                PackageComponent.of(coords, "b/x.jar", null, true, Identification.hashMatch()));
+        assertEquals(1, bom.getComponents().size());
+        assertEquals(2, bom.getComponents().get(0).getEvidence().getOccurrences().size());
+        assertEquals(Method.Technique.HASH_COMPARISON,
+                identities(bom).get(0).getMethods().get(0).getTechnique());
+    }
+
+    @Test
+    void firstIdentificationWinsOverLater() {
+        ArtifactCoords coords = ArtifactCoords.of("com.example", "x", "1");
+        Bom bom = renderPackages(new BomRenderer(),
+                PackageComponent.of(coords, "a/x.jar", null, true, Identification.pomPropertiesFilenameOwner()),
+                PackageComponent.of(coords, "b/x.jar", null, true, Identification.hashMatch()));
+        assertEquals(1, identities(bom).size());
+        assertEquals(0.5, identities(bom).get(0).getConfidence());
+    }
 }
