@@ -37,7 +37,7 @@ import org.eclipse.aether.RepositorySystem;
  * SBOMs (e.g., an npm SBOM) can be merged via {@code externalSboms}.
  * </p>
  */
-@Mojo(name = "generate", defaultPhase = LifecyclePhase.PREPARE_PACKAGE, requiresDependencyResolution = ResolutionScope.RUNTIME)
+@Mojo(name = "generate", defaultPhase = LifecyclePhase.PREPARE_PACKAGE, requiresDependencyResolution = ResolutionScope.RUNTIME, threadSafe = true)
 public class GenerateSbomMojo extends AbstractMojo {
 
     @Parameter(defaultValue = "${project}", readonly = true)
