@@ -44,7 +44,7 @@ import org.cyclonedx.model.Bom;
  * </plugin>
  * }</pre>
  */
-@Mojo(name = "merge", defaultPhase = LifecyclePhase.PREPARE_PACKAGE)
+@Mojo(name = "merge", defaultPhase = LifecyclePhase.PREPARE_PACKAGE, threadSafe = true)
 public class MergeSbomMojo extends AbstractMojo {
 
     @Parameter(defaultValue = "${project}", readonly = true)
