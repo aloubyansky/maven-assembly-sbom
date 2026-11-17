@@ -500,3 +500,8 @@ Set `identityEvidence` to `false` to emit no identity evidence of this tool's ow
 | [core](core/) | `assembly-sbom-core` | Core SBOM generation engine — archive analysis, component identification, BOM building and merging |
 | [handler](handler/) | `assembly-sbom-handler` | `ContainerDescriptorHandler` for the Maven Assembly Plugin — delegates to `assembly-sbom-core` |
 | [maven-plugin](maven-plugin/) | `assembly-sbom-maven-plugin` | Maven plugin with `generate` and `merge` goals |
+
+## Contributing
+
+Contributions are welcome! Please see the [Contributing Guide](CONTRIBUTING.md) for build instructions, code formatting guidelines, and tips for submitting pull requests.
+
