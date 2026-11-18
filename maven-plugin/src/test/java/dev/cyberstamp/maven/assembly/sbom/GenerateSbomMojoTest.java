@@ -6,12 +6,14 @@ import static org.mockito.Mockito.*;
 
 import java.io.File;
 import java.lang.reflect.Field;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 
@@ -21,6 +23,7 @@ import org.apache.maven.artifact.handler.DefaultArtifactHandler;
 import org.apache.maven.execution.MavenSession;
 import org.apache.maven.model.Build;
 import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugin.MojoFailureException;
 import org.apache.maven.project.MavenProject;
 import org.apache.maven.project.MavenProjectHelper;
 import org.cyclonedx.model.Bom;
@@ -36,6 +39,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+
+import com.sun.net.httpserver.HttpServer;
 
 @ExtendWith(MockitoExtension.class)
 class GenerateSbomMojoTest {
@@ -476,6 +481,120 @@ class GenerateSbomMojoTest {
         assertEquals("WEB-INF/lib/bar-2.0.jar", bar.getEvidence().getOccurrences().get(0).getLocation());
         assertTrue(bar.getEvidence().getIdentities() == null || bar.getEvidence().getIdentities().isEmpty(),
                 "identityEvidence=false should suppress identity evidence");
+    }
+
+    @Test
+    void noMatchersConfiguredLeavesNonMavenJarAsFileComponent() throws Exception {
+        createTestJar("WEB-INF/lib/gradle-built-1.0.jar", "non-maven-content");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        File output = tempDir.resolve("output.cdx.json").toFile();
+        createMojo(output).execute();
+
+        Bom bom = BomReader.readBom(output);
+        assertTrue(bom.getComponents().stream().noneMatch(c -> c.getType() == Component.Type.LIBRARY),
+                "without matchers configured, a non-Maven jar must stay a generic file component");
+    }
+
+    @Test
+    void nexusMatcherIdentifiesNonMavenJar() throws Exception {
+        createTestJar("WEB-INF/lib/gradle-built-1.0.jar", "non-maven-content");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        HttpServer stub = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        stub.createContext("/service/rest/v1/search", exchange -> {
+            String body = "{\"items\":[{\"group\":\"org.gradle.example\",\"name\":\"gradle-built\",\"version\":\"1.0\"}]}";
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        stub.start();
+        try {
+            Nexus nexus = new Nexus();
+            nexus.setUrl("http://127.0.0.1:" + stub.getAddress().getPort() + "/service/rest/v1/search?sha1={sha1}");
+
+            File output = tempDir.resolve("output.cdx.json").toFile();
+            GenerateSbomMojo mojo = createMojo(output);
+            setField(mojo, "mavenArtifactMatchers", List.of(nexus));
+            mojo.execute();
+
+            Bom bom = BomReader.readBom(output);
+            Component gradleBuilt = findByName(bom, "gradle-built");
+            assertEquals(Component.Type.LIBRARY, gradleBuilt.getType());
+            assertEquals("org.gradle.example", gradleBuilt.getGroup());
+            assertEquals("1.0", gradleBuilt.getVersion());
+            assertEquals(Method.Technique.HASH_COMPARISON,
+                    gradleBuilt.getEvidence().getIdentities().get(0).getMethods().get(0).getTechnique());
+        } finally {
+            stub.stop(0);
+        }
+    }
+
+    @Test
+    void budgetExhaustionFailsTheBuildWithMojoFailureException() throws Exception {
+        createTestJar("WEB-INF/lib/gradle-built-1.0.jar", "non-maven-content-1");
+        createTestJar("WEB-INF/lib/other-built-1.0.jar", "non-maven-content-2");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        HttpServer stub = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        stub.createContext("/service/rest/v1/search", exchange -> {
+            String body = "{\"items\":[{\"group\":\"org.gradle.example\",\"name\":\"gradle-built\",\"version\":\"1.0\"}]}";
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        stub.start();
+        try {
+            Nexus nexus = new Nexus();
+            nexus.setUrl("http://127.0.0.1:" + stub.getAddress().getPort() + "/service/rest/v1/search?sha1={sha1}");
+            nexus.setMaxLookups(1);
+
+            File output = tempDir.resolve("output.cdx.json").toFile();
+            GenerateSbomMojo mojo = createMojo(output);
+            setField(mojo, "mavenArtifactMatchers", List.of(nexus));
+
+            MojoFailureException e = assertThrows(MojoFailureException.class, mojo::execute);
+            assertTrue(e.getMessage().contains("<maxLookups>"));
+        } finally {
+            stub.stop(0);
+        }
+    }
+
+    @Test
+    void remoteMatchersAreSkippedInOfflineMode() throws Exception {
+        createTestJar("WEB-INF/lib/gradle-built-1.0.jar", "non-maven-content");
+        when(project.getArtifacts()).thenReturn(Set.of());
+        when(session.isOffline()).thenReturn(true);
+
+        AtomicInteger requests = new AtomicInteger();
+        HttpServer stub = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        stub.createContext("/service/rest/v1/search", exchange -> {
+            requests.incrementAndGet();
+            String body = "{\"items\":[{\"group\":\"org.gradle.example\",\"name\":\"gradle-built\",\"version\":\"1.0\"}]}";
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        stub.start();
+        try {
+            Nexus nexus = new Nexus();
+            nexus.setUrl("http://127.0.0.1:" + stub.getAddress().getPort() + "/service/rest/v1/search?sha1={sha1}");
+
+            File output = tempDir.resolve("output.cdx.json").toFile();
+            GenerateSbomMojo mojo = createMojo(output);
+            setField(mojo, "mavenArtifactMatchers", List.of(nexus));
+            mojo.execute();
+
+            assertEquals(0, requests.get(), "no remote request may be made in offline mode");
+            Bom bom = BomReader.readBom(output);
+            assertTrue(bom.getComponents().stream().noneMatch(c -> c.getType() == Component.Type.LIBRARY),
+                    "in offline mode a non-Maven jar must stay a generic file component");
+        } finally {
+            stub.stop(0);
+        }
     }
 
     private static Component findByName(Bom bom, String name) {

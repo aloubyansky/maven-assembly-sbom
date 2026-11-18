@@ -31,6 +31,8 @@ import org.eclipse.aether.resolution.ArtifactResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import dev.cyberstamp.maven.assembly.sbom.match.MavenArtifactMatcher;
+
 /**
  * Reusable SBOM generation pipeline that analyzes file entries,
  * identifies Maven artifacts, builds a CycloneDX BOM, and merges
@@ -59,6 +61,7 @@ public class SbomGenerator {
 
     private ProductInfo product;
     private boolean identityEvidence = true;
+    private MavenArtifactMatcher mavenArtifactMatcher;
     private LicenseEnrichment licenseEnrichment;
     private List<org.eclipse.aether.graph.Dependency> cachedManagedDeps;
     private ArchiveAnalyzer lastAnalyzer;
@@ -102,6 +105,16 @@ public class SbomGenerator {
      */
     void setIdentityEvidence(boolean identityEvidence) {
         this.identityEvidence = identityEvidence;
+    }
+
+    /**
+     * Sets the matcher used to identify otherwise-unmatched (e.g.
+     * non-Maven-built) archive entries.
+     *
+     * @param mavenArtifactMatcher the matcher, or {@code null} to disable
+     */
+    void setMavenArtifactMatcher(MavenArtifactMatcher mavenArtifactMatcher) {
+        this.mavenArtifactMatcher = mavenArtifactMatcher;
     }
 
     /**
@@ -175,7 +188,7 @@ public class SbomGenerator {
         lastAnalyzer = new ArchiveAnalyzer(
                 effectiveModelResolver, repoSystem,
                 project, session, messageDigest, failOnDuplicateHash,
-                externalBoms, detectEmbeddedSboms);
+                externalBoms, detectEmbeddedSboms, mavenArtifactMatcher);
         lastAnalyzer.setIdentityEvidence(identityEvidence);
         return lastAnalyzer.analyze(entries, baseDirPrefix);
     }

@@ -15,8 +15,8 @@ import java.io.UncheckedIOException;
  * dependencies.
  * </p>
  */
-record FileEntry(String archivePath, String hash, File sourceFile) {
-    FileEntry(String archivePath, String hash, File sourceFile) {
+public record FileEntry(String archivePath, String hash, File sourceFile) {
+    public FileEntry(String archivePath, String hash, File sourceFile) {
         this.archivePath = archivePath;
         this.hash = hash;
         this.sourceFile = normalizeFile(sourceFile);
@@ -33,7 +33,7 @@ record FileEntry(String archivePath, String hash, File sourceFile) {
         }
     }
 
-    FileEntry(String archivePath, String hash) {
+    public FileEntry(String archivePath, String hash) {
         this(archivePath, hash, null);
     }
 }

@@ -15,6 +15,7 @@ import java.util.List;
 import org.apache.maven.execution.MavenSession;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugin.MojoFailureException;
 import org.apache.maven.plugins.annotations.Component;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
@@ -22,9 +23,16 @@ import org.apache.maven.plugins.annotations.Parameter;
 import org.apache.maven.plugins.annotations.ResolutionScope;
 import org.apache.maven.project.MavenProject;
 import org.apache.maven.project.MavenProjectHelper;
+import org.apache.maven.settings.crypto.SettingsDecrypter;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Hash;
 import org.eclipse.aether.RepositorySystem;
+
+import dev.cyberstamp.maven.assembly.sbom.match.LookupBudgetExceededException;
+import dev.cyberstamp.maven.assembly.sbom.match.MavenArtifactMatcher;
+import dev.cyberstamp.maven.assembly.sbom.match.MavenArtifactMatchers;
+import dev.cyberstamp.maven.assembly.sbom.match.ServerCredentials;
+import dev.cyberstamp.maven.assembly.sbom.match.ServerCredentialsResolver;
 
 /**
  * Scans an exploded directory (e.g., an exploded WAR produced by
@@ -54,6 +62,9 @@ public class GenerateSbomMojo extends AbstractMojo {
 
     @Component
     private MavenProjectHelper projectHelper;
+
+    @Component
+    private SettingsDecrypter settingsDecrypter;
 
     /**
      * The exploded directory to scan for artifact identification
@@ -157,8 +168,17 @@ public class GenerateSbomMojo extends AbstractMojo {
     @Parameter
     private ProductInfo product;
 
+    /**
+     * Matchers that identify archive entries no built-in technique could
+     * match (e.g. jars built with Gradle or Ant) by their SHA-1, tried in the
+     * configured order: {@code <central/>}, {@code <nexus>} and
+     * {@code <artifactory>}. None by default.
+     */
+    @Parameter
+    private List<MavenArtifactMatcherFactory> mavenArtifactMatchers;
+
     @Override
-    public void execute() throws MojoExecutionException {
+    public void execute() throws MojoExecutionException, MojoFailureException {
         if (!inputDirectory.isDirectory()) {
             throw new MojoExecutionException(
                     "Input directory does not exist: " + inputDirectory);
@@ -216,8 +236,14 @@ public class GenerateSbomMojo extends AbstractMojo {
                 librariesOnly, schemaVersion);
         generator.setProduct(product);
         generator.setIdentityEvidence(identityEvidence);
-        Bom bom = generator.generate(entries, null, externalBomList,
-                null, null, project.getPackaging());
+        Bom bom;
+        try (MavenArtifactMatcher matcher = buildMavenArtifactMatcher()) {
+            generator.setMavenArtifactMatcher(matcher);
+            bom = generator.generate(entries, null, externalBomList,
+                    null, null, project.getPackaging());
+        } catch (LookupBudgetExceededException e) {
+            throw new MojoFailureException(e.getMessage(), e);
+        }
 
         if (outputFile.getParentFile() != null) {
             outputFile.getParentFile().mkdirs();
@@ -238,6 +264,34 @@ public class GenerateSbomMojo extends AbstractMojo {
             projectHelper.attachArtifact(project, type, "cyclonedx", outputFile);
             getLog().info("Attached SBOM artifact: type=" + type + ", classifier=cyclonedx");
         }
+    }
+
+    /**
+     * Builds the matcher chain from {@link #mavenArtifactMatchers}, resolving
+     * any {@code settings.xml} server credentials they reference.
+     *
+     * @return the matcher, or {@code null} if no matcher is configured
+     * @throws MojoExecutionException if the configuration is invalid
+     */
+    private MavenArtifactMatcher buildMavenArtifactMatcher() throws MojoExecutionException {
+        try {
+            return MavenArtifactMatchers.create(mavenArtifactMatchers, session.isOffline(), this::resolveCredentials)
+                    .orElse(null);
+        } catch (IllegalArgumentException e) {
+            throw new MojoExecutionException(e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Resolves and decrypts the username/password of a {@code settings.xml}
+     * {@code <server>} entry.
+     *
+     * @param serverId the server id
+     * @return the decrypted credentials, or {@code null} if no matching server
+     *         is found
+     */
+    private ServerCredentials resolveCredentials(String serverId) {
+        return ServerCredentialsResolver.resolve(session, settingsDecrypter, serverId);
     }
 
     private List<FileEntry> collectDirectoryEntries(Path dir, MessageDigest digest) throws IOException {
