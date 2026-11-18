@@ -11,7 +11,9 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Properties;
 import java.util.Set;
 
@@ -96,6 +98,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     private boolean includeBaseDir;
     private String assemblyId;
     private String classifier;
+    private String archiveFormat;
     private boolean doAttach;
     // not thread-safe — safe here because finalizeArchiveCreation is single-threaded
     private MessageDigest messageDigest;
@@ -210,6 +213,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
         }
         resolvedSchemaVersion = SchemaVersions.resolve(schemaVersion);
         AssemblyConfig assemblyConfig = resolveAssemblyConfig(archiver);
+        archiveFormat = resolveArchiveFormat(archiver, assemblyConfig.assembly);
         includeBaseDir = assemblyConfig.assembly == null
                 || assemblyConfig.assembly.isIncludeBaseDirectory();
         assemblyId = assemblyConfig.assembly != null
@@ -634,7 +638,10 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
             boolean hookRegistered = registerPostArchiveHook(
                     archiver, bom, externalBomPath, tempFile);
             if (doAttach && externalBomPath != null && !hookRegistered) {
-                attachSbomArtifact(externalBomPath, resolveAttachType(), classifier);
+                File archiveFile = archiver.getDestFile();
+                if (archiveFile == null || !archiveFile.isDirectory()) {
+                    attachSbomArtifact(externalBomPath, resolveAttachType(), classifier);
+                }
             }
         }
     }
@@ -690,7 +697,13 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                     updateBomWithArchiveHash(archiver, bom, externalBomPath, digest, algorithm);
                 }
                 if (attachInHook && externalBomPath != null) {
-                    attachSbomArtifact(externalBomPath, attachType, attachClassifier);
+                    File archiveFile = archiver.getDestFile();
+                    if (archiveFile != null && archiveFile.isDirectory()) {
+                        log.debug("Archive destination is a directory; skipping SBOM attachment: {}",
+                                archiveFile);
+                    } else {
+                        attachSbomArtifact(externalBomPath, attachType, attachClassifier);
+                    }
                 }
                 if (tempFile != null) {
                     Files.deleteIfExists(tempFile);
@@ -741,10 +754,54 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     }
 
     /**
+     * Resolves the packaging format of the archive being built (e.g. {@code "zip"},
+     * {@code "tar.gz"}).
+     *
+     * <p>
+     * Checks the formats configured on the matching assembly descriptor first,
+     * falling back to heuristics based on the destination file name.
+     * </p>
+     */
+    private static String resolveArchiveFormat(Archiver archiver, Assembly assembly) {
+        File destFile = archiver.getDestFile();
+        if (destFile == null) {
+            return null;
+        }
+        String destName = destFile.getName();
+        if (assembly != null && assembly.getFormats() != null) {
+            List<String> formats = new ArrayList<>(assembly.getFormats());
+            formats.sort(Comparator.comparingInt(String::length).reversed());
+            for (String fmt : formats) {
+                if (destName.toLowerCase(Locale.ROOT).endsWith("." + fmt.toLowerCase(Locale.ROOT))) {
+                    return fmt;
+                }
+            }
+        }
+        String lowerName = destName.toLowerCase(Locale.ROOT);
+        int tarIndex = lowerName.lastIndexOf(".tar.");
+        if (tarIndex > 0) {
+            return destName.substring(tarIndex + 1);
+        }
+        int lastDot = destName.lastIndexOf('.');
+        if (lastDot > 0 && lastDot < destName.length() - 1) {
+            return destName.substring(lastDot + 1);
+        }
+        return null;
+    }
+
+    /**
      * Returns the Maven artifact type for the SBOM attachment.
+     *
+     * <p>
+     * When the archive format is known, it is prefixed to the SBOM type
+     * (e.g. {@code "zip.cdx.json"}, {@code "tar.gz.cdx.json"}) so that
+     * multi-format assemblies produce distinct Maven artifact coordinates
+     * that mirror the distribution archives.
+     * </p>
      */
     private String resolveAttachType() {
-        return "xml".equalsIgnoreCase(format) ? "cdx.xml" : "cdx.json";
+        String sbomType = "xml".equalsIgnoreCase(format) ? "cdx.xml" : "cdx.json";
+        return archiveFormat != null ? archiveFormat + "." + sbomType : sbomType;
     }
 
     /**
@@ -1017,9 +1074,10 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
      * <p>
      * When enabled, the SBOM is registered as an attached artifact
      * with the same groupId, artifactId, classifier, and version as
-     * the distribution archive but with a different type
-     * ({@code cdx.json} or {@code cdx.xml} depending on the
-     * configured {@linkplain #setFormat(String) format}).
+     * the distribution archive but with an artifact type encoding the
+     * archive format and SBOM format (e.g. {@code zip.cdx.json} or
+     * {@code tar.gz.cdx.json}, or {@code zip.cdx.xml} depending on the
+     * archive format and configured {@linkplain #setFormat(String) format}).
      * </p>
      *
      * <p>

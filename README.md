@@ -159,7 +159,7 @@ Options are set inside the `<containerDescriptorHandler>` block in the assembly 
 | `embeddedSboms` | `merge` | How to handle CycloneDX SBOM files (`.cdx.json`, `.cdx.xml`) found inside the archive: `merge` (import components as nested sub-components of the containing artifact), `link` (add an external reference of type `bom` to the containing artifact), or `ignore` |
 | `externalSboms` | _(none)_ | Comma-separated list of file paths to external CycloneDX SBOMs to merge into the distribution SBOM. Relative paths are resolved against the project base directory. External SBOM component hashes also participate in archive entry matching |
 | `librariesOnly` | `false` | When `true`, generic file components are removed from the generated SBOM, keeping only library components (Maven, npm, etc.). Filtering is applied after embedded and external SBOMs have been merged, so files recognized as libraries by those SBOMs are retained |
-| `attach` | `false` | When `true`, the generated SBOM is attached to the Maven project as an artifact. The attached artifact has the same groupId, artifactId, classifier, and version as the distribution archive but a different type (`cdx.json` or `cdx.xml`). Requires `outputMode` to be `external` or `all`. If the Maven Assembly Plugin's own `attach` is `false`, the SBOM is not attached either |
+| `attach` | `false` | When `true`, the generated SBOM is attached to the Maven project as an artifact. The attached artifact has the same groupId, artifactId, classifier, and version as the distribution archive and an artifact type encoding the archive format and SBOM format (e.g. `zip.cdx.json`, `tar.gz.cdx.json`, `zip.cdx.xml`). Requires `outputMode` to be `external` or `all`. If the Maven Assembly Plugin's own `attach` is `false`, the SBOM is not attached either |
 | `schemaVersion` | _(latest)_ | CycloneDX schema version to use for SBOM output and serial-number computation, e.g. `1.5` or `1.6`. Defaults to the latest version supported by the integrated CycloneDX Java library |
 | `product` | _(none)_ | User-configurable metadata for the main BOM component. See [Product](#product) below |
 
@@ -212,7 +212,7 @@ Setting `outputMode` to `all` produces both an embedded and an external BOM.
 
 #### Attaching the SBOM as a Maven Artifact
 
-Setting `attach` to `true` registers the external BOM as an attached Maven project artifact. This means the SBOM is installed to the local repository and deployed to remote repositories alongside the distribution archive. The attached artifact uses type `cdx.json` (or `cdx.xml`) and the same classifier as the distribution archive, so for a distribution attached as `myapp-1.0-dist.zip`, the SBOM is installed as `myapp-1.0-dist.cdx.json`.
+Setting `attach` to `true` registers the external BOM as an attached Maven project artifact. This means the SBOM is installed to the local repository and deployed to remote repositories alongside the distribution archive. The attached artifact uses the same classifier as the distribution archive and an artifact type that encodes both the archive format and the SBOM format (e.g. `zip.cdx.json` or `tar.gz.cdx.json`, or `.cdx.xml` when using XML format). For example, for a distribution attached as `myapp-1.0-dist.zip`, the SBOM is installed as `myapp-1.0-dist.zip.cdx.json`. For multi-format assemblies (e.g. `zip` and `tar.gz`), each format generates and attaches its own SBOM with distinct coordinates, preventing Maven artifact collisions.
 
 ```xml
 <containerDescriptorHandler>

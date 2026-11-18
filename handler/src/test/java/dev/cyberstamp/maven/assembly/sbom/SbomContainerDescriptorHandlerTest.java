@@ -28,9 +28,12 @@ import org.apache.maven.model.Build;
 import org.apache.maven.model.License;
 import org.apache.maven.model.Model;
 import org.apache.maven.model.Plugin;
+import org.apache.maven.model.PluginExecution;
 import org.apache.maven.project.MavenProject;
 import org.apache.maven.project.MavenProjectHelper;
 import org.codehaus.plexus.archiver.ArchiverException;
+import org.codehaus.plexus.archiver.dir.DirectoryArchiver;
+import org.codehaus.plexus.archiver.tar.TarArchiver;
 import org.codehaus.plexus.archiver.zip.ZipArchiver;
 import org.codehaus.plexus.components.io.fileselectors.FileInfo;
 import org.codehaus.plexus.util.xml.Xpp3Dom;
@@ -1799,7 +1802,7 @@ class SbomContainerDescriptorHandlerTest {
         Path bomFile = tempDir.resolve("attach-test.zip.cdx.json");
         assertTrue(Files.exists(bomFile), "external BOM should be written");
         verify(projectHelper).attachArtifact(
-                eq(project), eq("cdx.json"), isNull(), eq(bomFile.toFile()));
+                eq(project), eq("zip.cdx.json"), isNull(), eq(bomFile.toFile()));
     }
 
     @Test
@@ -1818,7 +1821,7 @@ class SbomContainerDescriptorHandlerTest {
         archiver.createArchive();
 
         verify(projectHelper).attachArtifact(
-                eq(project), eq("cdx.xml"), isNull(), any(File.class));
+                eq(project), eq("zip.cdx.xml"), isNull(), any(File.class));
     }
 
     @Test
@@ -1869,6 +1872,111 @@ class SbomContainerDescriptorHandlerTest {
 
         Path bomFile = tempDir.resolve("attach-all.zip.cdx.json");
         assertTrue(Files.exists(bomFile), "external BOM should be written");
+        verify(projectHelper).attachArtifact(
+                eq(project), eq("zip.cdx.json"), isNull(), eq(bomFile.toFile()));
+    }
+
+    @Test
+    void attachMultiFormatEncodesFormatInType() throws Exception {
+        handler.setAttach(true);
+        handler.setOutputMode("external");
+        when(project.getArtifacts()).thenReturn(Set.of());
+        when(project.getBasedir()).thenReturn(tempDir.toFile());
+
+        Path descriptorFile = tempDir.resolve("assembly.xml");
+        Files.writeString(descriptorFile, """
+                <assembly xmlns="http://maven.apache.org/ASSEMBLY/2.2.0">
+                    <id>bin</id>
+                    <formats>
+                        <format>zip</format>
+                        <format>tar.gz</format>
+                    </formats>
+                </assembly>
+                """);
+
+        Plugin assemblyPlugin = new Plugin();
+        assemblyPlugin.setGroupId("org.apache.maven.plugins");
+        assemblyPlugin.setArtifactId("maven-assembly-plugin");
+        PluginExecution exec = new PluginExecution();
+        Xpp3Dom execConfig = new Xpp3Dom("configuration");
+        Xpp3Dom descriptorsNode = new Xpp3Dom("descriptors");
+        Xpp3Dom descNode = new Xpp3Dom("descriptor");
+        descNode.setValue(descriptorFile.toString());
+        descriptorsNode.addChild(descNode);
+        execConfig.addChild(descriptorsNode);
+        exec.setConfiguration(execConfig);
+        assemblyPlugin.addExecution(exec);
+
+        Build build = new Build();
+        build.setFinalName("my-app-1.0");
+        build.setDirectory(tempDir.resolve("target").toString());
+        build.addPlugin(assemblyPlugin);
+        when(project.getBuild()).thenReturn(build);
+
+        Path props = createTestFile("multi-data.txt", "data");
+
+        // First format: tar.gz
+        Path tarPath = tempDir.resolve("my-app-1.0-bin.tar.gz");
+        TarArchiver tarArchiver = new TarArchiver();
+        tarArchiver.setDestFile(tarPath.toFile());
+        tarArchiver.addFile(props.toFile(), "base/data.txt");
+        handler.finalizeArchiveCreation(tarArchiver);
+        tarArchiver.createArchive();
+
+        Path tarBomFile = tempDir.resolve("my-app-1.0-bin.tar.gz.cdx.json");
+        assertTrue(Files.exists(tarBomFile));
+        verify(projectHelper).attachArtifact(
+                eq(project), eq("tar.gz.cdx.json"), eq("bin"), eq(tarBomFile.toFile()));
+
+        // Second format: zip
+        Path zipPath = tempDir.resolve("my-app-1.0-bin.zip");
+        ZipArchiver zipArchiver = new ZipArchiver();
+        zipArchiver.setDestFile(zipPath.toFile());
+        zipArchiver.addFile(props.toFile(), "base/data.txt");
+        handler.finalizeArchiveCreation(zipArchiver);
+        zipArchiver.createArchive();
+
+        Path zipBomFile = tempDir.resolve("my-app-1.0-bin.zip.cdx.json");
+        assertTrue(Files.exists(zipBomFile));
+        verify(projectHelper).attachArtifact(
+                eq(project), eq("zip.cdx.json"), eq("bin"), eq(zipBomFile.toFile()));
+    }
+
+    @Test
+    void attachSkippedForDirectoryDestination() throws Exception {
+        handler.setAttach(true);
+        handler.setOutputMode("external");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        Path dirPath = tempDir.resolve("my-app-1.0-bin.dir");
+        DirectoryArchiver archiver = new DirectoryArchiver();
+        archiver.setDestFile(dirPath.toFile());
+        Path props = createTestFile("dir-data.txt", "data");
+        archiver.addFile(props.toFile(), "base/data.txt");
+        handler.finalizeArchiveCreation(archiver);
+        archiver.createArchive();
+
+        assertTrue(Files.isDirectory(dirPath), "destination should be a directory");
+        verify(projectHelper, never()).attachArtifact(
+                any(), any(String.class), any(), any(File.class));
+    }
+
+    @Test
+    void attachFallbackWhenNoExtension() throws Exception {
+        handler.setAttach(true);
+        handler.setOutputMode("external");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        Path archivePath = tempDir.resolve("my-archive");
+        ZipArchiver archiver = new ZipArchiver();
+        archiver.setDestFile(archivePath.toFile());
+        Path props = createTestFile("no-ext-data.txt", "data");
+        archiver.addFile(props.toFile(), "base/data.txt");
+        handler.finalizeArchiveCreation(archiver);
+        archiver.createArchive();
+
+        Path bomFile = tempDir.resolve("my-archive.cdx.json");
+        assertTrue(Files.exists(bomFile));
         verify(projectHelper).attachArtifact(
                 eq(project), eq("cdx.json"), isNull(), eq(bomFile.toFile()));
     }
