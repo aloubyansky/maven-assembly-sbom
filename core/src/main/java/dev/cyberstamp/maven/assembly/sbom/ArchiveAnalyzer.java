@@ -13,6 +13,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.function.Function;
@@ -36,6 +37,9 @@ import org.eclipse.aether.resolution.ArtifactRequest;
 import org.eclipse.aether.resolution.ArtifactResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import dev.cyberstamp.maven.assembly.sbom.match.MavenArtifactMatcher;
+import dev.cyberstamp.maven.assembly.sbom.match.MavenMatch;
 
 /**
  * Matches archive entries to Maven artifacts by content hash and
@@ -69,6 +73,7 @@ class ArchiveAnalyzer {
     private final Map<ArtifactCoords, MavenProject> reactorModuleIndex;
     private final List<Bom> externalBoms;
     private final boolean detectEmbeddedSboms;
+    private final MavenArtifactMatcher mavenArtifactMatcher;
     private boolean identityEvidence = true;
     private List<Artifact> allArtifacts;
     private ArtifactHashIndex hashIndex;
@@ -129,7 +134,7 @@ class ArchiveAnalyzer {
             MessageDigest messageDigest,
             boolean failOnDuplicateHash) {
         this(effectiveModelResolver, repoSystem, project, session,
-                messageDigest, failOnDuplicateHash, List.of(), true);
+                messageDigest, failOnDuplicateHash, List.of(), true, null);
     }
 
     ArchiveAnalyzer(EffectiveModelResolver effectiveModelResolver,
@@ -140,6 +145,19 @@ class ArchiveAnalyzer {
             boolean failOnDuplicateHash,
             List<Bom> externalBoms,
             boolean detectEmbeddedSboms) {
+        this(effectiveModelResolver, repoSystem, project, session,
+                messageDigest, failOnDuplicateHash, externalBoms, detectEmbeddedSboms, null);
+    }
+
+    ArchiveAnalyzer(EffectiveModelResolver effectiveModelResolver,
+            RepositorySystem repoSystem,
+            MavenProject project,
+            MavenSession session,
+            MessageDigest messageDigest,
+            boolean failOnDuplicateHash,
+            List<Bom> externalBoms,
+            boolean detectEmbeddedSboms,
+            MavenArtifactMatcher mavenArtifactMatcher) {
         this.effectiveModelResolver = effectiveModelResolver;
         this.repoSystem = repoSystem;
         this.project = project;
@@ -149,6 +167,7 @@ class ArchiveAnalyzer {
         this.reactorModuleIndex = indexReactorModules(session.getProjects());
         this.externalBoms = externalBoms;
         this.detectEmbeddedSboms = detectEmbeddedSboms;
+        this.mavenArtifactMatcher = mavenArtifactMatcher;
     }
 
     /**
@@ -230,6 +249,9 @@ class ArchiveAnalyzer {
         }
         if (!unmatchedByPath.isEmpty()) {
             matchAgainstExternalSboms(unmatchedByPath, content);
+        }
+        if (!unmatchedByPath.isEmpty() && mavenArtifactMatcher != null) {
+            matchUnmatchedEntries(unmatchedByPath, content);
         }
         if (detectEmbeddedSboms) {
             Set<String> detectedSbomPaths = new HashSet<>();
@@ -435,6 +457,44 @@ class ArchiveAnalyzer {
             } catch (IOException e) {
                 log.debug("Could not read {} for Maven metadata", fileEntry.sourceFile(), e);
             }
+        }
+    }
+
+    /**
+     * Offers still-unmatched entries (files that no local/offline technique
+     * could identify) to the configured {@link MavenArtifactMatcher}.
+     * Identified entries are removed from {@code unmatchedByPath}, exactly as
+     * {@link #detectMavenMetadataInUnmatchedJars} does for local
+     * {@code pom.properties} hits — this is the last resort, run only once
+     * every free, local technique has had its chance.
+     */
+    private void matchUnmatchedEntries(
+            Map<String, FileEntry> unmatchedByPath,
+            AssemblyComponentsBuilder content) {
+        var it = unmatchedByPath.entrySet().iterator();
+        while (it.hasNext()) {
+            FileEntry fileEntry = it.next().getValue();
+            Optional<MavenMatch> match = mavenArtifactMatcher.match(fileEntry);
+            if (match.isEmpty()) {
+                continue;
+            }
+            ArtifactCoords coords = match.get().coords();
+            content.addMavenEntry(new AssemblyComponentsBuilder.MavenEntry(
+                    coords, fileEntry.archivePath(), fileEntry.hash(), match.get().identification()));
+            List<ArtifactCoords> bundled = content.fileNestedByPath().remove(fileEntry.archivePath());
+            if (bundled != null) {
+                for (ArtifactCoords c : bundled) {
+                    if (c.equals(coords)) {
+                        // the outer artifact was one of the shaded-JAR
+                        // candidates we couldn't pick an owner from; don't
+                        // nest it under itself
+                        continue;
+                    }
+                    content.addNestedEntry(new AssemblyComponentsBuilder.NestedMavenEntry(
+                            coords, c, null, null, false, Identification.pomProperties()));
+                }
+            }
+            it.remove();
         }
     }
 

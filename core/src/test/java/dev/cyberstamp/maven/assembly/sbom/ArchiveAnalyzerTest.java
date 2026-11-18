@@ -5,12 +5,15 @@ import static org.mockito.Mockito.*;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
+import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
@@ -33,6 +36,12 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+
+import com.sun.net.httpserver.HttpServer;
+
+import dev.cyberstamp.maven.assembly.sbom.match.MavenArtifactMatcher;
+import dev.cyberstamp.maven.assembly.sbom.match.MavenArtifactMatchers;
+import dev.cyberstamp.maven.assembly.sbom.match.MavenMatch;
 
 @ExtendWith(MockitoExtension.class)
 class ArchiveAnalyzerTest {
@@ -1202,5 +1211,120 @@ class ArchiveAnalyzerTest {
                 .findFirst().orElseThrow();
         assertEquals(Identification.hashMatch(), extra.identification(),
                 "reclassification must carry the hash match with the moved entry");
+    }
+
+    @Test
+    void unmatchedJarIdentifiedViaRemoteChecksumLookup() throws Exception {
+        Path jar = createTestJar("gradle-built-1.0.jar", "non-maven-content");
+        HttpServer stub = startStubChecksumServer(
+                "{\"items\":[{\"group\":\"org.gradle.example\",\"name\":\"gradle-built\",\"version\":\"1.0\"}]}");
+        try {
+            MavenArtifactMatcher resolver = createResolver(stub, List.of("**/*.jar"), List.of());
+            ArchiveAnalyzer analyzer = createAnalyzerWithRemoteLookup(resolver);
+
+            AssemblyComponents model = analyzer.analyze(List.of(
+                    new FileEntry("lib/gradle-built-1.0.jar",
+                            SbomUtils.computeHash(digest, jar), jar.toFile())),
+                    null);
+
+            List<PackageComponent> packages = extractPackageComponents(model);
+            assertEquals(1, packages.size());
+            ArtifactCoords coords = (ArtifactCoords) packages.get(0).ref();
+            assertEquals(ArtifactCoords.of("org.gradle.example", "gradle-built", "1.0"), coords);
+            assertEquals(Identification.remoteCoordinatesLookup(), packages.get(0).identification());
+            assertEquals(0, extractFileComponents(model).size());
+        } finally {
+            stub.stop(0);
+        }
+    }
+
+    @Test
+    void unmatchedJarExcludedFromRemoteLookupStaysFileComponent() throws Exception {
+        Path jar = createTestJar("excluded-1.0.jar", "non-maven-content-2");
+        HttpServer stub = startStubChecksumServer(
+                "{\"items\":[{\"group\":\"org.gradle.example\",\"name\":\"excluded\",\"version\":\"1.0\"}]}");
+        try {
+            MavenArtifactMatcher resolver = createResolver(
+                    stub, List.of("**/*.jar"), List.of("**/excluded-*.jar"));
+            ArchiveAnalyzer analyzer = createAnalyzerWithRemoteLookup(resolver);
+
+            AssemblyComponents model = analyzer.analyze(List.of(
+                    new FileEntry("lib/excluded-1.0.jar",
+                            SbomUtils.computeHash(digest, jar), jar.toFile())),
+                    null);
+
+            assertEquals(0, extractPackageComponents(model).size());
+            assertEquals(1, extractFileComponents(model).size());
+        } finally {
+            stub.stop(0);
+        }
+    }
+
+    @Test
+    void unmatchedJarIdentifiedByMatcherCarriesTheMatchersIdentification() throws Exception {
+        Path jar = createTestJar("custom-1.0.jar", "matcher-content");
+        Identification custom = new Identification(Technique.OTHER, 0.42);
+        MavenArtifactMatcher matcher = file -> Optional.of(
+                new MavenMatch(ArtifactCoords.of("org.example", "custom", "1.0"), custom));
+
+        AssemblyComponents model = createAnalyzerWithRemoteLookup(matcher).analyze(List.of(
+                new FileEntry("lib/custom-1.0.jar", SbomUtils.computeHash(digest, jar), jar.toFile())), null);
+
+        List<PackageComponent> packages = extractPackageComponents(model);
+        assertEquals(1, packages.size());
+        assertEquals(ArtifactCoords.of("org.example", "custom", "1.0"), packages.get(0).ref());
+        assertEquals(custom, packages.get(0).identification());
+        assertEquals(0, extractFileComponents(model).size());
+    }
+
+    @Test
+    void bundledDepsSurviveWhenOwnerIsIdentifiedViaRemoteLookup() throws Exception {
+        Path shadedJar = createShadedJarWithMultiplePomProperties("ab-cd-1.0.jar",
+                "com.example", "ab", "1.0",
+                "com.other", "cd", "2.0",
+                "ambiguous-content");
+        when(project.getArtifacts()).thenReturn(Set.of());
+        String hash = SbomUtils.computeHash(digest, shadedJar);
+        MavenArtifactMatcher resolver = file -> Optional.of(new MavenMatch(
+                ArtifactCoords.of("org.gradle.example", "resolved", "9.0"), Identification.remoteComponentMatch(1)));
+
+        AssemblyComponents model = createAnalyzerWithRemoteLookup(resolver).analyze(List.of(
+                new FileEntry("lib/ab-cd-1.0.jar", hash, shadedJar.toFile())), null);
+
+        assertEquals(0, extractFileComponents(model).size(),
+                "owner identified remotely, so the jar is a package now, not a file component");
+        List<PackageComponent> packages = extractPackageComponents(model);
+        assertEquals(1, packages.size());
+        assertEquals(ArtifactCoords.of("org.gradle.example", "resolved", "9.0"), packages.get(0).ref());
+        assertTrue(isNestedUnder(model, "ab", "resolved"),
+                "bundled deps discovered before the remote match must nest under the now-known owner");
+        assertTrue(isNestedUnder(model, "cd", "resolved"));
+    }
+
+    private HttpServer startStubChecksumServer(String responseBody) throws IOException {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/service/rest/v1/search", exchange -> {
+            byte[] bytes = responseBody.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        return server;
+    }
+
+    private MavenArtifactMatcher createResolver(HttpServer stub, List<String> includes, List<String> excludes) {
+        Nexus nexus = new Nexus();
+        nexus.setIncludes(includes);
+        nexus.setExcludes(excludes);
+        nexus.setUrl("http://127.0.0.1:" + stub.getAddress().getPort()
+                + "/service/rest/v1/search?sha1={sha1}");
+        return MavenArtifactMatchers.create(List.of(nexus), false, serverId -> null).orElseThrow();
+    }
+
+    private ArchiveAnalyzer createAnalyzerWithRemoteLookup(MavenArtifactMatcher resolver) {
+        return new ArchiveAnalyzer(
+                effectiveModelResolver, repoSystem, project, session, digest,
+                false, List.of(), true, resolver);
     }
 }

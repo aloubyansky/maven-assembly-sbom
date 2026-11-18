@@ -26,6 +26,7 @@ import org.apache.maven.plugins.assembly.model.Assembly;
 import org.apache.maven.plugins.assembly.model.io.xpp3.AssemblyXpp3Reader;
 import org.apache.maven.project.MavenProject;
 import org.apache.maven.project.MavenProjectHelper;
+import org.apache.maven.settings.crypto.SettingsDecrypter;
 import org.codehaus.plexus.archiver.ArchiveEntry;
 import org.codehaus.plexus.archiver.Archiver;
 import org.codehaus.plexus.archiver.ArchiverException;
@@ -41,6 +42,12 @@ import org.cyclonedx.model.Hash;
 import org.eclipse.aether.RepositorySystem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import dev.cyberstamp.maven.assembly.sbom.match.LookupBudgetExceededException;
+import dev.cyberstamp.maven.assembly.sbom.match.MavenArtifactMatcher;
+import dev.cyberstamp.maven.assembly.sbom.match.MavenArtifactMatchers;
+import dev.cyberstamp.maven.assembly.sbom.match.ServerCredentials;
+import dev.cyberstamp.maven.assembly.sbom.match.ServerCredentialsResolver;
 
 /**
  * A Maven Assembly Plugin {@link ContainerDescriptorHandler} that generates a
@@ -74,6 +81,9 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     @Inject
     private MavenProjectHelper projectHelper;
 
+    @Inject
+    private SettingsDecrypter settingsDecrypter;
+
     private String format = "json";
     private String outputPath = "bom.cdx.json";
     private String outputMode = "embedded";
@@ -92,6 +102,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     private boolean librariesOnly;
     private boolean attach;
     private ProductInfo product;
+    private List<MavenArtifactMatcherFactory> mavenArtifactMatchers;
 
     private boolean includeBaseDir;
     private String assemblyId;
@@ -157,8 +168,12 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
                     librariesOnly, schemaVersion);
             generator.setProduct(product);
             generator.setIdentityEvidence(identityEvidence);
-            Bom bom = generator.generate(entries, baseDirPrefix, externalBomList,
-                    assemblyId, classifier, detectArchiveType(archiver));
+            Bom bom;
+            try (MavenArtifactMatcher matcher = buildMavenArtifactMatcher()) {
+                generator.setMavenArtifactMatcher(matcher);
+                bom = generator.generate(entries, baseDirPrefix, externalBomList,
+                        assemblyId, classifier, detectArchiveType(archiver));
+            }
 
             if (log.isDebugEnabled()) {
                 logBomSummary(bom);
@@ -166,6 +181,8 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
             writeBomOutput(bom, baseDirPrefix, archiver);
 
         } catch (LicenseResolutionException e) {
+            throw new ArchiverException(e.getMessage(), e);
+        } catch (LookupBudgetExceededException e) {
             throw new ArchiverException(e.getMessage(), e);
         } catch (ArchiverException e) {
             throw e;
@@ -256,6 +273,34 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
             return false;
         }
         return true;
+    }
+
+    /**
+     * Builds the matcher chain from {@link #mavenArtifactMatchers}, resolving
+     * any {@code settings.xml} server credentials they reference.
+     *
+     * @return the matcher, or {@code null} if no matcher is configured
+     * @throws ArchiverException if the configuration is invalid
+     */
+    private MavenArtifactMatcher buildMavenArtifactMatcher() throws ArchiverException {
+        try {
+            return MavenArtifactMatchers.create(mavenArtifactMatchers, session.isOffline(), this::resolveCredentials)
+                    .orElse(null);
+        } catch (IllegalArgumentException e) {
+            throw new ArchiverException(e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Resolves and decrypts the username/password of a {@code settings.xml}
+     * {@code <server>} entry.
+     *
+     * @param serverId the server id
+     * @return the decrypted credentials, or {@code null} if no matching server
+     *         is found
+     */
+    private ServerCredentials resolveCredentials(String serverId) {
+        return ServerCredentialsResolver.resolve(session, settingsDecrypter, serverId);
     }
 
     /**
@@ -1046,5 +1091,18 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     @SuppressWarnings("unused")
     public void setProduct(ProductInfo product) {
         this.product = product;
+    }
+
+    /**
+     * Sets the matchers that identify archive entries no built-in technique
+     * could match (e.g. jars built with Gradle or Ant) by their SHA-1, tried
+     * in the configured order: {@code <central/>}, {@code <nexus>} and
+     * {@code <artifactory>}. None by default.
+     *
+     * @param mavenArtifactMatchers the matcher configurations
+     */
+    @SuppressWarnings("unused")
+    public void setMavenArtifactMatchers(List<MavenArtifactMatcherFactory> mavenArtifactMatchers) {
+        this.mavenArtifactMatchers = mavenArtifactMatchers;
     }
 }

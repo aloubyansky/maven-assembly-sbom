@@ -162,6 +162,7 @@ Options are set inside the `<containerDescriptorHandler>` block in the assembly 
 | `attach` | `false` | When `true`, the generated SBOM is attached to the Maven project as an artifact. The attached artifact has the same groupId, artifactId, classifier, and version as the distribution archive but a different type (`cdx.json` or `cdx.xml`). Requires `outputMode` to be `external` or `all`. If the Maven Assembly Plugin's own `attach` is `false`, the SBOM is not attached either |
 | `schemaVersion` | _(latest)_ | CycloneDX schema version to use for SBOM output and serial-number computation, e.g. `1.5` or `1.6`. Defaults to the latest version supported by the integrated CycloneDX Java library |
 | `product` | _(none)_ | User-configurable metadata for the main BOM component. See [Product](#product) below |
+| `mavenArtifactMatchers` | _(none)_ | Ordered list of matchers (`<central/>`, `<nexus>`, `<artifactory>`) that identify non-Maven-built jars (Gradle, Ant, ...) by their SHA-1. See [Maven Artifact Matchers](#maven-artifact-matchers) below |
 
 The generator reads `includeBaseDirectory` from the assembly descriptor. When it is `true`, the base directory prefix is stripped from file paths in the BOM.
 
@@ -201,6 +202,92 @@ The `product` element sets additional metadata on the main BOM component that ca
 | `copyright` | Copyright text |
 
 All fields are optional. The same `product` element is available on the [`generate` goal](#generate-goal).
+
+#### Maven Artifact Matchers
+
+Projects that assemble artifacts built with Gradle, Ant, or anything other than Maven have no `pom.properties` or resolvable Maven dependency for those files, so they end up as generic `file` components (`pkg:generic/...`) rather than `library` components (`pkg:maven/...`). `mavenArtifactMatchers` closes that gap: for files that remain unidentified after every other (local, offline) technique, it looks up their SHA-1 content hash against Maven Central and/or an internal Nexus or Artifactory, and promotes a hit to a proper Maven `library` component.
+
+Matchers only ever run as a last resort, after hash matching, unpacked-archive detection, embedded `pom.properties`, and external SBOM matching have all had their chance. None is configured by default, so no artifact checksum ever leaves the build unless you explicitly say where it should go. Remote matchers are skipped with a warning when Maven runs in offline mode (`-o`).
+
+```xml
+<containerDescriptorHandler>
+    <handlerName>sbom</handlerName>
+    <configuration>
+        <mavenArtifactMatchers>
+            <nexus>
+                <url>https://nexus.example.com/service/rest/v1/search?sha1={sha1}&amp;repository=internal</url>
+                <serverId>my-nexus</serverId>
+            </nexus>
+            <central/>
+            <artifactory>
+                <url>https://artifactory.example.com/artifactory/api/search/checksum?sha1={sha1}</url>
+                <serverId>my-artifactory</serverId>
+                <excludes>
+                    <exclude>**/internal-*.jar</exclude>
+                </excludes>
+            </artifactory>
+        </mavenArtifactMatchers>
+    </configuration>
+</containerDescriptorHandler>
+```
+
+Each element enables one matcher: `<central/>` for the public Maven Central search API, `<nexus>` for a Nexus Repository Manager **3** instance, and `<artifactory>` for a JFrog Artifactory instance. Matchers are tried in the order they are listed, stopping at the first match. `<nexus>` and `<artifactory>` may be listed more than once, e.g. for several internal instances; `<central/>` at most once.
+
+| Field | Applies to | Default | Description |
+|---|---|---|---|
+| `url` | all | _(none)_; built-in `search.maven.org` URL for `<central/>` | Complete search URL with a literal `{sha1}` in place of the content hash. Required for `<nexus>` and `<artifactory>`. See [Writing the search URL](#writing-the-search-url) below |
+| `serverId` | `<nexus>`, `<artifactory>` | _(none)_ | Id of a `<server>` in `settings.xml` whose username/password are sent as HTTP Basic auth. Omit for anonymous access |
+| `includes` | all | `*.jar`, `**/*.jar` | Glob patterns (matched against the archive-relative path) selecting which unmatched files this matcher is offered. Note that `**/*.jar` alone does not match JARs at the archive root, hence the separate `*.jar` |
+| `excludes` | all | _(none)_ | Glob patterns excluding otherwise-included files |
+| `timeoutMillis` | all | `3000` | Per-request timeout |
+| `maxLookups` | all | `200` | Hard cap on the number of lookups this matcher performs in a single run. Exceeding it **fails the build** with a clear error. Raise it, or narrow `includes`/`excludes`, if a build legitimately needs more lookups |
+
+Credentials are never written into the POM: `serverId` references a `<server>` entry in `settings.xml` (optionally with an encrypted password, like any other Maven credential), resolved at build time. An invalid configuration, such as a missing `url` or a `url` without `{sha1}`, fails the build. The same `mavenArtifactMatchers` element is available on the [`generate` goal](#generate-goal).
+
+##### How coordinates are determined
+
+A matcher only reports a match when the repository knows a file with exactly the same SHA-1, so it finds files whose bytes were published as-is (typically third-party libraries), not ones rebuilt locally. How the coordinates are read from the answer, and the resulting identity confidence, differs per repository:
+
+- **Nexus** reports the coordinates of the matching asset, including its classifier and extension, from the asset's own recorded metadata (confidence `1.0`). If no asset carries a matching checksum, the first component's group, name and version are used without a classifier (confidence `0.9`, or lower if several components share the hash — see below).
+- **Artifactory** only reports the path of matching files; candidates are tried in order until one follows the standard Maven repository layout (a file name starting with `<artifactId>-<version>`), skipping e.g. results from a `generic` repository. The classifier and extension come from a file name of the form `<artifactId>-<version>[-<classifier>].<extension>`, including timestamped snapshots — best-effort, since it is a local heuristic rather than recorded metadata, so always confidence `0.9`.
+- **Maven Central**'s search API does not say which file of an artifact matched. A classifier is derived from the archive entry's own file name, but only trusted if confirmed by Central's `ec` ("extra content") list of file suffixes published for that version; otherwise the match falls back to the bare group/artifact/version. Always confidence `0.9`.
+
+The confidence value reflects how directly the match is backed by the repository's own data: `1.0` when a repository returns per-file metadata for the exact matching content (a local hash match, or Nexus's asset match); `0.9` as the default for a remote match with no per-file confirmation; and `1/n` when `n` distinct components share the same content hash with no way to prefer one, splitting confidence evenly across them.
+
+##### Writing the search URL
+
+`url` takes the **complete search request**, not just a server address. Write it exactly as you'd call it with `curl`, but with a literal `{sha1}` where the content hash goes. At lookup time, the plugin only substitutes `{sha1}` with the actual hash and calls the URL as-is; it never builds or guesses any part of the request itself. Maven Central has a working default, so its `url` is purely an optional override.
+
+```xml
+<!-- Nexus 3: GET /service/rest/v1/search?sha1=... -->
+<nexus>
+    <url>https://nexus.example.com/service/rest/v1/search?sha1={sha1}</url>
+</nexus>
+
+<!-- Artifactory: GET /api/search/checksum?sha1=... -->
+<artifactory>
+    <url>https://artifactory.example.com/artifactory/api/search/checksum?sha1={sha1}</url>
+</artifactory>
+
+<!-- Maven Central: optional, overrides the built-in search.maven.org default -->
+<central>
+    <url>https://repo.example.com/central-mirror/solrsearch/select?q=1:{sha1}&amp;rows=1&amp;wt=json</url>
+</central>
+```
+
+Official API reference for each backend's own query parameters (e.g. Nexus's `repository` filter, Artifactory's `repos` filter):
+
+- Maven Central: [Central REST API guide](https://central.sonatype.org/search/rest-api-guide/)
+- Nexus Repository 3: [Search API](https://help.sonatype.com/en/search-api.html)
+- JFrog Artifactory: [Checksum Search](https://docs.jfrog.com/artifactory/reference/searchChecksum)
+
+This is deliberate, for two reasons:
+1. **You can add any extra query parameter your server supports**, like Nexus's `repository` filter or Artifactory's `repos` filter, to restrict the search to specific (groups of) repositories. Just append it to the URL yourself:
+   ```xml
+   <url>https://nexus.example.com/service/rest/v1/search?sha1={sha1}&amp;repository=my-repo</url>
+   <url>https://artifactory.example.com/artifactory/api/search/checksum?sha1={sha1}&amp;repos=central,my-internal-repo</url>
+   ```
+2. **It's resilient to future API changes.** If Nexus, Artifactory, or Sonatype ever changes its REST path or parameter names, you only need to update this one setting, not wait for a new release of this plugin. That's also why `<central/>` accepts a `url` despite needing no configuration normally: it lets you point at an internal mirror of the Central search API, or adapt in place if the public one ever changes shape.
 
 ### Output Location
 
@@ -266,6 +353,7 @@ Scans an exploded directory (e.g., an exploded WAR produced by `maven-war-plugin
 | `attach` | `false` | Attach the generated SBOM to the Maven project as an artifact with type `cdx.json` or `cdx.xml` and classifier `cyclonedx` |
 | `schemaVersion` | _(latest)_ | CycloneDX schema version to use for SBOM output and serial-number computation, e.g. `1.5` or `1.6`. Defaults to the latest version supported by the integrated CycloneDX Java library |
 | `product` | _(none)_ | User-configurable metadata for the main BOM component (CPE, description, supplier, manufacturer, publisher, copyright). See [Product](#product) |
+| `mavenArtifactMatchers` | _(none)_ | Ordered list of matchers (`<central/>`, `<nexus>`, `<artifactory>`) that identify non-Maven-built jars (Gradle, Ant, ...) by their SHA-1. See [Maven Artifact Matchers](#maven-artifact-matchers) |
 
 ### `merge` Goal
 
@@ -317,6 +405,7 @@ Every file in the assembly is inspected and classified as either a **library** (
 
 - **Content hash matching** — each archive entry's content hash is computed and looked up against a pre-built index of the project's resolved Maven artifacts. This identifies artifacts reliably regardless of filename (e.g., custom `outputFileNameMapping` in the assembly descriptor).
 - **Deduplication** — if the same artifact appears at multiple locations in the archive, it is represented as a single component with multiple `evidence/occurrence` entries.
+- **Remote Maven coordinates lookup** _(optional)_ — files that no other technique can identify (typically jars built with Gradle, Ant, or another non-Maven tool) can optionally have their Maven coordinates resolved by querying Maven Central, Nexus, or Artifactory with their SHA-1 content hash, turning them into proper `library` components instead of generic `file` components. Off unless matchers are configured; see [Maven Artifact Matchers](#maven-artifact-matchers).
 
 Library components include full [Package URL](https://github.com/package-url/purl-spec) (PURL) identifiers. The default `jar` type is omitted (per the purl spec, `type` is a known but optional Maven qualifier), and any qualifiers are emitted in canonical alphabetical order:
 
@@ -478,6 +567,7 @@ Components this tool identifies also carry a purl `identity` recording how they 
 | Shaded jar whose owner was chosen by matching its filename against the embedded `artifactId`s | `manifest-analysis` | 0.5 |
 | Bundled dependency, coordinates from its own `pom.properties` | `manifest-analysis` | 1.0 |
 | Shaded jar with no resolvable owner: each embedded artifact, nested under the file | `manifest-analysis` | 1.0 |
+| Non-Maven-built jar, matched via [remote Maven coordinates lookup](#maven-artifact-matchers) | `hash-comparison` | 0.9 |
 
 Components that were not identified by this tool get no identity of its making:
 

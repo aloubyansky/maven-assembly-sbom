@@ -21,7 +21,7 @@ import org.slf4j.LoggerFactory;
 /**
  * Shared utilities for the SBOM generation pipeline.
  */
-final class SbomUtils {
+public final class SbomUtils {
 
     private static final Logger log = LoggerFactory.getLogger(SbomUtils.class);
 
@@ -172,7 +172,7 @@ final class SbomUtils {
      * @return the lowercase hex-encoded hash
      * @throws IOException if the file cannot be read
      */
-    static String computeHash(MessageDigest digest, Path path) throws IOException {
+    public static String computeHash(MessageDigest digest, Path path) throws IOException {
         try (InputStream is = Files.newInputStream(path)) {
             return computeHash(digest, is);
         }
@@ -219,7 +219,7 @@ final class SbomUtils {
     /**
      * Extracts the filename from a path (everything after the last '/').
      */
-    static String extractFileName(String path) {
+    public static String extractFileName(String path) {
         int slash = path.lastIndexOf('/');
         return slash >= 0 ? path.substring(slash + 1) : path;
     }
