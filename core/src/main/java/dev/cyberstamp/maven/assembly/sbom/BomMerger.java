@@ -207,14 +207,15 @@ public final class BomMerger {
             normalizePurls(comp);
             // FILE components additionally need their file: bom-ref rewritten.
             prefixFileBomRef(comp, parentPathPrefix);
-            // Every component merged from an embedded SBOM carries occurrence
-            // locations relative to the containing archive; prefix them so they
-            // resolve from the assembly root. Idempotent (already-prefixed
-            // locations are skipped), so it is safe for FILE components (whose
-            // occurrences prefixFileBomRef already prefixed) and on every merge
-            // branch (new, existing-nested, or top-level counterpart).
+            // Every component merged from an embedded SBOM, its sub-components
+            // included, carries occurrence locations relative to the containing
+            // archive; prefix them so they resolve from the assembly root.
+            // Idempotent (already-prefixed locations are skipped), so it is safe
+            // for FILE components (whose occurrences prefixFileBomRef already
+            // prefixed) and on every merge branch (new, existing-nested, or
+            // top-level counterpart).
             if (parentPathPrefix != null) {
-                prefixScopeRelativeOccurrences(comp, parentPathPrefix);
+                prefixScopeRelativeOccurrencesDeep(comp, parentPathPrefix);
             }
             String purl = comp.getPurl();
 
@@ -235,12 +236,12 @@ public final class BomMerger {
             }
 
             nestedComps.add(comp);
-            mergeSubComponentsBySiblingOccurrence(comp, nestedComps, parentPathPrefix);
+            mergeSubComponentsBySiblingOccurrence(comp, nestedComps);
         }
     }
 
     private static void mergeSubComponentsBySiblingOccurrence(
-            Component added, ComponentList parentComps, String parentPathPrefix) {
+            Component added, ComponentList parentComps) {
         if (added.getComponents() == null || added.getComponents().isEmpty()
                 || parentComps.isEmpty()) {
             return;
@@ -258,19 +259,15 @@ public final class BomMerger {
         if (siblingsByOccurrence.isEmpty()) {
             return;
         }
-        String subPrefix = getParentPathPrefix(added);
-        String effectivePrefix = parentPathPrefix != null
-                ? parentPathPrefix + (subPrefix != null ? subPrefix : "")
-                : subPrefix;
+        // An SBOM's occurrences are relative to its root at every depth, and
+        // under an unpacked parent nestComponents has already prefixed them,
+        // so a child's location compares with its siblings' as it is.
         for (Component child : added.getComponents()) {
             String childLoc = firstOccurrenceLocation(child);
             if (childLoc == null) {
                 continue;
             }
-            String prefixedLoc = effectivePrefix != null
-                    ? effectivePrefix + childLoc
-                    : childLoc;
-            Component sibling = siblingsByOccurrence.get(prefixedLoc);
+            Component sibling = siblingsByOccurrence.get(childLoc);
             if (sibling != null) {
                 migrateOccurrences(sibling, child, null);
                 mergeComponentData(child, sibling);
@@ -333,13 +330,25 @@ public final class BomMerger {
     }
 
     /**
+     * Applies {@link #prefixScopeRelativeOccurrences} to a component and all
+     * of its sub-components.
+     */
+    private static void prefixScopeRelativeOccurrencesDeep(Component comp, String parentPathPrefix) {
+        prefixScopeRelativeOccurrences(comp, parentPathPrefix);
+        if (comp.getComponents() != null) {
+            for (Component child : comp.getComponents()) {
+                prefixScopeRelativeOccurrencesDeep(child, parentPathPrefix);
+            }
+        }
+    }
+
+    /**
      * Prefixes a component's own occurrence locations with the parent path
      * prefix, skipping empty locations and any that already start with the
      * prefix (so it is safe to call after occurrences were already prefixed or
      * migrated). Does not recurse into nested components.
      */
-    private static void prefixScopeRelativeOccurrences(Component comp,
-            String parentPathPrefix) {
+    private static void prefixScopeRelativeOccurrences(Component comp, String parentPathPrefix) {
         Evidence evidence = comp.getEvidence();
         if (evidence == null || evidence.getOccurrences() == null) {
             return;

@@ -45,6 +45,11 @@ final class NestedArchiveIndex implements ArchiveIndex {
     }
 
     @Override
+    public boolean containsDirectory(String directory) {
+        return root.containsDirectory(prefix + directory);
+    }
+
+    @Override
     public boolean containsHash(String hash) {
         return findPathByHash(hash) != null;
     }

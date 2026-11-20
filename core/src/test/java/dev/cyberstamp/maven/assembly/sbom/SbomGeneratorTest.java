@@ -1230,4 +1230,272 @@ class SbomGeneratorTest {
         return SbomGenerator.filterSbomByArchive(sbom, index,
                 parentPathPrefix);
     }
+
+    /**
+     * Models the artemis distribution: the console war's own SBOM nests its
+     * WEB-INF/lib jars under a wrapper with an empty occurrence, but the
+     * distribution excluded one of them from the unpacked war.
+     */
+    private static Bom warSbomWithShippedAndExcludedJar(Component shipped, Component excluded) {
+        Component wrapper = createLibrary("console-war", "ref-wrapper");
+        addOccurrence(wrapper, "");
+        wrapper.setComponents(new ArrayList<>(List.of(shipped, excluded)));
+        Bom sbom = new Bom();
+        sbom.setComponents(new ArrayList<>(List.of(wrapper)));
+        Dependency wrapperDep = new Dependency("ref-wrapper");
+        wrapperDep.addDependency(new Dependency(shipped.getBomRef()));
+        wrapperDep.addDependency(new Dependency(excluded.getBomRef()));
+        sbom.addDependency(wrapperDep);
+        sbom.addDependency(new Dependency(shipped.getBomRef()));
+        sbom.addDependency(new Dependency(excluded.getBomRef()));
+        return sbom;
+    }
+
+    @Test
+    void filterRemovesNestedComponentNotInArchive() {
+        Component shipped = createLibrary("jspecify", "ref-shipped");
+        shipped.addHash(new Hash(Hash.Algorithm.SHA_256, "aa11"));
+        addOccurrence(shipped, "WEB-INF/lib/jspecify-1.0.0.jar");
+        Component excluded = createLibrary("caffeine", "ref-excluded");
+        excluded.addHash(new Hash(Hash.Algorithm.SHA_256, "bb22"));
+        addOccurrence(excluded, "WEB-INF/lib/caffeine-3.2.3.jar");
+
+        Bom result = SbomGenerator.filterSbomByArchive(warSbomWithShippedAndExcludedJar(shipped, excluded),
+                buildIndex(Map.of("aa11", List.of("web/console.war/WEB-INF/lib/jspecify-1.0.0.jar"))),
+                "web/console.war/");
+
+        Component wrapper = result.getComponents().get(0);
+        assertEquals(List.of("jspecify"), wrapper.getComponents().stream().map(Component::getName).toList());
+        assertTrue(result.getDependencies().stream().noneMatch(d -> "ref-excluded".equals(d.getRef())),
+                "dependency entry of the dropped component is pruned");
+        Dependency wrapperDep = result.getDependencies().stream()
+                .filter(d -> "ref-wrapper".equals(d.getRef())).findFirst().orElseThrow();
+        assertEquals(List.of("ref-shipped"),
+                wrapperDep.getDependencies().stream().map(Dependency::getRef).toList());
+    }
+
+    @Test
+    void filterCorrectsNestedComponentOccurrenceByHash() {
+        Component moved = createLibrary("jspecify", "ref-moved");
+        moved.addHash(new Hash(Hash.Algorithm.SHA_256, "aa11"));
+        addOccurrence(moved, "WEB-INF/lib/old-name.jar");
+        Component other = createLibrary("other", "ref-other");
+        addOccurrence(other, "WEB-INF/lib/other.jar");
+
+        Bom result = SbomGenerator.filterSbomByArchive(warSbomWithShippedAndExcludedJar(moved, other),
+                buildIndex(Map.of("aa11", List.of("web/console.war/WEB-INF/lib/jspecify-1.0.0.jar"))),
+                "web/console.war/");
+
+        Component kept = result.getComponents().get(0).getComponents().get(0);
+        assertEquals("WEB-INF/lib/jspecify-1.0.0.jar", kept.getEvidence().getOccurrences().get(0).getLocation());
+    }
+
+    @Test
+    void filterKeepsNestedComponentsWithoutOccurrencesOrHashes() {
+        // under an unpacked war, a nested component carrying neither has
+        // nothing to verify and is kept, while its sibling naming a jar the
+        // archive lacks is dropped (proving the nested check ran)
+        Component excluded = createLibrary("excluded", "ref-excluded");
+        excluded.addHash(new Hash(Hash.Algorithm.SHA_256, "dd44"));
+        addOccurrence(excluded, "WEB-INF/lib/excluded.jar");
+        Component war = createLibrary("console", "ref-war");
+        addOccurrence(war, "");
+        war.setComponents(new ArrayList<>(List.of(createLibrary("jcip", "ref-jcip"), excluded)));
+        Bom sbom = new Bom();
+        sbom.setComponents(new ArrayList<>(List.of(war)));
+
+        Bom result = SbomGenerator.filterSbomByArchive(sbom,
+                buildIndex(Map.of("cc33", List.of("web/console.war/WEB-INF/lib/nimbus.jar"))),
+                "web/console.war/");
+
+        assertEquals(List.of("jcip"),
+                result.getComponents().get(0).getComponents().stream().map(Component::getName).toList());
+    }
+
+    /** wrapper ("") > app.war ("app.war/") > inner.jar, as an ear-like SBOM lays out an unpacked war */
+    private static Bom sbomWithUnpackedSubArchive() {
+        Component inner = createLibrary("inner", "ref-inner");
+        inner.addHash(new Hash(Hash.Algorithm.SHA_256, "dd44"));
+        addOccurrence(inner, "app.war/WEB-INF/lib/inner.jar");
+        Component war = createLibrary("app", "ref-app");
+        addOccurrence(war, "app.war/");
+        war.setComponents(new ArrayList<>(List.of(inner)));
+        Component wrapper = createLibrary("wrapper", "ref-wrapper");
+        addOccurrence(wrapper, "");
+        wrapper.setComponents(new ArrayList<>(List.of(war)));
+        Bom sbom = new Bom();
+        sbom.setComponents(new ArrayList<>(List.of(wrapper)));
+        return sbom;
+    }
+
+    @Test
+    void filterKeepsNestedComponentWithDirectoryOccurrenceWhenArchiveHasFilesUnderIt() {
+        Bom result = SbomGenerator.filterSbomByArchive(sbomWithUnpackedSubArchive(),
+                buildIndex(Map.of("dd44", List.of("ear/app.war/WEB-INF/lib/inner.jar"))), "ear/");
+
+        Component war = result.getComponents().get(0).getComponents().get(0);
+        assertEquals("app", war.getName());
+        assertEquals(List.of("inner"), war.getComponents().stream().map(Component::getName).toList());
+    }
+
+    @Test
+    void filterKeepsTopLevelComponentWithDirectoryOccurrenceWhenArchiveHasFilesUnderIt() {
+        Component war = createLibrary("app", "ref-app");
+        addOccurrence(war, "app.war/");
+        Bom sbom = new Bom();
+        sbom.setComponents(new ArrayList<>(List.of(war)));
+
+        Bom result = SbomGenerator.filterSbomByArchive(sbom,
+                buildIndex(Map.of("dd44", List.of("ear/app.war/WEB-INF/lib/inner.jar"))), "ear/");
+
+        assertEquals(1, result.getComponents().size());
+    }
+
+    @Test
+    void filterDropsComponentWithDirectoryOccurrenceWhenArchiveHasNothingUnderIt() {
+        Bom result = SbomGenerator.filterSbomByArchive(sbomWithUnpackedSubArchive(),
+                buildIndex(Map.of("ee55", List.of("ear/other.war/WEB-INF/lib/other.jar"))), "ear/");
+
+        assertTrue(result.getComponents().get(0).getComponents().isEmpty(),
+                "a directory the archive has no files under is not shipped");
+    }
+
+    @Test
+    void filterChecksNestedComponentsOnUnscopedIndex() {
+        // the unscoped path used for configured external SBOMs
+        Component kept = createLibrary("kept", "ref-kept");
+        kept.addHash(new Hash(Hash.Algorithm.SHA_256, "aa11"));
+        addOccurrence(kept, "lib/kept.jar");
+        Component gone = createLibrary("gone", "ref-gone");
+        gone.addHash(new Hash(Hash.Algorithm.SHA_256, "bb22"));
+        addOccurrence(gone, "lib/gone.jar");
+        Component npm = createLibrary("react", "pkg:npm/react@18.0.0");
+        npm.setPurl("pkg:npm/react@18.0.0");
+        addOccurrence(npm, "node_modules/react/index.js");
+        Component file = createLibrary("config.json", "file:config.json");
+        file.setType(Component.Type.FILE);
+        file.addHash(new Hash(Hash.Algorithm.SHA_256, "cc33"));
+        addOccurrence(file, "conf/config.json");
+        Component parent = createLibrary("app", "ref-app");
+        addOccurrence(parent, "lib/");
+        parent.setComponents(new ArrayList<>(List.of(kept, gone, npm, file)));
+        Bom sbom = new Bom();
+        sbom.setComponents(new ArrayList<>(List.of(parent)));
+
+        Bom result = SbomGenerator.filterSbomByArchive(sbom, buildIndex(Map.of(
+                "aa11", List.of("lib/kept.jar"),
+                "cc33", List.of("conf/config.json"))), null);
+
+        assertEquals(List.of("kept", "react", "config.json"),
+                result.getComponents().get(0).getComponents().stream().map(Component::getName).toList());
+    }
+
+    @Test
+    void rejectedExternalComponentIsNotMergedEvenThoughItsHashIsInTheArchive() {
+        Component rejected = createLibrary("h2", "pkg:maven/com.h2database/h2@2.3");
+        rejected.setPurl("pkg:maven/com.h2database/h2@2.3");
+        rejected.addHash(new Hash(Hash.Algorithm.SHA_256, "aa11"));
+        Component kept = createLibrary("react", "pkg:npm/react@18.0.0");
+        kept.setPurl("pkg:npm/react@18.0.0");
+        kept.addHash(new Hash(Hash.Algorithm.SHA_256, "bb22"));
+        Bom external = new Bom();
+        external.setComponents(new ArrayList<>(List.of(rejected, kept)));
+        external.addDependency(new Dependency("pkg:maven/com.h2database/h2@2.3"));
+        external.addDependency(new Dependency("pkg:npm/react@18.0.0"));
+
+        Set<Component> rejectedSet = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        rejectedSet.add(rejected);
+
+        Bom result = SbomGenerator.filterExternalSbom(external,
+                buildIndex(Map.of("aa11", List.of("lib/h2-2.4.jar"), "bb22", List.of("web/react.js"))),
+                rejectedSet, identitySet());
+
+        assertEquals(List.of("react"), result.getComponents().stream().map(Component::getName).toList());
+        assertEquals(List.of("pkg:npm/react@18.0.0"),
+                result.getDependencies().stream().map(Dependency::getRef).toList());
+    }
+
+    @Test
+    void nestedRejectedExternalComponentIsRemovedWithItsDependencyReferences() {
+        // the owner jar is packed, so only the rejection removes its nested h2
+        Component rejected = createLibrary("h2", "pkg:maven/com.h2database/h2@2.3");
+        rejected.setPurl("pkg:maven/com.h2database/h2@2.3");
+        rejected.addHash(new Hash(Hash.Algorithm.SHA_256, "bb22"));
+        Component sibling = createLibrary("jcip", "ref-jcip");
+        Component owner = createLibrary("app", "ref-app");
+        owner.addHash(new Hash(Hash.Algorithm.SHA_256, "aa11"));
+        addOccurrence(owner, "lib/app.jar");
+        owner.setComponents(new ArrayList<>(List.of(rejected, sibling)));
+        Bom external = new Bom();
+        external.setComponents(new ArrayList<>(List.of(owner)));
+        Dependency ownerDeps = new Dependency("ref-app");
+        ownerDeps.addDependency(new Dependency("pkg:maven/com.h2database/h2@2.3"));
+        ownerDeps.addDependency(new Dependency("ref-jcip"));
+        external.addDependency(ownerDeps);
+        external.addDependency(new Dependency("pkg:maven/com.h2database/h2@2.3"));
+
+        Bom result = SbomGenerator.filterExternalSbom(external,
+                buildIndex(Map.of("aa11", List.of("lib/app.jar"), "bb22", List.of("lib/h2-2.4.jar"))),
+                identitySet(rejected), identitySet(owner));
+
+        Component kept = result.getComponents().get(0);
+        assertEquals(List.of("jcip"), kept.getComponents().stream().map(Component::getName).toList());
+        assertEquals(List.of("ref-app"), result.getDependencies().stream().map(Dependency::getRef).toList());
+        assertEquals(List.of("ref-jcip"), result.getDependencies().get(0).getDependencies().stream()
+                .map(Dependency::getRef).toList());
+    }
+
+    @Test
+    void filterKeepsNestedContentsOfPackedJar() {
+        // a fat jar's SBOM describes its internals: BOOT-INF/lib jars and
+        // shaded artifacts listed with their original hash are not files of
+        // the assembly, yet they ship inside it
+        Component bootLib = createLibrary("boot-lib", "ref-boot-lib");
+        bootLib.addHash(new Hash(Hash.Algorithm.SHA_256, "bb22"));
+        addOccurrence(bootLib, "BOOT-INF/lib/boot-lib-1.0.jar");
+        Component shaded = createLibrary("shaded", "ref-shaded");
+        shaded.addHash(new Hash(Hash.Algorithm.SHA_256, "cc33"));
+        Component fat = createLibrary("fat", "ref-fat");
+        fat.addHash(new Hash(Hash.Algorithm.SHA_256, "aa11"));
+        addOccurrence(fat, "lib/fat-1.0.jar");
+        fat.setComponents(new ArrayList<>(List.of(bootLib, shaded)));
+        Bom sbom = new Bom();
+        sbom.setComponents(new ArrayList<>(List.of(fat)));
+
+        Bom result = SbomGenerator.filterSbomByArchive(sbom,
+                buildIndex(Map.of("aa11", List.of("lib/fat-1.0.jar"))), null);
+
+        assertEquals(List.of("boot-lib", "shaded"),
+                result.getComponents().get(0).getComponents().stream().map(Component::getName).toList());
+    }
+
+    private static Set<Component> identitySet(Component... components) {
+        Set<Component> set = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        set.addAll(List.of(components));
+        return set;
+    }
+
+    @Test
+    void matchedDescendantOfRejectedExternalComponentIsKept() {
+        // C's claim was rejected, but its nested D matched another file of the
+        // archive: D must not vanish with C
+        Component d = createLibrary("react", "pkg:npm/react@18.0.0");
+        d.setPurl("pkg:npm/react@18.0.0");
+        d.addHash(new Hash(Hash.Algorithm.SHA_256, "bb22"));
+        addOccurrence(d, "web/react.js");
+        Component bundledOfC = createLibrary("bundled", "ref-bundled");
+        Component c = createLibrary("h2", "pkg:maven/com.h2database/h2@2.3");
+        c.setPurl("pkg:maven/com.h2database/h2@2.3");
+        c.addHash(new Hash(Hash.Algorithm.SHA_256, "aa11"));
+        c.setComponents(new ArrayList<>(List.of(d, bundledOfC)));
+        Bom external = new Bom();
+        external.setComponents(new ArrayList<>(List.of(c)));
+
+        Bom result = SbomGenerator.filterExternalSbom(external,
+                buildIndex(Map.of("aa11", List.of("lib/h2-2.4.jar"), "bb22", List.of("web/react.js"))),
+                identitySet(c), identitySet(d));
+
+        assertEquals(List.of("react"), result.getComponents().stream().map(Component::getName).toList(),
+                "the matched descendant is lifted; the rejected component and its unmatched internals go");
+    }
 }

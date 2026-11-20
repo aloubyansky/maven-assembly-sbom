@@ -1607,4 +1607,88 @@ class BomMergerTest {
         comp.setPurl(bomRef);
         return comp;
     }
+
+    private static List<String> locations(Component c) {
+        return c.getEvidence().getOccurrences().stream().map(Occurrence::getLocation).toList();
+    }
+
+    @Test
+    void mergeUnderPrefixesSubComponentOccurrences() {
+        // An SBOM's occurrences, its sub-components' included, are relative to
+        // that SBOM's archive root; merged under an unpacked archive they must
+        // resolve from the assembly root at every depth. Here the source SBOM
+        // describes an ear-like archive with a war unpacked at "app.war/"
+        // and a jar inside that war.
+        Component ear = createLibrary("org.a", "ear", "1.0", "pkg:maven/org.a/ear@1.0");
+        ear.setEvidence(evidenceWithOccurrence("deploy/app.ear/"));
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", ear);
+
+        Component jar = createLibrary("org.x", "inner", "1.0", "pkg:maven/org.x/inner@1.0");
+        jar.setEvidence(evidenceWithOccurrence("app.war/WEB-INF/lib/inner-1.0.jar"));
+        Component war = createLibrary("org.x", "app", "1.0", "pkg:maven/org.x/app@1.0?type=war");
+        war.setEvidence(evidenceWithOccurrence("app.war/"));
+        war.addComponent(jar);
+        Component wrapper = createLibrary("org.a", "upstream-ear", "1.0", "pkg:maven/org.a/upstream-ear@1.0?type=ear");
+        wrapper.setEvidence(evidenceWithOccurrence(""));
+        wrapper.addComponent(war);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/ear@1.0", buildSourceBom(wrapper));
+
+        assertEquals(List.of("deploy/app.ear/app.war/"), locations(war));
+        assertEquals(List.of("deploy/app.ear/app.war/WEB-INF/lib/inner-1.0.jar"), locations(jar));
+    }
+
+    @Test
+    void mergeUnderSubComponentMatchedToSiblingKeepsSingleOccurrence() {
+        Component sibling = createLibrary("org.x", "codec", "1.0", "pkg:maven/org.x/codec@1.0");
+        sibling.setEvidence(evidenceWithOccurrence("web/console.war/WEB-INF/lib/codec-1.0.jar"));
+        Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0");
+        war.addComponent(sibling);
+        war.setEvidence(evidenceWithOccurrence("web/console.war/"));
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war);
+
+        Component wrapperCodec = createLibrary("org.x", "codec", "1.0", "pkg:maven/org.x/codec@1.0");
+        wrapperCodec.setEvidence(evidenceWithOccurrence("WEB-INF/lib/codec-1.0.jar"));
+        Component wrapper = createLibrary("org.a", "upstream-war", "1.0",
+                "pkg:maven/org.a/upstream-war@1.0?type=war");
+        wrapper.setEvidence(evidenceWithOccurrence(""));
+        wrapper.addComponent(wrapperCodec);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", buildSourceBom(wrapper));
+
+        assertFalse(war.getComponents().contains(sibling), "sibling folded into the wrapper child");
+        assertEquals(List.of("web/console.war/WEB-INF/lib/codec-1.0.jar"), locations(wrapperCodec),
+                "one file, one occurrence");
+    }
+
+    @Test
+    void mergeUnderFoldsSiblingIntoSubComponentChildAtTheSameLocation() {
+        // Archive analysis nested x directly under the unpacked ear; the ear's
+        // SBOM places it inside the unpacked war. All locations are paths of
+        // assembly files: the SBOM's are relative to the ear's root at every
+        // depth, so after prefixing, the war's child sits at the sibling's
+        // location (not at deploy/app.ear/app.war/app.war/...) and the
+        // sibling folds into it.
+        Component sibling = createLibrary("org.x", "x", "1.0", "pkg:maven/org.x/x@1.0");
+        sibling.setEvidence(evidenceWithOccurrence("deploy/app.ear/app.war/WEB-INF/lib/x-1.0.jar"));
+        sibling.addHash(new Hash(Hash.Algorithm.SHA_256, "aa11"));
+        Component ear = createLibrary("org.a", "ear", "1.0", "pkg:maven/org.a/ear@1.0");
+        ear.setEvidence(evidenceWithOccurrence("deploy/app.ear/"));
+        ear.addComponent(sibling);
+        Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", ear);
+
+        Component child = createLibrary("org.x", "x", "1.0", "pkg:maven/org.x/x@1.0");
+        child.setEvidence(evidenceWithOccurrence("app.war/WEB-INF/lib/x-1.0.jar"));
+        Component war = createLibrary("org.a", "app", "1.0", "pkg:maven/org.a/app@1.0?type=war");
+        war.setEvidence(evidenceWithOccurrence("app.war/"));
+        war.addComponent(child);
+
+        BomMerger.mergeUnder(target, "pkg:maven/org.a/ear@1.0", buildSourceBom(war));
+
+        assertEquals(List.of(war), ear.getComponents(), "the file is listed once, under the war");
+        assertEquals(List.of(child), war.getComponents());
+        assertEquals(List.of("deploy/app.ear/app.war/WEB-INF/lib/x-1.0.jar"), locations(child));
+        assertEquals(List.of("aa11"), child.getHashes().stream().map(Hash::getValue).toList(),
+                "the sibling's data moved into the child");
+    }
 }
