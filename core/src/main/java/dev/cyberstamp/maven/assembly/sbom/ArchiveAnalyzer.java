@@ -6,10 +6,12 @@ import java.io.InputStream;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -17,6 +19,7 @@ import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
@@ -30,6 +33,7 @@ import org.apache.maven.project.MavenProject;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Evidence;
+import org.cyclonedx.model.component.evidence.Identity;
 import org.cyclonedx.model.component.evidence.Occurrence;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.graph.Dependency;
@@ -78,16 +82,36 @@ class ArchiveAnalyzer {
     private List<Artifact> allArtifacts;
     private ArtifactHashIndex hashIndex;
     private Map<ArtifactCoords, List<Dependency>> lastNestedDepsByParent;
+    private ClaimedArtifactIndex claimedArtifacts = ClaimedArtifactIndex.empty();
+    private Set<Component> rejectedExternalComponents = Set.of();
+    private Set<Component> matchedExternalComponents = Set.of();
 
     /**
-     * Result of scanning a ZIP file's contents against unmatched
-     * archive entries.
+     * An SBOM read from a ZIP-based artifact.
+     *
+     * @param entryName the SBOM's entry name inside the artifact
+     * @param bom the parsed SBOM
+     */
+    private record NamedSbom(String entryName, Bom bom) {
+    }
+
+    /**
+     * A shared outcome of looking up a jar in the claimed-artifact index and
+     * cross-checking the claim against the jar's own pom.properties.
+     *
+     * @param artifact the claim as it stands after the cross-check
+     * @param descriptors the coordinates the jar's pom.properties declare
+     */
+    private record CheckedClaim(ClaimedArtifactIndex.ClaimedArtifact artifact, List<ArtifactCoords> descriptors) {
+    }
+
+    /**
+     * Result of scanning a ZIP file's contents against unmatched archive entries.
      *
      * @param matchedArchiveEntries archive entries matched by hash
      * @param hashToZipEntryNames content hash to ZIP entry name mapping
      */
-    record ZipScanResult(Set<FileEntry> matchedArchiveEntries,
-            Map<String, List<String>> hashToZipEntryNames) {
+    record ZipScanResult(Set<FileEntry> matchedArchiveEntries, Map<String, List<String>> hashToZipEntryNames) {
 
         /** Returns {@code true} if at least one entry matched. */
         boolean hasMatchedEntries() {
@@ -217,6 +241,29 @@ class ArchiveAnalyzer {
     }
 
     /**
+     * Returns the configured external SBOM components whose Maven claim the
+     * last {@link #analyze} call rejected because the matched jar's own
+     * pom.properties declare another version, and that matched no other
+     * entry. They describe a file the analyzer identified otherwise, so they
+     * must not be merged. Compared by identity.
+     *
+     * @return the rejected components; never {@code null}
+     */
+    Set<Component> rejectedExternalComponents() {
+        return rejectedExternalComponents;
+    }
+
+    /**
+     * Returns the configured external SBOM components the last
+     * {@link #analyze} call matched to archive entries. Compared by identity.
+     *
+     * @return the matched components; never {@code null}
+     */
+    Set<Component> matchedExternalComponents() {
+        return matchedExternalComponents;
+    }
+
+    /**
      * Sets whether the components this analyzer identifies carry their
      * {@link Identification}. When {@code false} none is recorded.
      */
@@ -237,6 +284,12 @@ class ArchiveAnalyzer {
     AssemblyComponents analyze(List<FileEntry> entries, String baseDirPrefix) {
         AssemblyComponentsBuilder content = new AssemblyComponentsBuilder(identityEvidence);
         Set<Artifact> matchedArtifacts = new HashSet<>();
+        Map<File, List<NamedSbom>> embeddedSboms = detectEmbeddedSboms
+                ? collectEmbeddedSboms()
+                : Map.of();
+        claimedArtifacts = buildClaimedArtifactIndex(embeddedSboms);
+        rejectedExternalComponents = Set.of();
+        matchedExternalComponents = Set.of();
         Map<String, FileEntry> unmatchedByPath = new HashMap<>();
 
         classifyArchiveEntries(entries, baseDirPrefix, content, matchedArtifacts, unmatchedByPath);
@@ -245,17 +298,20 @@ class ArchiveAnalyzer {
             reclassifyEntriesUnderUnpackedArtifacts(content);
         }
         if (!unmatchedByPath.isEmpty()) {
-            detectMavenMetadataInUnmatchedJars(unmatchedByPath, content);
+            matchAgainstExternalSboms(unmatchedByPath);
+        }
+        if (!unmatchedByPath.isEmpty() && claimedArtifacts.hasClaims()) {
+            matchAgainstFoundSboms(unmatchedByPath, content);
         }
         if (!unmatchedByPath.isEmpty()) {
-            matchAgainstExternalSboms(unmatchedByPath, content);
+            detectMavenMetadataInUnmatchedJars(unmatchedByPath, content);
         }
         if (!unmatchedByPath.isEmpty() && mavenArtifactMatcher != null) {
             matchUnmatchedEntries(unmatchedByPath, content);
         }
         if (detectEmbeddedSboms) {
             Set<String> detectedSbomPaths = new HashSet<>();
-            detectSbomsInArtifactJars(content, detectedSbomPaths);
+            detectSbomsInArtifactJars(content, detectedSbomPaths, embeddedSboms);
             detectedSbomPaths.forEach(unmatchedByPath::remove);
         }
 
@@ -303,14 +359,11 @@ class ArchiveAnalyzer {
      * Detects artifacts that were unpacked into the assembly.
      * Matched entries are removed from {@code unmatchedByPath}.
      */
-    private void detectUnpackedArtifacts(
-            Set<Artifact> matchedArtifacts,
-            Map<String, FileEntry> unmatchedByPath,
+    private void detectUnpackedArtifacts(Set<Artifact> matchedArtifacts, Map<String, FileEntry> unmatchedByPath,
             AssemblyComponentsBuilder content) {
 
         Path buildDir = Path.of(project.getBuild().getDirectory()).toAbsolutePath().normalize();
-        Map<String, List<FileEntry>> entriesByHash = indexEntriesByHash(
-                unmatchedByPath.values(), buildDir);
+        Map<String, List<FileEntry>> entriesByHash = indexEntriesByHash(unmatchedByPath.values(), buildDir);
 
         for (Artifact artifact : allArtifacts()) {
             if (entriesByHash.isEmpty()) {
@@ -322,8 +375,7 @@ class ArchiveAnalyzer {
             if (artifact.getFile() == null || !artifact.getFile().isFile()) {
                 continue;
             }
-            tryMatchUnpackedArtifact(artifact, entriesByHash,
-                    matchedArtifacts, unmatchedByPath, content);
+            tryMatchUnpackedArtifact(artifact, entriesByHash, matchedArtifacts, unmatchedByPath, content);
         }
     }
 
@@ -400,8 +452,7 @@ class ArchiveAnalyzer {
      * contain a file with the same hash as a project source file.
      * </p>
      */
-    private static Map<String, List<FileEntry>> indexEntriesByHash(
-            Iterable<FileEntry> entries, Path buildDir) {
+    private static Map<String, List<FileEntry>> indexEntriesByHash(Iterable<FileEntry> entries, Path buildDir) {
         Map<String, List<FileEntry>> index = new HashMap<>();
         for (FileEntry e : entries) {
             if (e.hash() != null && !isProjectSourceFile(e, buildDir)) {
@@ -495,6 +546,46 @@ class ArchiveAnalyzer {
                 }
             }
             it.remove();
+        }
+    }
+
+    /**
+     * Identifies still-unmatched top-level entries from the found-SBOM
+     * index, ahead of their pom.properties. Each claim is cross-checked
+     * against the jar's own descriptors; a rejected claim leaves the entry
+     * to the pom.properties step. Descriptors other than the owner are
+     * nested under it as bundled dependencies.
+     */
+    private void matchAgainstFoundSboms(Map<String, FileEntry> unmatchedByPath, AssemblyComponentsBuilder content) {
+        var it = unmatchedByPath.values().iterator();
+        while (it.hasNext()) {
+            FileEntry fileEntry = it.next();
+            Optional<CheckedClaim> checked = checkedClaim(fileEntry.hash(), () -> readTopLevelDescriptors(fileEntry));
+            if (checked.isEmpty()) {
+                continue;
+            }
+            ArtifactCoords coords = checked.get().artifact().coords();
+            content.addMavenEntry(new AssemblyComponentsBuilder.MavenEntry(
+                    coords, fileEntry.archivePath(), fileEntry.hash(), checked.get().artifact().identification()));
+            registerBundled(coords, bundledBesides(checked.get().descriptors(), coords), content);
+            it.remove();
+        }
+    }
+
+    private static List<Properties> readTopLevelDescriptors(FileEntry fileEntry) {
+        if (!hasZipBasedExtension(fileEntry.archivePath())) {
+            return List.of();
+        }
+        if (fileEntry.sourceFile() == null || !fileEntry.sourceFile().isFile()) {
+            log.debug("Cannot read {} to cross-check SBOM claims against its pom.properties;"
+                    + " treating it as having none", fileEntry.archivePath());
+            return List.of();
+        }
+        try (ZipFile zf = new ZipFile(fileEntry.sourceFile())) {
+            return readPomPropertiesFromZip(zf);
+        } catch (IOException e) {
+            log.debug("Could not read {} for Maven metadata", fileEntry.sourceFile(), e);
+            return List.of();
         }
     }
 
@@ -668,13 +759,143 @@ class ArchiveAnalyzer {
             if (nestedArtifact != null) {
                 registerNestedArtifact(nestedArtifact, archiveEntry, parentId, matchedArtifacts, content,
                         Identification.hashMatch());
-                detectBundledDependencies(archiveEntry, parentZip, hashToZipEntryNames,
-                        MavenArtifactCoords.of(nestedArtifact), content);
+                detectBundledDependencies(archiveEntry, parentZip, hashToZipEntryNames, MavenArtifactCoords.of(nestedArtifact),
+                        content);
                 return true;
             }
         }
-        return tryIdentifyFromPomProperties(archiveEntry, parentZip,
-                hashToZipEntryNames, parentId, matchedArtifacts, content);
+        if (identifyNestedFromFoundSbom(archiveEntry, parentZip, hashToZipEntryNames, parentId, matchedArtifacts, content)) {
+            return true;
+        }
+        return tryIdentifyFromPomProperties(archiveEntry, parentZip, hashToZipEntryNames, parentId, matchedArtifacts, content);
+    }
+
+    /**
+     * Identifies a jar nested in an unpacked artifact from the found-SBOM
+     * index, cross-checking the claim against the jar's own pom.properties.
+     *
+     * @return {@code true} if the jar was identified this way
+     */
+    private boolean identifyNestedFromFoundSbom(FileEntry archiveEntry, ZipFile parentZip,
+            Map<String, List<String>> hashToZipEntryNames, ArtifactCoords parentId,
+            Set<Artifact> matchedArtifacts, AssemblyComponentsBuilder content) {
+        Optional<CheckedClaim> checked = checkedClaim(archiveEntry.hash(), () -> {
+            List<String> zipEntryNames = hashToZipEntryNames.get(archiveEntry.hash());
+            return zipEntryNames == null || zipEntryNames.isEmpty()
+                    ? List.of()
+                    : readAllPomProperties(parentZip, zipEntryNames.get(0));
+        });
+        if (checked.isEmpty()) {
+            return false;
+        }
+        Artifact nested = toArtifact(checked.get().artifact().coords());
+        registerNestedArtifact(nested, archiveEntry, parentId, matchedArtifacts, content,
+                checked.get().artifact().identification());
+        ArtifactCoords owner = MavenArtifactCoords.of(nested);
+        registerBundled(owner, bundledBesides(checked.get().descriptors(), owner), content);
+        return true;
+    }
+
+    /**
+     * Looks up a content hash among the artifacts claimed by embedded SBOMs
+     * and cross-checks the claim against the jar's own pom.properties, which
+     * are read only on a hit.
+     *
+     * @return the claim as it stands with the jar's descriptors, or empty if
+     *         there is none or the cross-check rejected it
+     */
+    private Optional<CheckedClaim> checkedClaim(String hash, Supplier<List<Properties>> descriptorReader) {
+        Optional<ClaimedArtifactIndex.ClaimedArtifact> claim = claimedArtifacts.lookup(hash);
+        if (claim.isEmpty()) {
+            return Optional.empty();
+        }
+        List<ArtifactCoords> descriptors = descriptorCoords(descriptorReader.get());
+        return ClaimedArtifactIndex.crossCheck(claim.get(), descriptors)
+                .map(checked -> new CheckedClaim(checked, descriptors));
+    }
+
+    /**
+     * Returns the descriptors other than the owner's own (GAV comparison).
+     * Unlike {@link BundledArtifactScanner#nonOwner}, a lone descriptor is
+     * kept when it is not the owner's: an SBOM-identified jar may shade an
+     * artifact together with its pom.properties while lacking its own.
+     */
+    private static List<ArtifactCoords> bundledBesides(List<ArtifactCoords> descriptors, ArtifactCoords owner) {
+        List<ArtifactCoords> result = new ArrayList<>(descriptors.size());
+        for (ArtifactCoords d : descriptors) {
+            if (!(d.groupId().equals(owner.groupId()) && d.artifactId().equals(owner.artifactId())
+                    && d.version().equals(owner.version()))) {
+                result.add(d);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Returns the coordinates declared by the given pom.properties, skipping
+     * descriptors that lack groupId, artifactId or version.
+     */
+    private static List<ArtifactCoords> descriptorCoords(List<Properties> descriptors) {
+        List<ArtifactCoords> result = new ArrayList<>(descriptors.size());
+        for (Properties props : descriptors) {
+            String gId = props.getProperty("groupId");
+            String aId = props.getProperty("artifactId");
+            String ver = props.getProperty("version");
+            if (gId != null && aId != null && ver != null) {
+                result.add(ArtifactCoords.of(gId, aId, ver));
+            }
+        }
+        return result;
+    }
+
+    private static Artifact toArtifact(ArtifactCoords coords) {
+        return new DefaultArtifact(coords.groupId(), coords.artifactId(), coords.version(),
+                "compile", coords.type(), coords.classifier(),
+                new DefaultArtifactHandler(coords.type()));
+    }
+
+    /**
+     * Reads the SBOMs inside every resolved ZIP-based artifact once, keyed by
+     * artifact file in coordinate order so conflict reports are stable.
+     * Both the claimed-artifact index and the later merge selection
+     * ({@link #detectSbomsInArtifactJars}) use this one collection.
+     */
+    private Map<File, List<NamedSbom>> collectEmbeddedSboms() {
+        List<Artifact> candidates = new ArrayList<>();
+        for (Artifact artifact : allArtifacts()) {
+            File file = artifact.getFile();
+            if (file != null && file.isFile() && hasZipBasedExtension(file.getName())) {
+                candidates.add(artifact);
+            }
+        }
+        candidates.sort(Comparator.comparing(a -> MavenArtifactCoords.of(a).toString()));
+        Map<File, List<NamedSbom>> result = new LinkedHashMap<>();
+        for (Artifact artifact : candidates) {
+            result.computeIfAbsent(artifact.getFile(), ArchiveAnalyzer::parseSbomsInZip);
+        }
+        return result;
+    }
+
+    /**
+     * Builds the claimed-artifact index from the configured external SBOMs and
+     * the collected embedded ones.
+     */
+    private ClaimedArtifactIndex buildClaimedArtifactIndex(Map<File, List<NamedSbom>> embeddedSboms) {
+        Map<File, String> coordsByFile = new HashMap<>();
+        for (Artifact artifact : allArtifacts()) {
+            if (artifact.getFile() != null) {
+                coordsByFile.merge(artifact.getFile(), MavenArtifactCoords.of(artifact).toString(),
+                        (a, b) -> a.compareTo(b) <= 0 ? a : b);
+            }
+        }
+        Map<String, Bom> embeddedBySource = new LinkedHashMap<>();
+        embeddedSboms.forEach((file, sboms) -> {
+            for (NamedSbom sbom : sboms) {
+                embeddedBySource.putIfAbsent(coordsByFile.get(file) + "!/" + sbom.entryName(), sbom.bom());
+            }
+        });
+        return ClaimedArtifactIndex.build(externalBoms, embeddedBySource,
+                SbomUtils.normalizeAlgorithm(messageDigest.getAlgorithm()));
     }
 
     /**
@@ -1014,33 +1235,142 @@ class ArchiveAnalyzer {
      * Maven-identified artifacts take precedence — this method only
      * processes entries that were not matched by the Maven hash index.
      * </p>
+     *
+     * <p>
+     * A {@code pkg:maven} claim is cross-checked against the jar's own
+     * pom.properties ({@link ClaimedArtifactIndex#checkDescriptors}):
+     * </p>
+     * <ul>
+     * <li>a descriptor with the claimed groupId:artifactId but another version
+     * rejects the claim; the entry stays unmatched for the later steps and the
+     * component is reported by {@link #rejectedExternalComponents()};</li>
+     * <li>descriptors other than the owner's that the component does not list
+     * among its nested components are added to them as bundled artifacts;</li>
+     * <li>when {@code identityEvidence} is on, a component or nested entry
+     * whose coordinates a descriptor declares exactly, and that has no purl
+     * identity of its own, gets {@code manifest-analysis} 1.0.</li>
+     * </ul>
      */
-    private void matchAgainstExternalSboms(
-            Map<String, FileEntry> unmatchedByPath,
-            AssemblyComponentsBuilder content) {
-        if (externalBoms.isEmpty()) {
-            return;
-        }
-        Map<String, ExternalComponentRef> externalHashIndex = buildExternalHashIndex();
-        if (externalHashIndex.isEmpty()) {
-            return;
-        }
+    private void matchAgainstExternalSboms(Map<String, FileEntry> unmatchedByPath) {
         // Collect all archive paths per matched component before mutating
         Map<Component, List<String>> matchedPaths = new HashMap<>();
+        Set<Component> confirmed = new HashSet<>();
+        Map<Component, List<ArtifactCoords>> descriptorsByComponent = new HashMap<>();
+        Set<Component> rejected = Collections.newSetFromMap(new IdentityHashMap<>());
         var it = unmatchedByPath.entrySet().iterator();
         while (it.hasNext()) {
             var entry = it.next();
-            ExternalComponentRef ref = externalHashIndex.get(entry.getValue().hash());
-            if (ref != null) {
-                matchedPaths.computeIfAbsent(ref.component(), k -> new ArrayList<>())
-                        .add(entry.getKey());
-                it.remove();
+            Optional<Component> component = claimedArtifacts.configuredComponent(entry.getValue().hash());
+            if (component.isEmpty()) {
+                continue;
             }
+            ArtifactCoords claimed = ClaimedArtifactIndex.mavenCoordsOf(component.get().getPurl());
+            if (claimed != null) {
+                // a Maven claim is cross-checked against the jar's own pom.properties
+                List<ArtifactCoords> descriptors = descriptorCoords(readTopLevelDescriptors(entry.getValue()));
+                ClaimedArtifactIndex.DescriptorCheck check = ClaimedArtifactIndex.checkDescriptors(
+                        claimed, descriptors);
+                if (check == ClaimedArtifactIndex.DescriptorCheck.VERSION_MISMATCH) {
+                    log.warn("External SBOM claims {} for {} but its pom.properties declares another version;"
+                            + " not using the SBOM claim", claimed, entry.getKey());
+                    rejected.add(component.get());
+                    continue;
+                }
+                if (check == ClaimedArtifactIndex.DescriptorCheck.CONFIRMED) {
+                    confirmed.add(component.get());
+                }
+                descriptorsByComponent.computeIfAbsent(component.get(), k -> new ArrayList<>())
+                        .addAll(descriptors);
+            }
+            matchedPaths.computeIfAbsent(component.get(), k -> new ArrayList<>())
+                    .add(entry.getKey());
+            it.remove();
         }
+        // A component accepted for another entry is still merged
+        rejected.removeAll(matchedPaths.keySet());
+        rejectedExternalComponents = rejected;
+        Set<Component> matchedComponents = Collections.newSetFromMap(new IdentityHashMap<>());
+        matchedComponents.addAll(matchedPaths.keySet());
+        matchedExternalComponents = matchedComponents;
         // Replace stale occurrences with the collected archive paths
         for (var matched : matchedPaths.entrySet()) {
             setOccurrences(matched.getKey(), matched.getValue());
         }
+        // Descriptors of artifacts bundled in a claimed jar that its external
+        // component does not list are added as nested components
+        descriptorsByComponent.forEach(ArchiveAnalyzer::addUnlistedBundledDescriptors);
+        // A claim the jar's own pom.properties confirm gets that as this tool's
+        // identity evidence, unless the external SBOM recorded a purl identity;
+        // so do the claim's nested entries (e.g. dependencies bundled in a
+        // shaded jar) whose coordinates one of the jar's descriptors declares exactly
+        if (identityEvidence) {
+            for (Component component : confirmed) {
+                addManifestIdentityIfAbsent(component);
+            }
+            descriptorsByComponent
+                    .forEach((component, descriptors) -> confirmNestedByDescriptors(component.getComponents(), descriptors));
+        }
+    }
+
+    private static void addUnlistedBundledDescriptors(Component component, List<ArtifactCoords> descriptors) {
+        ArtifactCoords owner = ClaimedArtifactIndex.mavenCoordsOf(component.getPurl());
+        Set<String> listed = new HashSet<>();
+        if (component.getComponents() != null) {
+            for (Component child : component.getComponents()) {
+                ArtifactCoords coords = ClaimedArtifactIndex.mavenCoordsOf(child.getPurl());
+                if (coords != null) {
+                    listed.add(coords.toGav());
+                }
+            }
+        }
+        for (ArtifactCoords bundled : bundledBesides(descriptors, owner)) {
+            if (!listed.add(bundled.toGav())) {
+                continue;
+            }
+            Component child = new Component();
+            child.setType(Component.Type.LIBRARY);
+            child.setGroup(bundled.groupId());
+            child.setName(bundled.artifactId());
+            child.setVersion(bundled.version());
+            String purl = bundled.toPurl().toString();
+            child.setPurl(purl);
+            child.setBomRef(purl);
+            component.addComponent(child);
+        }
+    }
+
+    private static void confirmNestedByDescriptors(List<Component> nested, List<ArtifactCoords> descriptors) {
+        if (nested == null || descriptors.isEmpty()) {
+            return;
+        }
+        for (Component child : nested) {
+            ArtifactCoords coords = ClaimedArtifactIndex.mavenCoordsOf(child.getPurl());
+            if (coords != null && ClaimedArtifactIndex.checkDescriptors(coords,
+                    descriptors) == ClaimedArtifactIndex.DescriptorCheck.CONFIRMED) {
+                addManifestIdentityIfAbsent(child);
+            }
+            confirmNestedByDescriptors(child.getComponents(), descriptors);
+        }
+    }
+
+    private static void addManifestIdentityIfAbsent(Component component) {
+        if (hasPurlIdentity(component)) {
+            return;
+        }
+        if (component.getEvidence() == null) {
+            component.setEvidence(new Evidence());
+        }
+        List<Identity> identities = component.getEvidence().getIdentities() == null
+                ? new ArrayList<>()
+                : new ArrayList<>(component.getEvidence().getIdentities());
+        identities.add(BomRenderer.toIdentity(Identification.pomProperties()));
+        component.getEvidence().setIdentities(identities);
+    }
+
+    private static boolean hasPurlIdentity(Component component) {
+        Evidence evidence = component.getEvidence();
+        return evidence != null && evidence.getIdentities() != null
+                && evidence.getIdentities().stream().anyMatch(i -> i.getField() == Identity.Field.PURL);
     }
 
     private static void setOccurrences(Component component, List<String> archivePaths) {
@@ -1059,58 +1389,18 @@ class ArchiveAnalyzer {
     }
 
     /**
-     * A component from an external SBOM paired with its source BOM.
-     */
-    private record ExternalComponentRef(Component component, Bom sourceBom) {
-    }
-
-    /**
-     * Builds a hash-to-component index from all external SBOM components.
+     * Selects, from the embedded SBOMs collected up front, those of artifacts
+     * present in the archive and records them in the content to be merged,
+     * with the artifact as the parent.
      *
      * <p>
-     * Only components that declare content hashes using the configured
-     * hash algorithm are indexed. Components without hashes are skipped.
-     * </p>
-     */
-    private Map<String, ExternalComponentRef> buildExternalHashIndex() {
-        Map<String, ExternalComponentRef> index = new HashMap<>();
-        String normalizedAlg = SbomUtils.normalizeAlgorithm(
-                messageDigest.getAlgorithm());
-        for (Bom bom : externalBoms) {
-            if (bom.getComponents() == null) {
-                continue;
-            }
-            indexComponentTree(bom.getComponents(), bom, normalizedAlg, index);
-        }
-        return index;
-    }
-
-    private static void indexComponentTree(List<Component> components, Bom bom,
-            String normalizedAlg, Map<String, ExternalComponentRef> index) {
-        for (Component comp : components) {
-            String hash = SbomUtils.extractHash(comp, normalizedAlg);
-            if (hash != null) {
-                index.putIfAbsent(hash, new ExternalComponentRef(comp, bom));
-            }
-            if (comp.getComponents() != null) {
-                indexComponentTree(comp.getComponents(), bom,
-                        normalizedAlg, index);
-            }
-        }
-    }
-
-    /**
-     * Scans matched JAR/WAR artifacts for embedded CycloneDX SBOM files.
-     *
-     * <p>
-     * For each Maven artifact that is a ZIP-based archive, scans its
-     * entries for {@code .cdx.json} or {@code .cdx.xml} files. Detected
-     * SBOMs are parsed and recorded in the content, with the artifact
-     * as the parent.
+     * Artifacts are visited in {@link #allArtifacts()} order; when several
+     * artifacts share one file, the first one present in the archive owns its
+     * SBOMs.
      * </p>
      */
     private void detectSbomsInArtifactJars(AssemblyComponentsBuilder content,
-            Set<String> detectedSbomPaths) {
+            Set<String> detectedSbomPaths, Map<File, List<NamedSbom>> embeddedSboms) {
         Map<ArtifactCoords, String> coordsToPath = new HashMap<>();
         for (AssemblyComponentsBuilder.MavenEntry entry : content.mavenEntries()) {
             coordsToPath.put(entry.artifactId(), entry.archivePath());
@@ -1133,19 +1423,32 @@ class ArchiveAnalyzer {
             if (parentArchivePath == null) {
                 parentArchivePath = "";
             }
-            scanJarForSboms(file, coords, content,
+            recordDiscoveredSboms(embeddedSboms.getOrDefault(file, List.of()), coords, content,
                     parentArchivePath, detectedSbomPaths);
         }
     }
 
     /**
-     * Scans a single JAR/WAR file for embedded SBOM entries.
+     * Records an artifact's embedded SBOMs to be merged under it.
      */
-    private static void scanJarForSboms(File jarFile, ArtifactCoords artifactId,
+    private static void recordDiscoveredSboms(List<NamedSbom> sboms, ArtifactCoords artifactId,
             AssemblyComponentsBuilder content, String parentArchivePath,
             Set<String> detectedSbomPaths) {
+        for (NamedSbom sbom : sboms) {
+            content.addDiscoveredSbom(new DiscoveredSbom(sbom.entryName(), sbom.bom(), artifactId));
+            detectedSbomPaths.add(parentArchivePath + sbom.entryName());
+        }
+    }
+
+    /**
+     * Reads the CycloneDX SBOMs inside a ZIP-based file, preferring the JSON
+     * variant when JSON and XML share a stem. Unreadable files and
+     * unparsable SBOMs are skipped.
+     */
+    private static List<NamedSbom> parseSbomsInZip(File zipFile) {
+        List<NamedSbom> result = new ArrayList<>();
         Set<String> processedStems = new HashSet<>();
-        try (ZipFile zf = new ZipFile(jarFile)) {
+        try (ZipFile zf = new ZipFile(zipFile)) {
             List<String> sbomEntryNames = new ArrayList<>();
             Enumeration<? extends ZipEntry> entries = zf.entries();
             while (entries.hasMoreElements()) {
@@ -1163,16 +1466,14 @@ class ArchiveAnalyzer {
                 try (InputStream is = zf.getInputStream(zf.getEntry(entryName))) {
                     Bom parsedBom = BomReader.readBom(is);
                     if (parsedBom != null) {
-                        content.addDiscoveredSbom(new DiscoveredSbom(
-                                entryName, parsedBom, artifactId));
-                        detectedSbomPaths.add(
-                                parentArchivePath + entryName);
+                        result.add(new NamedSbom(entryName, parsedBom));
                     }
                 }
             }
         } catch (IOException e) {
-            log.debug("Could not scan {} for embedded SBOMs", jarFile, e);
+            log.debug("Could not scan {} for embedded SBOMs", zipFile, e);
         }
+        return result;
     }
 
     /**

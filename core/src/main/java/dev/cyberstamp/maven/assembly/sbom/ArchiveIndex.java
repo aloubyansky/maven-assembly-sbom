@@ -53,6 +53,16 @@ interface ArchiveIndex {
     boolean containsPath(String archivePath);
 
     /**
+     * Returns {@code true} if the archive contains at least one file under
+     * the given directory, such as the mount point of an unpacked archive.
+     * On a scoped index, the directory is interpreted relative to the scope.
+     *
+     * @param directory the directory path, ending with {@code '/'}
+     * @return {@code true} if any file lies under the directory
+     */
+    boolean containsDirectory(String directory);
+
+    /**
      * Returns {@code true} if any archive file has the given content
      * hash. On a scoped index, only files under the scope are
      * considered.

@@ -611,4 +611,65 @@ class BomRendererTest {
         assertEquals(1, identities(bom).size());
         assertEquals(0.5, identities(bom).get(0).getConfidence());
     }
+
+    /**
+     * A shaded jar bundles X (no file of its own) and X's real jar also ships
+     * at the top level. The top-level jar's path belongs to the top-level X,
+     * not to the bundled copy, whichever comes first in the model.
+     */
+    @Test
+    void bundledCopyDoesNotTakeTopLevelComponentPath() {
+        AssemblyComponents model = new AssemblyComponents();
+        AssemblyMetadata metadata = new AssemblyMetadata();
+        metadata.setProjectGroupId("org.example");
+        metadata.setProjectArtifactId("my-app");
+        metadata.setProjectVersion("1.0.0");
+        metadata.setHashAlgorithmSpec("SHA-256");
+        model.setMetadata(metadata);
+
+        ArtifactCoords x = ArtifactCoords.of("com.fasterxml.jackson.core", "jackson-core", "2.22.0");
+        PackageComponent bundled = new PackageComponent(x, null, null, List.of(), List.of());
+        model.addComponent(new PackageComponent(ArtifactCoords.of("org.keycloak", "admin-cli", "1.0"),
+                "bin/client/admin-cli-1.0.jar", "aaa", List.of(), List.of(bundled)));
+        model.addComponent(new PackageComponent(x, "lib/jackson-core-2.22.0.jar", "bbb", List.of(), List.of()));
+
+        Bom bom = new BomRenderer().render(model);
+
+        Component topLevel = bom.getComponents().stream()
+                .filter(c -> "jackson-core".equals(c.getName())).findFirst()
+                .orElseThrow(() -> new AssertionError("top-level jackson-core missing"));
+        assertEquals("lib/jackson-core-2.22.0.jar", topLevel.getEvidence().getOccurrences().get(0).getLocation());
+        Component nested = bom.getComponents().stream()
+                .filter(c -> "admin-cli".equals(c.getName())).findFirst().orElseThrow()
+                .getComponents().get(0);
+        assertTrue(nested.getEvidence() == null || nested.getEvidence().getOccurrences() == null
+                || nested.getEvidence().getOccurrences().isEmpty(),
+                "the bundled copy has no file of its own");
+    }
+
+    @Test
+    void topLevelComponentGetsLeafEntryEvenIfBundledCopyHasUnknownDependencies() {
+        AssemblyComponents model = new AssemblyComponents();
+        AssemblyMetadata metadata = new AssemblyMetadata();
+        metadata.setProjectGroupId("org.example");
+        metadata.setProjectArtifactId("my-app");
+        metadata.setProjectVersion("1.0.0");
+        metadata.setHashAlgorithmSpec("SHA-256");
+        model.setMetadata(metadata);
+
+        ArtifactCoords x = ArtifactCoords.of("com.example", "x", "1.0");
+        PackageComponent bundled = new PackageComponent(x, null, null, List.of(), List.of(), false);
+        model.addComponent(new PackageComponent(ArtifactCoords.of("org.example", "shaded", "1.0"),
+                "lib/shaded-1.0.jar", "aaa", List.of(), List.of(bundled)));
+        model.addComponent(new PackageComponent(x, "lib/x-1.0.jar", "bbb", List.of(), List.of()));
+
+        Bom bom = new BomRenderer().render(model);
+
+        List<Dependency> xEntries = bom.getDependencies().stream()
+                .filter(d -> "pkg:maven/com.example/x@1.0".equals(d.getRef()))
+                .toList();
+        assertEquals(1, xEntries.size(), "the top-level x knows its dependencies, so it gets an entry");
+        assertTrue(xEntries.get(0).getDependencies() == null || xEntries.get(0).getDependencies().isEmpty(),
+                "x depends on nothing, so the entry is a leaf");
+    }
 }

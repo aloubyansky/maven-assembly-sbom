@@ -1,5 +1,6 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -18,6 +19,8 @@ import java.util.Set;
 final class RootArchiveIndex implements ArchiveIndex {
 
     private final Set<String> paths;
+    /** Every directory holding at least one file, each ending with '/'; built on first use. */
+    private Set<String> directories;
     private final Map<String, List<String>> hashToPath;
     private final String normalizedAlg;
 
@@ -47,6 +50,20 @@ final class RootArchiveIndex implements ArchiveIndex {
     @Override
     public boolean containsPath(String archivePath) {
         return paths.contains(archivePath);
+    }
+
+    @Override
+    public boolean containsDirectory(String directory) {
+        if (directories == null) {
+            Set<String> dirs = new HashSet<>();
+            for (String path : paths) {
+                for (int i = path.indexOf('/'); i >= 0; i = path.indexOf('/', i + 1)) {
+                    dirs.add(path.substring(0, i + 1));
+                }
+            }
+            directories = dirs;
+        }
+        return directories.contains(directory);
     }
 
     @Override

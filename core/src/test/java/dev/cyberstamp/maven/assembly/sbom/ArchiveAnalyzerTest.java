@@ -12,7 +12,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.jar.JarEntry;
@@ -28,6 +30,8 @@ import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.Hash;
+import org.cyclonedx.model.component.evidence.Identity;
+import org.cyclonedx.model.component.evidence.Method;
 import org.cyclonedx.model.component.evidence.Occurrence;
 import org.eclipse.aether.RepositorySystem;
 import org.junit.jupiter.api.BeforeEach;
@@ -1326,5 +1330,632 @@ class ArchiveAnalyzerTest {
         return new ArchiveAnalyzer(
                 effectiveModelResolver, repoSystem, project, session, digest,
                 false, List.of(), true, resolver);
+    }
+
+    // ---- Found-SBOM identification ----
+
+    private Path createJarWithEntries(String name, Map<String, byte[]> entries) throws Exception {
+        Path jarPath = tempDir.resolve(name);
+        try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(jarPath))) {
+            for (Map.Entry<String, byte[]> e : entries.entrySet()) {
+                jos.putNextEntry(new JarEntry(e.getKey()));
+                jos.write(e.getValue());
+                jos.closeEntry();
+            }
+        }
+        return jarPath;
+    }
+
+    private byte[] sbomJson(String purl, String hash, Method.Technique technique, double confidence)
+            throws Exception {
+        Component c = new Component();
+        c.setType(Component.Type.LIBRARY);
+        c.setName("claimed");
+        c.setPurl(purl);
+        c.setBomRef(purl);
+        c.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+        Method method = new Method();
+        method.setTechnique(technique);
+        method.setConfidence(confidence);
+        Identity identity = new Identity();
+        identity.setField(Identity.Field.PURL);
+        identity.setConfidence(confidence);
+        identity.setMethods(List.of(method));
+        Evidence evidence = new Evidence();
+        evidence.setIdentities(new ArrayList<>(List.of(identity)));
+        c.setEvidence(evidence);
+        Bom bom = new Bom();
+        bom.setComponents(new ArrayList<>(List.of(c)));
+        Path out = Files.createTempFile(tempDir, "sbom", ".cdx.json");
+        BomWriter.writeJson(bom, out, false);
+        return Files.readAllBytes(out);
+    }
+
+    private Path nimbusJar() throws Exception {
+        Path nimbus = tempDir.resolve("nimbus-jose-jwt-10.6.jar");
+        if (Files.exists(nimbus)) {
+            return nimbus;
+        }
+        return createShadedJarWithMultiplePomProperties("nimbus-jose-jwt-10.6.jar",
+                "com.nimbusds", "nimbus-jose-jwt", "10.6",
+                "com.github.stephenc.jcip", "jcip-annotations", "1.0-1",
+                "nimbus-content");
+    }
+
+    /** A resolved console war bundling a shaded nimbus jar and the given SBOM. */
+    private List<FileEntry> setUpConsoleWarWithNimbus(byte[] sbomContent) throws Exception {
+        Path nimbus = nimbusJar();
+        Map<String, byte[]> warEntries = new LinkedHashMap<>();
+        warEntries.put("WEB-INF/lib/nimbus-jose-jwt-10.6.jar", Files.readAllBytes(nimbus));
+        warEntries.put("META-INF/sbom/bom.cdx.json", sbomContent);
+        Path war = createJarWithEntries("console-1.0.war", warEntries);
+        when(project.getArtifacts()).thenReturn(
+                Set.of(createArtifact("org.example", "console", "1.0", "war", war.toFile())));
+        return List.of(new FileEntry("web/console/WEB-INF/lib/nimbus-jose-jwt-10.6.jar",
+                SbomUtils.computeHash(digest, nimbus)));
+    }
+
+    /** The console war whose SBOM claims the nimbus jar's hash as nimbus at the given version. */
+    private List<FileEntry> consoleWarWithNimbusSbom(String claimedVersion) throws Exception {
+        String hash = SbomUtils.computeHash(digest, nimbusJar());
+        return setUpConsoleWarWithNimbus(sbomJson("pkg:maven/com.nimbusds/nimbus-jose-jwt@" + claimedVersion,
+                hash, Method.Technique.HASH_COMPARISON, 1.0));
+    }
+
+    private PackageComponent nestedPackage(AssemblyComponents model, String artifactId) {
+        return extractNestedPackages(model).stream()
+                .filter(p -> p.ref() instanceof ArtifactCoords c && artifactId.equals(c.artifactId()))
+                .findFirst().orElseThrow(() -> new AssertionError("no nested " + artifactId));
+    }
+
+    @Test
+    void foundSbomIdentifiesNestedShadedJarBeforePomProperties() throws Exception {
+        List<FileEntry> entries = consoleWarWithNimbusSbom("10.6");
+
+        AssemblyComponents model = createAnalyzer().analyze(entries, null);
+
+        PackageComponent nimbus = nestedPackage(model, "nimbus-jose-jwt");
+        assertEquals(new Identification(Technique.HASH_COMPARISON, 1.0), nimbus.identification());
+        assertTrue(containsNestedWithArtifactId(nimbus, "jcip-annotations"), "bundled jcip must stay nested under nimbus");
+        assertEquals(Identification.pomProperties(), nestedPackage(model, "jcip-annotations").identification());
+    }
+
+    @Test
+    void foundSbomRejectedOnVersionMismatch() throws Exception {
+        List<FileEntry> entries = consoleWarWithNimbusSbom("10.5");
+
+        AssemblyComponents model = createAnalyzer().analyze(entries, null);
+
+        PackageComponent nimbus = nestedPackage(model, "nimbus-jose-jwt");
+        assertEquals("10.6", ((ArtifactCoords) nimbus.ref()).version());
+        assertEquals(Identification.pomPropertiesFilenameOwner(), nimbus.identification());
+    }
+
+    @Test
+    void unparsableFoundSbomFallsBackToPomProperties() throws Exception {
+        List<FileEntry> entries = setUpConsoleWarWithNimbus("{not json".getBytes(StandardCharsets.UTF_8));
+
+        AssemblyComponents model = createAnalyzer().analyze(entries, null);
+
+        assertEquals(Identification.pomPropertiesFilenameOwner(),
+                nestedPackage(model, "nimbus-jose-jwt").identification());
+    }
+
+    @Test
+    void foundSbomIgnoredWhenEmbeddedSbomsIgnored() throws Exception {
+        List<FileEntry> entries = consoleWarWithNimbusSbom("10.6");
+
+        AssemblyComponents model = new ArchiveAnalyzer(
+                effectiveModelResolver, repoSystem, project, session, digest,
+                false, List.of(), false).analyze(entries, null);
+
+        assertEquals(Identification.pomPropertiesFilenameOwner(),
+                nestedPackage(model, "nimbus-jose-jwt").identification());
+    }
+
+    @Test
+    void sbomIdentifiedNestedJarHonoursIdentityEvidenceOff() throws Exception {
+        List<FileEntry> entries = consoleWarWithNimbusSbom("10.6");
+        ArchiveAnalyzer analyzer = createAnalyzer();
+        analyzer.setIdentityEvidence(false);
+
+        AssemblyComponents model = analyzer.analyze(entries, null);
+
+        PackageComponent nimbus = nestedPackage(model, "nimbus-jose-jwt");
+        assertEquals(ArtifactCoords.of("com.nimbusds", "nimbus-jose-jwt", "10.6"), nimbus.ref());
+        assertNull(nimbus.identification());
+    }
+
+    /** A resolved plain jar carrying an SBOM that claims the given hash as the given purl. */
+    private Artifact carrierWithSbom(String purl, String hash) throws Exception {
+        Map<String, byte[]> entries = new LinkedHashMap<>();
+        entries.put("data.txt", "carrier".getBytes(StandardCharsets.UTF_8));
+        entries.put("META-INF/sbom/bom.cdx.json", sbomJson(purl, hash, Method.Technique.HASH_COMPARISON, 1.0));
+        Path carrier = createJarWithEntries("carrier-1.0.jar", entries);
+        return createArtifact("org.example", "carrier", "1.0", "jar", carrier.toFile());
+    }
+
+    private FileEntry carrierEntry(Artifact carrier) throws Exception {
+        return new FileEntry("lib/carrier-1.0.jar", SbomUtils.computeHash(digest, carrier.getFile().toPath()));
+    }
+
+    private PackageComponent topLevelPackage(AssemblyComponents model, String artifactId) {
+        return extractPackageComponents(model).stream()
+                .filter(p -> p.ref() instanceof ArtifactCoords c && artifactId.equals(c.artifactId()))
+                .findFirst().orElseThrow(() -> new AssertionError("no top-level " + artifactId));
+    }
+
+    private boolean hasTopLevelPackage(AssemblyComponents model, String artifactId) {
+        return extractPackageComponents(model).stream()
+                .anyMatch(p -> p.ref() instanceof ArtifactCoords c && artifactId.equals(c.artifactId()));
+    }
+
+    private static Bom externalBomClaiming(String purl, String hash) {
+        Component c = new Component();
+        c.setType(Component.Type.LIBRARY);
+        c.setName("external");
+        c.setPurl(purl);
+        c.setBomRef(purl);
+        c.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
+        Bom bom = new Bom();
+        bom.setComponents(new ArrayList<>(List.of(c)));
+        return bom;
+    }
+
+    @Test
+    void foundSbomIdentifiesTopLevelShadedJar() throws Exception {
+        Path shaded = createShadedJarWithMultiplePomProperties("lib-z-3.0.jar",
+                "org.example", "lib-z", "3.0",
+                "com.bundled", "shaded-a", "1.5",
+                "shaded-content");
+        String hash = SbomUtils.computeHash(digest, shaded);
+        Artifact carrier = carrierWithSbom("pkg:maven/org.example/lib-z@3.0", hash);
+        when(project.getArtifacts()).thenReturn(Set.of(carrier));
+
+        AssemblyComponents model = createAnalyzer().analyze(List.of(carrierEntry(carrier),
+                new FileEntry("lib/lib-z-3.0.jar", hash, shaded.toFile())), null);
+
+        PackageComponent libZ = topLevelPackage(model, "lib-z");
+        assertEquals(new Identification(Technique.HASH_COMPARISON, 1.0), libZ.identification());
+        assertTrue(containsNestedWithArtifactId(libZ, "shaded-a"));
+        assertEquals(Identification.pomProperties(), nestedPackage(model, "shaded-a").identification());
+    }
+
+    @Test
+    void foundSbomHashClaimForJarWithoutOwnDescriptorKeepsConfidence() throws Exception {
+        Path fat = createJarWithPomProperties("fat-2.0.jar", "com.bundled", "shaded-x", "1.1", "fat-content");
+        String hash = SbomUtils.computeHash(digest, fat);
+        Artifact carrier = carrierWithSbom("pkg:maven/org.example/fat@2.0", hash);
+        when(project.getArtifacts()).thenReturn(Set.of(carrier));
+
+        AssemblyComponents model = createAnalyzer().analyze(List.of(carrierEntry(carrier),
+                new FileEntry("lib/fat-2.0.jar", hash, fat.toFile())), null);
+
+        PackageComponent fatPkg = topLevelPackage(model, "fat");
+        assertEquals(ArtifactCoords.of("org.example", "fat", "2.0"), fatPkg.ref());
+        assertEquals(new Identification(Technique.HASH_COMPARISON, 1.0), fatPkg.identification());
+        assertTrue(containsNestedWithArtifactId(fatPkg, "shaded-x"));
+        assertEquals(Identification.pomProperties(), nestedPackage(model, "shaded-x").identification());
+    }
+
+    @Test
+    void externalSbomClaimsEntryBeforePomProperties() throws Exception {
+        Path jar = createJarWithPomProperties("h2-2.4.jar", "com.h2database", "h2", "2.4", "h2-content");
+        String hash = SbomUtils.computeHash(digest, jar);
+        when(project.getArtifacts()).thenReturn(Set.of());
+        Bom external = externalBomClaiming("pkg:maven/com.h2database/h2@2.4", hash);
+
+        AssemblyComponents model = new ArchiveAnalyzer(
+                effectiveModelResolver, repoSystem, project, session, digest,
+                false, List.of(external), true).analyze(
+                        List.of(new FileEntry("lib/h2-2.4.jar", hash, jar.toFile())), null);
+
+        assertFalse(hasTopLevelPackage(model, "h2"), "the external SBOM, not pom.properties, identifies it");
+        List<Occurrence> occs = external.getComponents().get(0).getEvidence().getOccurrences();
+        assertEquals("lib/h2-2.4.jar", occs.get(0).getLocation());
+    }
+
+    @Test
+    void externalSbomWinsOverFoundSbom() throws Exception {
+        Path jar = createJarWithPomProperties("h2-2.4.jar", "com.h2database", "h2", "2.4", "h2-content");
+        String hash = SbomUtils.computeHash(digest, jar);
+        Artifact carrier = carrierWithSbom("pkg:maven/com.h2database/h2@2.4", hash);
+        when(project.getArtifacts()).thenReturn(Set.of(carrier));
+        Bom external = externalBomClaiming("pkg:maven/com.h2database/h2@2.4", hash);
+
+        AssemblyComponents model = new ArchiveAnalyzer(
+                effectiveModelResolver, repoSystem, project, session, digest,
+                false, List.of(external), true).analyze(
+                        List.of(carrierEntry(carrier),
+                                new FileEntry("lib/h2-2.4.jar", hash, jar.toFile())),
+                        null);
+
+        assertFalse(hasTopLevelPackage(model, "h2"), "the external SBOM claims the entry first");
+        assertEquals("lib/h2-2.4.jar",
+                external.getComponents().get(0).getEvidence().getOccurrences().get(0).getLocation());
+    }
+
+    @Test
+    void mavenHashMatchWinsOverFoundSbom() throws Exception {
+        Path jar = createTestJar("lib-a-1.0.jar", "content-a");
+        String hash = SbomUtils.computeHash(digest, jar);
+        Artifact libA = createArtifact("org.example", "lib-a", "1.0", "jar", jar.toFile());
+        Artifact carrier = carrierWithSbom("pkg:maven/other/other@9", hash);
+        when(project.getArtifacts()).thenReturn(Set.of(libA, carrier));
+
+        AssemblyComponents model = createAnalyzer().analyze(List.of(carrierEntry(carrier),
+                new FileEntry("lib/lib-a-1.0.jar", hash)), null);
+
+        assertEquals(Identification.hashMatch(), topLevelPackage(model, "lib-a").identification());
+        assertFalse(hasTopLevelPackage(model, "other"));
+    }
+
+    @Test
+    void foundSbomNestedOwnerWithoutOwnDescriptorKeepsBundled() throws Exception {
+        Path fat = createJarWithPomProperties("fat-2.0.jar", "com.bundled", "shaded-x", "1.1", "fat-content");
+        String hash = SbomUtils.computeHash(digest, fat);
+        Map<String, byte[]> warEntries = new LinkedHashMap<>();
+        warEntries.put("WEB-INF/lib/fat-2.0.jar", Files.readAllBytes(fat));
+        warEntries.put("META-INF/sbom/bom.cdx.json",
+                sbomJson("pkg:maven/org.example/fat@2.0", hash, Method.Technique.HASH_COMPARISON, 1.0));
+        Path war = createJarWithEntries("console-1.0.war", warEntries);
+        when(project.getArtifacts()).thenReturn(
+                Set.of(createArtifact("org.example", "console", "1.0", "war", war.toFile())));
+
+        AssemblyComponents model = createAnalyzer().analyze(
+                List.of(new FileEntry("web/console/WEB-INF/lib/fat-2.0.jar", hash)), null);
+
+        PackageComponent fatPkg = nestedPackage(model, "fat");
+        assertEquals(new Identification(Technique.HASH_COMPARISON, 1.0), fatPkg.identification());
+        assertTrue(containsNestedWithArtifactId(fatPkg, "shaded-x"),
+                "the jar's only descriptor is a bundled artifact, not the owner");
+    }
+
+    // ---- merge selection and configured-SBOM scope ----
+
+    /** A resolved jar holding an SBOM, so merge selection has something to pick. */
+    private Artifact jarWithSbom(String fileName, String groupId, String artifactId) throws Exception {
+        Map<String, byte[]> entries = new LinkedHashMap<>();
+        entries.put("data.txt", fileName.getBytes(StandardCharsets.UTF_8));
+        entries.put("META-INF/sbom/bom.cdx.json",
+                sbomJson("pkg:npm/x@1.0", "00", Method.Technique.HASH_COMPARISON, 1.0));
+        Path jar = createJarWithEntries(fileName, entries);
+        return createArtifact(groupId, artifactId, "1.0", "jar", jar.toFile());
+    }
+
+    @Test
+    void embeddedSbomOfUnshippedArtifactIsNotMerged() throws Exception {
+        Artifact shipped = jarWithSbom("shipped-1.0.jar", "org.example", "shipped");
+        Artifact unshipped = jarWithSbom("unshipped-1.0.jar", "org.example", "unshipped");
+        when(project.getArtifacts()).thenReturn(new java.util.LinkedHashSet<>(List.of(shipped, unshipped)));
+
+        AssemblyComponents model = createAnalyzer().analyze(List.of(new FileEntry("lib/shipped-1.0.jar",
+                SbomUtils.computeHash(digest, shipped.getFile().toPath()))), null);
+
+        assertEquals(List.of(ArtifactCoords.of("org.example", "shipped", "1.0")),
+                model.discoveredSboms().stream().map(DiscoveredSbom::owner).toList());
+    }
+
+    @Test
+    void embeddedSbomOfSharedFileOwnedByFirstArtifact() throws Exception {
+        Artifact first = jarWithSbom("shared-1.0.jar", "org.example", "first");
+        Artifact second = createArtifact("org.example", "second", "1.0", "jar", first.getFile());
+        when(project.getArtifacts()).thenReturn(new java.util.LinkedHashSet<>(List.of(first, second)));
+
+        AssemblyComponents model = createAnalyzer().analyze(List.of(new FileEntry("lib/shared-1.0.jar",
+                SbomUtils.computeHash(digest, first.getFile().toPath()))), null);
+
+        assertEquals(List.of(ArtifactCoords.of("org.example", "first", "1.0")),
+                model.discoveredSboms().stream().map(DiscoveredSbom::owner).toList(),
+                "one file's SBOMs are recorded once, under the first artifact");
+    }
+
+    @Test
+    void configuredExternalSbomNotConsultedForJarNestedInUnpackedArtifact() throws Exception {
+        Path h2 = createJarWithPomProperties("h2-2.4.jar", "com.h2database", "h2", "2.4", "h2-content");
+        String hash = SbomUtils.computeHash(digest, h2);
+        Path war = createJarWithEntries("app-1.0.war", Map.of("WEB-INF/lib/h2-2.4.jar", Files.readAllBytes(h2)));
+        when(project.getArtifacts()).thenReturn(
+                Set.of(createArtifact("org.example", "app", "1.0", "war", war.toFile())));
+        Bom external = externalBomClaiming("pkg:maven/com.example/other@1.0", hash);
+
+        AssemblyComponents model = new ArchiveAnalyzer(
+                effectiveModelResolver, repoSystem, project, session, digest,
+                false, List.of(external), true).analyze(
+                        List.of(new FileEntry("web/app/WEB-INF/lib/h2-2.4.jar", hash)), null);
+
+        assertEquals(Identification.pomProperties(), nestedPackage(model, "h2").identification());
+        assertNull(external.getComponents().get(0).getEvidence(),
+                "the external component did not claim the nested jar");
+    }
+
+    // ---- configured external Maven claims cross-checked with pom.properties ----
+
+    private record H2Jar(Path jar, String hash, FileEntry entry) {
+    }
+
+    private H2Jar h2Jar() throws Exception {
+        Path jar = createJarWithPomProperties("h2-2.4.jar", "com.h2database", "h2", "2.4", "h2-content");
+        String hash = SbomUtils.computeHash(digest, jar);
+        return new H2Jar(jar, hash, new FileEntry("lib/h2-2.4.jar", hash, jar.toFile()));
+    }
+
+    private AssemblyComponents analyzeWithExternal(Bom external, FileEntry entry, boolean identityEvidence) {
+        when(project.getArtifacts()).thenReturn(Set.of());
+        ArchiveAnalyzer analyzer = new ArchiveAnalyzer(effectiveModelResolver, repoSystem, project, session,
+                digest, false, List.of(external), true);
+        analyzer.setIdentityEvidence(identityEvidence);
+        return analyzer.analyze(List.of(entry), null);
+    }
+
+    private static List<Identity> identities(Component c) {
+        return c.getEvidence() == null || c.getEvidence().getIdentities() == null
+                ? List.of()
+                : c.getEvidence().getIdentities();
+    }
+
+    @Test
+    void externalMavenClaimConfirmedByPomPropertiesGainsManifestIdentity() throws Exception {
+        H2Jar h2 = h2Jar();
+        Bom external = externalBomClaiming("pkg:maven/com.h2database/h2@2.4", h2.hash());
+
+        analyzeWithExternal(external, h2.entry(), true);
+
+        Component c = external.getComponents().get(0);
+        assertEquals(1, identities(c).size());
+        Identity id = identities(c).get(0);
+        assertEquals(Identity.Field.PURL, id.getField());
+        assertEquals(1.0, id.getConfidence());
+        assertEquals(Method.Technique.MANIFEST_ANALYSIS, id.getMethods().get(0).getTechnique());
+        assertEquals("lib/h2-2.4.jar", c.getEvidence().getOccurrences().get(0).getLocation());
+    }
+
+    @Test
+    void externalMavenClaimKeepsItsOwnIdentity() throws Exception {
+        H2Jar h2 = h2Jar();
+        Bom external = externalBomClaiming("pkg:maven/com.h2database/h2@2.4", h2.hash());
+        Method method = new Method();
+        method.setTechnique(Method.Technique.HASH_COMPARISON);
+        method.setConfidence(0.9);
+        Identity own = new Identity();
+        own.setField(Identity.Field.PURL);
+        own.setConfidence(0.9);
+        own.setMethods(List.of(method));
+        Evidence evidence = new Evidence();
+        evidence.setIdentities(new ArrayList<>(List.of(own)));
+        external.getComponents().get(0).setEvidence(evidence);
+
+        analyzeWithExternal(external, h2.entry(), true);
+
+        assertEquals(List.of(own), identities(external.getComponents().get(0)));
+    }
+
+    @Test
+    void externalMavenClaimRejectedOnVersionMismatch() throws Exception {
+        H2Jar h2 = h2Jar();
+        Bom external = externalBomClaiming("pkg:maven/com.h2database/h2@2.3", h2.hash());
+
+        AssemblyComponents model = analyzeWithExternal(external, h2.entry(), true);
+
+        PackageComponent pkg = topLevelPackage(model, "h2");
+        assertEquals(ArtifactCoords.of("com.h2database", "h2", "2.4"), pkg.ref());
+        assertEquals(Identification.pomProperties(), pkg.identification());
+        assertNull(external.getComponents().get(0).getEvidence(), "the contradicted claim is not used");
+    }
+
+    @Test
+    void externalMavenClaimWithoutOwnDescriptorGainsNoIdentity() throws Exception {
+        Path fat = createJarWithPomProperties("fat-2.0.jar", "com.bundled", "shaded-x", "1.1", "fat-content");
+        String hash = SbomUtils.computeHash(digest, fat);
+        Bom external = externalBomClaiming("pkg:maven/org.example/fat@2.0", hash);
+
+        AssemblyComponents model = analyzeWithExternal(external,
+                new FileEntry("lib/fat-2.0.jar", hash, fat.toFile()), true);
+
+        assertFalse(hasTopLevelPackage(model, "fat"));
+        assertTrue(identities(external.getComponents().get(0)).isEmpty(), "nothing in the jar confirms it");
+        assertEquals("lib/fat-2.0.jar",
+                external.getComponents().get(0).getEvidence().getOccurrences().get(0).getLocation());
+    }
+
+    @Test
+    void externalNonMavenClaimGainsNoIdentity() throws Exception {
+        H2Jar h2 = h2Jar();
+        Bom external = externalBomClaiming("pkg:npm/h2@2.4", h2.hash());
+
+        analyzeWithExternal(external, h2.entry(), true);
+
+        assertTrue(identities(external.getComponents().get(0)).isEmpty());
+    }
+
+    @Test
+    void externalMavenClaimGainsNoIdentityWhenIdentityEvidenceOff() throws Exception {
+        H2Jar h2 = h2Jar();
+        Bom external = externalBomClaiming("pkg:maven/com.h2database/h2@2.4", h2.hash());
+
+        analyzeWithExternal(external, h2.entry(), false);
+
+        assertTrue(identities(external.getComponents().get(0)).isEmpty());
+    }
+
+    private static Component bundledEntry(String purl) {
+        Component c = new Component();
+        c.setType(Component.Type.LIBRARY);
+        c.setName("bundled");
+        c.setPurl(purl);
+        c.setBomRef(purl + "#bundled");
+        return c;
+    }
+
+    @Test
+    void externalClaimNestedEntriesConfirmedByBundledDescriptorsGainManifestIdentity() throws Exception {
+        Path shaded = createShadedJarWithMultiplePomProperties("lib-z-3.0.jar",
+                "org.example", "lib-z", "3.0",
+                "com.bundled", "shaded-a", "1.5",
+                "shaded-content");
+        String hash = SbomUtils.computeHash(digest, shaded);
+        Bom external = externalBomClaiming("pkg:maven/org.example/lib-z@3.0?type=jar", hash);
+        Component confirmed = bundledEntry("pkg:maven/com.bundled/shaded-a@1.5?type=jar");
+        Component unconfirmed = bundledEntry("pkg:maven/com.bundled/other@1.0?type=jar");
+        external.getComponents().get(0).setComponents(new ArrayList<>(List.of(confirmed, unconfirmed)));
+
+        analyzeWithExternal(external, new FileEntry("lib/lib-z-3.0.jar", hash, shaded.toFile()), true);
+
+        assertEquals(1, identities(external.getComponents().get(0)).size(), "the owner is confirmed");
+        assertEquals(Method.Technique.MANIFEST_ANALYSIS,
+                identities(confirmed).get(0).getMethods().get(0).getTechnique());
+        assertTrue(identities(unconfirmed).isEmpty(), "no descriptor in the jar declares it");
+    }
+
+    @Test
+    void externalClaimNestedEntryConfirmedEvenWhenOwnerDescriptorMissing() throws Exception {
+        Path fat = createJarWithPomProperties("fat-2.0.jar", "com.bundled", "shaded-x", "1.1", "fat-content");
+        String hash = SbomUtils.computeHash(digest, fat);
+        Bom external = externalBomClaiming("pkg:maven/org.example/fat@2.0", hash);
+        Component bundled = bundledEntry("pkg:maven/com.bundled/shaded-x@1.1");
+        external.getComponents().get(0).setComponents(new ArrayList<>(List.of(bundled)));
+
+        analyzeWithExternal(external, new FileEntry("lib/fat-2.0.jar", hash, fat.toFile()), true);
+
+        assertTrue(identities(external.getComponents().get(0)).isEmpty(), "nothing in the jar confirms the owner");
+        assertEquals(1, identities(bundled).size(), "its own descriptor confirms the bundled entry");
+    }
+
+    @Test
+    void externalClaimNestedEntriesGainNoIdentityWhenIdentityEvidenceOff() throws Exception {
+        Path shaded = createShadedJarWithMultiplePomProperties("lib-z-3.0.jar",
+                "org.example", "lib-z", "3.0",
+                "com.bundled", "shaded-a", "1.5",
+                "shaded-content");
+        String hash = SbomUtils.computeHash(digest, shaded);
+        Bom external = externalBomClaiming("pkg:maven/org.example/lib-z@3.0", hash);
+        Component bundled = bundledEntry("pkg:maven/com.bundled/shaded-a@1.5");
+        external.getComponents().get(0).setComponents(new ArrayList<>(List.of(bundled)));
+
+        analyzeWithExternal(external, new FileEntry("lib/lib-z-3.0.jar", hash, shaded.toFile()), false);
+
+        assertTrue(identities(bundled).isEmpty());
+    }
+
+    @Test
+    void rejectedExternalMavenClaimIsReportedForRemoval() throws Exception {
+        H2Jar h2 = h2Jar();
+        Bom external = externalBomClaiming("pkg:maven/com.h2database/h2@2.3", h2.hash());
+        when(project.getArtifacts()).thenReturn(Set.of());
+        ArchiveAnalyzer analyzer = new ArchiveAnalyzer(effectiveModelResolver, repoSystem, project, session,
+                digest, false, List.of(external), true);
+
+        analyzer.analyze(List.of(h2.entry()), null);
+
+        assertEquals(1, analyzer.rejectedExternalComponents().size());
+        assertSame(external.getComponents().get(0), analyzer.rejectedExternalComponents().iterator().next());
+    }
+
+    @Test
+    void acceptedExternalClaimIsNotReportedForRemoval() throws Exception {
+        H2Jar h2 = h2Jar();
+        Bom external = externalBomClaiming("pkg:maven/com.h2database/h2@2.4", h2.hash());
+        when(project.getArtifacts()).thenReturn(Set.of());
+        ArchiveAnalyzer analyzer = new ArchiveAnalyzer(effectiveModelResolver, repoSystem, project, session,
+                digest, false, List.of(external), true);
+
+        analyzer.analyze(List.of(h2.entry()), null);
+
+        assertTrue(analyzer.rejectedExternalComponents().isEmpty());
+    }
+
+    // ---- bundled descriptors of externally claimed shaded jars ----
+
+    private record ShadedLibZ(String hash, FileEntry entry) {
+    }
+
+    private ShadedLibZ shadedLibZ() throws Exception {
+        Path shaded = createShadedJarWithMultiplePomProperties("lib-z-3.0.jar",
+                "org.example", "lib-z", "3.0",
+                "com.bundled", "shaded-a", "1.5",
+                "shaded-content");
+        String hash = SbomUtils.computeHash(digest, shaded);
+        return new ShadedLibZ(hash, new FileEntry("lib/lib-z-3.0.jar", hash, shaded.toFile()));
+    }
+
+    private static List<String> nestedPurls(Component c) {
+        return c.getComponents() == null ? List.of()
+                : c.getComponents().stream().map(Component::getPurl).toList();
+    }
+
+    @Test
+    void externalShadedClaimGainsUnlistedBundledDescriptors() throws Exception {
+        ShadedLibZ jar = shadedLibZ();
+        Bom external = externalBomClaiming("pkg:maven/org.example/lib-z@3.0", jar.hash());
+
+        analyzeWithExternal(external, jar.entry(), true);
+
+        Component owner = external.getComponents().get(0);
+        assertEquals(List.of("pkg:maven/com.bundled/shaded-a@1.5"), nestedPurls(owner));
+        Component bundled = owner.getComponents().get(0);
+        assertEquals(Component.Type.LIBRARY, bundled.getType());
+        assertEquals("com.bundled", bundled.getGroup());
+        assertEquals("shaded-a", bundled.getName());
+        assertEquals("1.5", bundled.getVersion());
+        assertEquals(Method.Technique.MANIFEST_ANALYSIS, identities(bundled).get(0).getMethods().get(0).getTechnique());
+    }
+
+    @Test
+    void externalShadedClaimDoesNotDuplicateListedBundledEntry() throws Exception {
+        ShadedLibZ jar = shadedLibZ();
+        Bom external = externalBomClaiming("pkg:maven/org.example/lib-z@3.0", jar.hash());
+        external.getComponents().get(0).setComponents(new ArrayList<>(List.of(
+                bundledEntry("pkg:maven/com.bundled/shaded-a@1.5?type=jar"))));
+
+        analyzeWithExternal(external, jar.entry(), true);
+
+        assertEquals(List.of("pkg:maven/com.bundled/shaded-a@1.5?type=jar"),
+                nestedPurls(external.getComponents().get(0)));
+    }
+
+    @Test
+    void externalShadedClaimBundledAddedWithoutIdentityWhenIdentityEvidenceOff() throws Exception {
+        ShadedLibZ jar = shadedLibZ();
+        Bom external = externalBomClaiming("pkg:maven/org.example/lib-z@3.0", jar.hash());
+
+        analyzeWithExternal(external, jar.entry(), false);
+
+        Component owner = external.getComponents().get(0);
+        assertEquals(List.of("pkg:maven/com.bundled/shaded-a@1.5"), nestedPurls(owner));
+        assertTrue(identities(owner.getComponents().get(0)).isEmpty());
+    }
+
+    @Test
+    void externalMavenIdentityAppendedKeepingNonPurlIdentities() throws Exception {
+        H2Jar h2 = h2Jar();
+        Bom external = externalBomClaiming("pkg:maven/com.h2database/h2@2.4", h2.hash());
+        Identity name = new Identity();
+        name.setField(Identity.Field.NAME);
+        name.setConfidence(0.4);
+        Evidence evidence = new Evidence();
+        evidence.setIdentities(new ArrayList<>(List.of(name)));
+        external.getComponents().get(0).setEvidence(evidence);
+
+        analyzeWithExternal(external, h2.entry(), true);
+
+        List<Identity> ids = identities(external.getComponents().get(0));
+        assertEquals(List.of(Identity.Field.NAME, Identity.Field.PURL), ids.stream().map(Identity::getField).toList());
+    }
+
+    @Test
+    void configuredExternalCrossCheckWorksWithEmbeddedSbomsIgnored() throws Exception {
+        H2Jar h2 = h2Jar();
+        Bom confirmedBom = externalBomClaiming("pkg:maven/com.h2database/h2@2.4", h2.hash());
+        when(project.getArtifacts()).thenReturn(Set.of());
+        new ArchiveAnalyzer(effectiveModelResolver, repoSystem, project, session, digest,
+                false, List.of(confirmedBom), false).analyze(List.of(h2.entry()), null);
+        assertEquals(1, identities(confirmedBom.getComponents().get(0)).size());
+
+        Bom mismatchBom = externalBomClaiming("pkg:maven/com.h2database/h2@2.3", h2.hash());
+        ArchiveAnalyzer analyzer = new ArchiveAnalyzer(effectiveModelResolver, repoSystem, project, session,
+                digest, false, List.of(mismatchBom), false);
+        AssemblyComponents model = analyzer.analyze(List.of(h2.entry()), null);
+        assertEquals(Identification.pomProperties(), topLevelPackage(model, "h2").identification());
+        assertEquals(1, analyzer.rejectedExternalComponents().size());
     }
 }

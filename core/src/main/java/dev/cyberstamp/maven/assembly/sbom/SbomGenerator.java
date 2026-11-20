@@ -210,6 +210,9 @@ public class SbomGenerator {
             ComponentView cv = new ComponentView(comp, index.normalizedAlg());
             if (matchesArchive(cv, index)) {
                 correctOccurrences(cv, index);
+                if (isUnpackedInArchive(cv, index)) {
+                    filterNestedByArchive(comp, index);
+                }
                 filtered.add(comp);
                 collectBomRefs(comp, survivingRefs);
             } else {
@@ -231,6 +234,36 @@ public class SbomGenerator {
             }
         }
         return result;
+    }
+
+    /**
+     * Applies the archive check to the sub-components of a surviving component
+     * that is unpacked in the archive: a nested component describing a file the
+     * archive does not contain (e.g. a jar the assembly excluded from an
+     * unpacked war) is dropped together with its own sub-components. The check
+     * descends only through components that are themselves unpacked; the
+     * sub-components of a component matched as a packed file describe its
+     * internals (jar-in-jar entries, shaded artifacts), which are not archive
+     * entries, and are kept as they are.
+     */
+    private static void filterNestedByArchive(Component comp, ArchiveIndex index) {
+        if (comp.getComponents() == null || comp.getComponents().isEmpty()) {
+            return;
+        }
+        List<Component> kept = new ArrayList<>(comp.getComponents().size());
+        for (Component child : comp.getComponents()) {
+            ComponentView cv = new ComponentView(child, index.normalizedAlg());
+            if (matchesArchive(cv, index)) {
+                correctOccurrences(cv, index);
+                if (isUnpackedInArchive(cv, index)) {
+                    filterNestedByArchive(child, index);
+                }
+                kept.add(child);
+            } else {
+                log.debug("Filtering out nested component {} from SBOM: no matching file in archive", child.getPurl());
+            }
+        }
+        comp.setComponents(kept);
     }
 
     private static Dependency filterDependencyChildren(Dependency dep, Set<String> survivingRefs) {
@@ -289,9 +322,32 @@ public class SbomGenerator {
         return index.containsHash(cv.hash());
     }
 
+    /**
+     * Whether a component that passed the archive check is unpacked in the
+     * archive, so its sub-components describe archive entries: it occurs at a
+     * directory the archive has files under, or it is the root of a scoped
+     * (unpacked) SBOM, marked by an empty occurrence.
+     */
+    private static boolean isUnpackedInArchive(ComponentView cv, ArchiveIndex index) {
+        if (hasEmptyOccurrence(cv, index)) {
+            return true;
+        }
+        for (String loc : cv.locations()) {
+            if (loc.endsWith("/") && index.containsDirectory(loc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static boolean hasMatchingOccurrence(ComponentView cv, ArchiveIndex index) {
         for (String loc : cv.locations()) {
-            if (!loc.isEmpty() && index.containsPath(loc)) {
+            if (loc.isEmpty()) {
+                continue;
+            }
+            // a directory occurrence marks an unpacked archive: present when
+            // the archive has files under it
+            if (loc.endsWith("/") ? index.containsDirectory(loc) : index.containsPath(loc)) {
                 return true;
             }
         }
@@ -344,9 +400,65 @@ public class SbomGenerator {
         if (externalBomList.isEmpty()) {
             return;
         }
+        Set<Component> rejected = lastAnalyzer.rejectedExternalComponents();
+        Set<Component> matched = lastAnalyzer.matchedExternalComponents();
         for (Bom externalBom : externalBomList) {
-            Bom filtered = filterSbomByArchive(externalBom, archiveIndex, null);
-            BomMerger.mergeFlat(bom, filtered);
+            BomMerger.mergeFlat(bom, filterExternalSbom(externalBom, archiveIndex, rejected, matched));
+        }
+    }
+
+    /**
+     * Filters a configured external SBOM for merging: drops the components the
+     * analyzer rejected (compared by identity, with their sub-components) and
+     * then applies {@link #filterSbomByArchive}, which also prunes the
+     * dependency entries of everything dropped. A rejected component's
+     * descendant that the analyzer matched to a file of its own is not dropped
+     * with it but lifted, with its own sub-components, into the rejected
+     * component's place.
+     *
+     * @param rejected the external components the analyzer rejected
+     * @param matched the external components the analyzer matched to archive entries
+     */
+    static Bom filterExternalSbom(Bom externalBom, ArchiveIndex archiveIndex, Set<Component> rejected,
+            Set<Component> matched) {
+        if (!rejected.isEmpty() && externalBom.getComponents() != null) {
+            externalBom.setComponents(withoutRejected(externalBom.getComponents(), rejected, matched));
+        }
+        return filterSbomByArchive(externalBom, archiveIndex, null);
+    }
+
+    private static List<Component> withoutRejected(List<Component> components, Set<Component> rejected,
+            Set<Component> matched) {
+        List<Component> kept = new ArrayList<>(components.size());
+        for (Component comp : components) {
+            if (rejected.contains(comp)) {
+                log.debug("Not merging external SBOM component {}: its jar was identified otherwise",
+                        comp.getPurl());
+                liftMatchedDescendants(comp.getComponents(), rejected, matched, kept);
+                continue;
+            }
+            if (comp.getComponents() != null) {
+                comp.setComponents(withoutRejected(comp.getComponents(), rejected, matched));
+            }
+            kept.add(comp);
+        }
+        return kept;
+    }
+
+    private static void liftMatchedDescendants(List<Component> components, Set<Component> rejected,
+            Set<Component> matched, List<Component> into) {
+        if (components == null) {
+            return;
+        }
+        for (Component comp : components) {
+            if (matched.contains(comp) && !rejected.contains(comp)) {
+                if (comp.getComponents() != null) {
+                    comp.setComponents(withoutRejected(comp.getComponents(), rejected, matched));
+                }
+                into.add(comp);
+            } else {
+                liftMatchedDescendants(comp.getComponents(), rejected, matched, into);
+            }
         }
     }
 

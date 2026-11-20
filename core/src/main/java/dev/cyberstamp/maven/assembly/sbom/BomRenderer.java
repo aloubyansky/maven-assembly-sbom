@@ -1,10 +1,12 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -121,11 +123,16 @@ public class BomRenderer {
      */
     private void buildTopLevelComponents(AssemblyComponents model, RenderContext ctx) {
         List<Component> allComponents = new ArrayList<>();
+        // Occurrence merge only joins top-level instances of a purl. A nested
+        // copy (e.g. a dependency bundled in a shaded jar, registered while an
+        // earlier top-level component was rendered) has no file of its own and
+        // must not absorb a top-level component's path.
+        Map<String, Component> topLevelById = new HashMap<>();
 
         for (AssemblyComponent neutralComp : model.components()) {
             if (neutralComp instanceof PackageComponent pkg) {
                 String purl = pkg.ref().toPurl().toString();
-                Component existing = ctx.componentsById.get(purl);
+                Component existing = topLevelById.get(purl);
                 if (existing != null) {
                     // Occurrence merge: append occurrence, first-wins for licenses,
                     // first non-null for identity
@@ -134,6 +141,7 @@ public class BomRenderer {
                     applyLicensesIfAbsent(existing, CycloneDxLicenses.toLicenseChoice(pkg.licenses()));
                 } else {
                     Component comp = createPackageComponent(pkg, ctx);
+                    topLevelById.put(purl, comp);
                     ctx.componentsById.put(purl, comp);
                     allComponents.add(comp);
                     ctx.directChildren.add(comp.getBomRef());
@@ -185,7 +193,7 @@ public class BomRenderer {
         // Components whose dependencies are unknown must not be declared as empty
         // leaf entries in the dependency graph (unknown != no dependencies).
         if (!pkg.dependenciesKnown()) {
-            ctx.dependenciesUnknownRefs.add(comp.getBomRef());
+            ctx.dependenciesUnknown.add(comp);
         }
 
         return comp;
@@ -260,10 +268,14 @@ public class BomRenderer {
      * {@code confidence} on each method as well as on the identity.
      */
     private Identity identityOf(PackageComponent pkg) {
-        Identification identification = pkg.identification();
-        if (identification == null) {
-            return null;
-        }
+        return pkg.identification() == null ? null : toIdentity(pkg.identification());
+    }
+
+    /**
+     * Renders an {@link Identification} as a CycloneDX purl identity with a
+     * single method and no value.
+     */
+    static Identity toIdentity(Identification identification) {
         Method method = new Method();
         method.setTechnique(Method.Technique.valueOf(identification.technique().name()));
         method.setConfidence(identification.confidence());
@@ -774,7 +786,7 @@ public class BomRenderer {
         for (Component comp : ctx.componentsById.values()) {
             // Skip components whose dependencies are unknown: declaring an empty
             // leaf entry would misreport "unknown" as "no dependencies".
-            if (ctx.dependenciesUnknownRefs.contains(comp.getBomRef())) {
+            if (ctx.dependenciesUnknown.contains(comp)) {
                 continue;
             }
             if (existingRefs.add(comp.getBomRef())) {
@@ -794,8 +806,13 @@ public class BomRenderer {
         final List<Component> components = new ArrayList<>();
         // Keyed by purl string to match occurrence-merge deduplication key
         final Map<String, Component> componentsById = new HashMap<>();
-        // Bom-refs of components whose dependencies are unknown; excluded from leaf entries.
-        final Set<String> dependenciesUnknownRefs = new HashSet<>();
+        /**
+         * Rendered instances whose dependencies are unknown, compared by
+         * identity: a bundled copy with unknown dependencies says nothing
+         * about the top-level instance sharing its bom-ref. Excluded from
+         * leaf dependency entries.
+         */
+        final Set<Component> dependenciesUnknown = Collections.newSetFromMap(new IdentityHashMap<>());
         final Map<Component, List<Component>> nestedComponentsByParent = new HashMap<>();
         final Set<String> directChildren = new HashSet<>();
 

@@ -463,6 +463,21 @@ CycloneDX SBOM files (`.cdx.json` or `.cdx.xml`) are automatically detected in t
 
 When both JSON and XML variants of the same SBOM exist (same filename stem in the same directory), the JSON variant is preferred and the XML duplicate is skipped.
 
+#### Identification from Detected SBOMs
+
+SBOMs inside resolved artifacts also serve as a source of hash-to-purl mappings. Maven project dependencies and reactor modules remain the primary source; for a jar they cannot account for — at the top level of the archive or nested inside an unpacked artifact — the generator looks up its content hash among the `pkg:maven` components of those SBOMs **before** reading the jar's `pom.properties`. A matched jar takes the purl identity's technique and confidence from the SBOM that listed it (none if that SBOM recorded no purl identity).
+
+The claim is cross-checked against the jar's own `pom.properties` (groupId, artifactId and version):
+
+| Jar's `pom.properties` | Result |
+|---|---|
+| none | SBOM identity used as is |
+| one of them matches the SBOM | SBOM identity used as is; the other descriptors are nested as bundled dependencies |
+| same groupId and artifactId, different version | SBOM claim rejected; the jar is identified from its `pom.properties` |
+| none for the SBOM's groupId and artifactId | SBOM purl used; the descriptors are nested as bundled dependencies. Confidence is kept when the SBOM identified the jar by `hash-comparison` (its build matched these exact bytes), otherwise capped at 0.5 |
+
+When several SBOMs list the same hash, agreeing claims keep the highest confidence; claims naming different purls are all discarded (with a warning) and the jar falls through to `pom.properties`. Setting `embeddedSboms` to `ignore` disables this lookup too.
+
 #### Handling Modes
 
 The `embeddedSboms` option controls what happens with detected SBOMs:
@@ -475,8 +490,8 @@ The `embeddedSboms` option controls what happens with detected SBOMs:
 
 The `externalSboms` option accepts a comma-separated list of file paths to CycloneDX SBOMs generated outside the Maven build (e.g., by `cdxgen`, `@cyclonedx/cyclonedx-npm`, or pnpm). These SBOMs are:
 
-1. **Used for archive entry matching** — component hashes from external SBOMs are checked against unmatched archive entries. If a match is found, the entry is identified from the external SBOM rather than appearing as an unidentified FILE component.
-2. **Merged flat as top-level components** — external SBOM components are added as peers of the distribution's own components (not nested under the main component). Their dependency entries are imported into the BOM's dependency section, and the external SBOM's top-level dependencies are linked under the distribution's main component. A component from an external SBOM keeps the identity evidence its SBOM carried, if any; this tool adds none (see [Evidence](#evidence)).
+1. **Used for archive entry matching** — component hashes from external SBOMs are checked against unmatched archive entries, before their `pom.properties` and before [detected SBOMs](#identification-from-detected-sboms). If a match is found, the entry is identified from the external SBOM rather than appearing as an unidentified FILE component. A `pkg:maven` claim is first cross-checked against the jar's own `pom.properties`: when a descriptor declares the same groupId and artifactId with another version, the claim is not used and its component is not merged; the jar goes on to the next identification steps ([detected SBOMs](#identification-from-detected-sboms), then its `pom.properties`). For an accepted claim, the jar's other descriptors that the external component does not already list are added under it as bundled dependencies.
+2. **Merged flat as top-level components** — external SBOM components are added as peers of the distribution's own components (not nested under the main component). Their dependency entries are imported into the BOM's dependency section, and the external SBOM's top-level dependencies are linked under the distribution's main component. A component from an external SBOM keeps the identity evidence its SBOM carried. If that evidence has no purl identity and the jar's own `pom.properties` declare exactly its coordinates, this tool records that as `manifest-analysis` at confidence 1.0; the same applies to its nested entries (such as dependencies bundled in a shaded jar) whose coordinates one of the jar's `pom.properties` declares exactly. Otherwise it adds none (see [Evidence](#evidence)).
 
 Example configuration:
 
@@ -568,10 +583,11 @@ Components this tool identifies also carry a purl `identity` recording how they 
 | Bundled dependency, coordinates from its own `pom.properties` | `manifest-analysis` | 1.0 |
 | Shaded jar with no resolvable owner: each embedded artifact, nested under the file | `manifest-analysis` | 1.0 |
 | Non-Maven-built jar, matched via [remote Maven coordinates lookup](#maven-artifact-matchers) | `hash-comparison` | 0.9 |
+| Jar whose hash is listed in an SBOM found inside a resolved artifact ([details](#identification-from-detected-sboms)) | from that SBOM | from that SBOM; at most 0.5 if the jar's `pom.properties` are all for other artifacts and the SBOM's technique is not `hash-comparison`; none if the SBOM has no purl identity |
 
 Components that were not identified by this tool get no identity of its making:
 
-- Components from external or embedded SBOMs carry the identity evidence their SBOM provided, or none. Where such a component merges with one this tool already identified, this tool's identity is kept.
+- Components from external or embedded SBOMs carry the identity evidence their SBOM provided, or none. Where such a component merges with one this tool already identified, this tool's identity is kept. An external `pkg:maven` component without a purl identity whose coordinates the matched jar's own `pom.properties` confirm gets `manifest-analysis` 1.0 from this tool; so does each of its nested entries whose coordinates one of the jar's `pom.properties` declares exactly.
 - Components built directly through the `assembly-sbom-core` model API carry identity evidence only if the producer supplies an `Identification`.
 - Non-Maven components (`file`, generic, npm) carry occurrences only.
 
