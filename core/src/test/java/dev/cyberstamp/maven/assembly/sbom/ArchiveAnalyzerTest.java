@@ -1714,6 +1714,27 @@ class ArchiveAnalyzerTest {
     }
 
     @Test
+    void embeddedSbomOfJarShippedOnlyInsideAnOverlayIsOwnedByThatCopy() throws Exception {
+        // the project depends on lib and on the overlay, and lib ships only
+        // inside the unpacked overlay: its SBOM belongs under that copy
+        Artifact lib = jarWithSbom("lib-1.0.jar", "org.example", "lib");
+        Path html = createTestFile("index.html", "<html/>");
+        Path war = createJarWithEntries("app-1.0.war", Map.of(
+                "WEB-INF/lib/lib-1.0.jar", Files.readAllBytes(lib.getFile().toPath()),
+                "index.html", Files.readAllBytes(html)));
+        when(project.getArtifacts()).thenReturn(new LinkedHashSet<>(List.of(lib,
+                createArtifact("org.example", "app", "1.0", "war", war.toFile()))));
+
+        AssemblyComponents model = createAnalyzer().analyze(List.of(
+                new FileEntry("web/app/WEB-INF/lib/lib-1.0.jar", SbomUtils.computeHash(digest, lib.getFile().toPath())),
+                new FileEntry("web/app/index.html", SbomUtils.computeHash(digest, html))), null);
+
+        assertTrue(isNestedUnder(model, "lib", "app"), "lib ships inside the overlay");
+        assertEquals(List.copyOf(idsOf(model, "lib")),
+                model.discoveredSboms().stream().map(DiscoveredSbom::owner).toList());
+    }
+
+    @Test
     void embeddedSbomOfUnshippedArtifactIsNotMerged() throws Exception {
         Artifact shipped = jarWithSbom("shipped-1.0.jar", "org.example", "shipped");
         Artifact unshipped = jarWithSbom("unshipped-1.0.jar", "org.example", "unshipped");

@@ -367,6 +367,25 @@ class SbomContainerDescriptorHandlerTest {
         assertFalse(deps.containsKey("pkg:maven/org.ex/y@1.0"), "unknown, not none");
     }
 
+    @Test
+    void collectFailureLeavesEveryTopLevelCopyWithoutEntries() throws Exception {
+        // y ships twice at the top level: merged into one component, which
+        // must not be rendered as having no dependencies
+        Path y = createTestJar("y-1.0.jar", "y-content");
+        when(project.getArtifacts()).thenReturn(Set.of(createArtifact("org.ex", "y", "1.0", "jar", y.toFile())));
+        when(repoSystem.collectDependencies(any(RepositorySystemSession.class), any()))
+                .thenThrow(new DependencyCollectionException(new CollectResult(new CollectRequest())));
+
+        ZipArchiver archiver = new ZipArchiver();
+        archiver.setDestFile(tempDir.resolve("out.zip").toFile());
+        archiver.addFile(y.toFile(), "base/lib/y-1.0.jar");
+        archiver.addFile(y.toFile(), "base/ext/y-1.0.jar");
+        handler.finalizeArchiveCreation(archiver);
+
+        Map<String, List<String>> deps = dependencyMap(readBomFromArchiver(archiver));
+        assertFalse(deps.containsKey("pkg:maven/org.ex/y@1.0"), "unknown, not none");
+    }
+
     /**
      * Stubs every collect request to report the module's root depending on
      * {@code parent} and {@code parent -> child} (all {@code org.ex:*:1.0}).

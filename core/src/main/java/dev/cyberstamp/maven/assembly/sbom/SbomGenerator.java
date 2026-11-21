@@ -5,7 +5,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -812,7 +811,7 @@ public class SbomGenerator {
         } catch (Exception e) {
             log.warn("Failed to build dependency graph,"
                     + " SBOM will omit dependency information", e);
-            markDependenciesUnknown(model, copies.values());
+            markDependenciesUnknown(model, copies.keySet());
             return;
         }
         for (Map.Entry<ArtifactCoords, Set<ArtifactCoords>> entry : collectedEdges.entrySet()) {
@@ -830,16 +829,19 @@ public class SbomGenerator {
     }
 
     /**
-     * Marks the given top-level copies as having unknown dependencies.
+     * Marks every top-level copy of the given artifacts as having unknown
+     * dependencies: the copy the module's edges would have been bound to and
+     * any further top-level copy of the same artifact, which the renderer
+     * merges with it.
      *
      * @param model the model whose top-level components to update
-     * @param ids the ids of the copies to mark; all are top-level
+     * @param artifacts the coordinates of the module's artifacts
      */
-    private static void markDependenciesUnknown(AssemblyComponents model, Collection<ComponentId> ids) {
-        Set<ComponentId> unknown = new HashSet<>(ids);
+    private static void markDependenciesUnknown(AssemblyComponents model, Set<ArtifactCoords> artifacts) {
         List<AssemblyComponent> components = new ArrayList<>(model.components());
         for (int i = 0; i < components.size(); i++) {
-            if (components.get(i) instanceof PackageComponent pkg && unknown.contains(pkg.id())) {
+            if (components.get(i) instanceof PackageComponent pkg && pkg.dependenciesKnown()
+                    && pkg.ref() instanceof ArtifactCoords coords && artifacts.contains(coords)) {
                 components.set(i, pkg.withDependenciesKnown(false));
             }
         }

@@ -322,8 +322,8 @@ class ArchiveAnalyzer {
             content.addUnmatchedFile(entry);
         }
 
-        // Expose the Aether-typed side-data to SbomGenerator without storing
-        // it on the neutral model, then assemble and return the model.
+        // Expose the module's copies to SbomGenerator without storing them on
+        // the neutral model, then assemble and return the model.
         lastModuleCopies = content.moduleCopies();
         return content.build();
     }
@@ -1409,11 +1409,17 @@ class ArchiveAnalyzer {
      */
     private void detectSbomsInArtifactJars(AssemblyComponentsBuilder content,
             Set<String> detectedSbomPaths, Map<File, List<NamedSbom>> embeddedSboms) {
-        // The first top-level copy of each artifact: an SBOM inside the
-        // artifact's file is merged under that copy, which keeps the plain bom-ref.
-        Map<ArtifactCoords, AssemblyComponentsBuilder.MavenEntry> firstCopies = new HashMap<>();
+        // The copy an SBOM inside an artifact's file is merged under: the first
+        // top-level copy, which keeps the plain bom-ref, else the first nested
+        // one (an artifact shipped only inside an unpacked archive).
+        Map<ArtifactCoords, AssemblyComponentsBuilder.Entry> firstCopies = new HashMap<>();
         for (AssemblyComponentsBuilder.MavenEntry entry : content.mavenEntries()) {
             firstCopies.putIfAbsent(entry.artifactId(), entry);
+        }
+        for (AssemblyComponentsBuilder.NestedMavenEntry entry : content.nestedEntries()) {
+            if (entry.archivePath() != null) {
+                firstCopies.putIfAbsent(entry.artifactId(), entry);
+            }
         }
         Set<ArtifactCoords> knownCoords = content.collectKnownArtifactCoords();
         Set<File> scannedFiles = new HashSet<>();
@@ -1429,7 +1435,7 @@ class ArchiveAnalyzer {
             if (!scannedFiles.add(file)) {
                 continue;
             }
-            AssemblyComponentsBuilder.MavenEntry copy = firstCopies.get(coords);
+            AssemblyComponentsBuilder.Entry copy = firstCopies.get(coords);
             String parentArchivePath = copy == null || copy.archivePath() == null ? "" : copy.archivePath();
             recordDiscoveredSboms(embeddedSboms.getOrDefault(file, List.of()), copy == null ? null : copy.id(),
                     content, parentArchivePath, detectedSbomPaths);
@@ -1516,6 +1522,14 @@ class ArchiveAnalyzer {
              * @return the coordinates; never {@code null}
              */
             ArtifactCoords artifactId();
+
+            /**
+             * Returns where this copy sits in the assembly.
+             *
+             * @return its archive path, or {@code null} for a copy with no
+             *         file of its own (e.g. bundled in a shaded jar)
+             */
+            String archivePath();
         }
 
         /**
