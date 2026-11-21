@@ -193,6 +193,7 @@ final class AnchoredMerge {
         }
         AnchoredMerge merge = new AnchoredMerge(index, scope, offset);
         merge.mergeComponents(source);
+        merge.mergeSourceMain(source);
         merge.renameTargetRefs(target);
         merge.mergeDependencies(target, source);
         return new Result(merge.refMap, merge.anchored, merge.kept, merge.dropped);
@@ -262,14 +263,6 @@ final class AnchoredMerge {
 
     /** Walks the source's components, top level first. */
     private void mergeComponents(Bom source) {
-        Component sourceMain = source.getMetadata() == null ? null : source.getMetadata().getComponent();
-        if (sourceMain != null && sourceMain.getBomRef() != null) {
-            refMap.put(sourceMain.getBomRef(), scope.parent().getBomRef());
-            copiesByRef.put(scope.parent().getBomRef(), scope.parent());
-            if (scope.parent() != target.main()) {
-                enrich(scope.parent(), sourceMain);
-            }
-        }
         if (source.getComponents() == null) {
             return;
         }
@@ -280,6 +273,41 @@ final class AnchoredMerge {
         for (Component c : ordered) {
             BomMerger.normalizePurls(c);
             walk(c, topParent, topParentIsBinary);
+        }
+    }
+
+    /**
+     * Maps the source's main component, after its components were merged:
+     * an SBOM may list its main component among its components too (the
+     * Quarkus SBOM does), in which case it maps to that component's copy.
+     */
+    private void mergeSourceMain(Bom source) {
+        Component sourceMain = source.getMetadata() == null ? null : source.getMetadata().getComponent();
+        if (sourceMain == null || sourceMain.getBomRef() == null) {
+            return;
+        }
+        String listed = mapped(sourceMain.getBomRef());
+        if (listed != null) {
+            Component copy = copiesByRef.get(listed);
+            if (copy != null && copy != target.main()) {
+                enrich(copy, sourceMain);
+            }
+            return;
+        }
+        // The source's main component is the copy it describes: the merge
+        // parent, or, in a flat merge, the copy it anchors to if it ships
+        // in the target (e.g. a Quarkus application's quarkus-run.jar).
+        Component copy = scope.parent();
+        if (copy == target.main()) {
+            Component anchoredMain = anchor(sourceMain, null, false);
+            if (anchoredMain != null && anchoredMain != target.main()) {
+                copy = anchoredMain;
+            }
+        }
+        refMap.put(sourceMain.getBomRef(), copy.getBomRef());
+        copiesByRef.put(copy.getBomRef(), copy);
+        if (copy != target.main()) {
+            enrich(copy, sourceMain);
         }
     }
 

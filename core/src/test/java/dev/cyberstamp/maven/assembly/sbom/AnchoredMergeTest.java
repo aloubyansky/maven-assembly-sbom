@@ -323,6 +323,22 @@ class AnchoredMergeTest {
                 : entry.getDependencies().stream().map(org.cyclonedx.model.Dependency::getRef).sorted().toList();
     }
 
+    @Test
+    void flatSbomTopComponentAnchorsToItsCopy() {
+        // Keycloak: the Quarkus SBOM's top component is quarkus-run.jar, shipped in the dist
+        Component run = lib("quarkus-run.jar", "pkg:generic/quarkus-run.jar@1", "r1", "lib/quarkus-run.jar");
+        Component core = lib("core", "pkg:maven/io.quarkus/core@1", "c1", "lib/lib/main/core.jar");
+        Bom target = bom(run, core);
+        Bom source = bom(lib("core", "pkg:maven/io.quarkus/core@1", "c1", "lib/main/core.jar"));
+        source.getMetadata().setComponent(lib("quarkus-run.jar", "pkg:generic/quarkus-run.jar@1", "r1",
+                "quarkus-run.jar"));
+        source.addDependency(dependency("pkg:generic/quarkus-run.jar@1", "pkg:maven/io.quarkus/core@1"));
+
+        AnchoredMerge.merge(target, source, flat(target, LAYOUT));
+
+        assertEquals(List.of("pkg:maven/io.quarkus/core@1"), dependsOn(target, "pkg:generic/quarkus-run.jar@1"));
+    }
+
     // Regression tests from the Artemis comparison
 
     private static Component war(String purl, String directory, Component... nested) {
