@@ -1405,9 +1405,11 @@ class ArchiveAnalyzer {
      */
     private void detectSbomsInArtifactJars(AssemblyComponentsBuilder content,
             Set<String> detectedSbomPaths, Map<File, List<NamedSbom>> embeddedSboms) {
-        Map<ArtifactCoords, String> coordsToPath = new HashMap<>();
+        // The first top-level copy of each artifact: an SBOM inside the
+        // artifact's file is merged under that copy, which keeps the plain bom-ref.
+        Map<ArtifactCoords, AssemblyComponentsBuilder.MavenEntry> firstCopies = new HashMap<>();
         for (AssemblyComponentsBuilder.MavenEntry entry : content.mavenEntries()) {
-            coordsToPath.put(entry.artifactId(), entry.archivePath());
+            firstCopies.putIfAbsent(entry.artifactId(), entry);
         }
         Set<ArtifactCoords> knownCoords = content.collectKnownArtifactCoords();
         Set<File> scannedFiles = new HashSet<>();
@@ -1423,23 +1425,21 @@ class ArchiveAnalyzer {
             if (!scannedFiles.add(file)) {
                 continue;
             }
-            String parentArchivePath = coordsToPath.get(coords);
-            if (parentArchivePath == null) {
-                parentArchivePath = "";
-            }
-            recordDiscoveredSboms(embeddedSboms.getOrDefault(file, List.of()), coords, content,
-                    parentArchivePath, detectedSbomPaths);
+            AssemblyComponentsBuilder.MavenEntry copy = firstCopies.get(coords);
+            String parentArchivePath = copy == null || copy.archivePath() == null ? "" : copy.archivePath();
+            recordDiscoveredSboms(embeddedSboms.getOrDefault(file, List.of()), copy == null ? null : copy.id(),
+                    content, parentArchivePath, detectedSbomPaths);
         }
     }
 
     /**
      * Records an artifact's embedded SBOMs to be merged under it.
      */
-    private static void recordDiscoveredSboms(List<NamedSbom> sboms, ArtifactCoords artifactId,
+    private static void recordDiscoveredSboms(List<NamedSbom> sboms, ComponentId owner,
             AssemblyComponentsBuilder content, String parentArchivePath,
             Set<String> detectedSbomPaths) {
         for (NamedSbom sbom : sboms) {
-            content.addDiscoveredSbom(new DiscoveredSbom(sbom.entryName(), sbom.bom(), artifactId));
+            content.addDiscoveredSbom(new DiscoveredSbom(sbom.entryName(), sbom.bom(), owner));
             detectedSbomPaths.add(parentArchivePath + sbom.entryName());
         }
     }
@@ -1740,8 +1740,7 @@ class ArchiveAnalyzer {
             // 4. Dependency edges — only for explicitly-identified nested entries.
             for (NestedMavenEntry nested : nestedEntries) {
                 if (nested.explicit()) {
-                    model.addDependencyEdge(
-                            new DependencyEdge(coordsById.get(nested.parent()), nested.artifactId(), true));
+                    model.addDependencyEdge(new DependencyEdge(nested.parent(), nested.id()));
                 }
             }
 

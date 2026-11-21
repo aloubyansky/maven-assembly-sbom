@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -423,8 +424,7 @@ class ArchiveAnalyzerTest {
         assertTrue(isNestedUnder(model, "bundled-lib", "shaded"),
                 "bundled dep parent should be the shaded JAR");
         assertTrue(model.dependencyEdges().stream()
-                .noneMatch(e -> e.child() instanceof ArtifactCoords coords
-                        && "bundled-lib".equals(coords.artifactId())),
+                .noneMatch(e -> idsOf(model, "bundled-lib").contains(e.child())),
                 "bundled dep should not have a dependency edge (nesting is sufficient)");
         assertEquals(0, extractFileComponents(model).size());
     }
@@ -879,8 +879,7 @@ class ArchiveAnalyzerTest {
         // must NOT emit a dependency edge (matches pre-refactor behavior and
         // the DependencyEdge contract that containment is not a dependency).
         assertTrue(model.dependencyEdges().stream()
-                .noneMatch(e -> e.child() instanceof ArtifactCoords coords
-                        && "extra".equals(coords.artifactId())),
+                .noneMatch(e -> idsOf(model, "extra").contains(e.child())),
                 "reclassified unpacked child must not have a dependency edge");
     }
 
@@ -1017,6 +1016,22 @@ class ArchiveAnalyzerTest {
             }
         }
         return result;
+    }
+
+    /** The ids of every copy, top-level or nested, of the artifact with this artifactId. */
+    private Set<ComponentId> idsOf(AssemblyComponents model, String artifactId) {
+        Set<ComponentId> ids = new HashSet<>();
+        for (PackageComponent pkg : extractPackageComponents(model)) {
+            if (artifactId.equals(((ArtifactCoords) pkg.ref()).artifactId())) {
+                ids.add(pkg.id());
+            }
+        }
+        for (PackageComponent pkg : extractNestedPackages(model)) {
+            if (artifactId.equals(((ArtifactCoords) pkg.ref()).artifactId())) {
+                ids.add(pkg.id());
+            }
+        }
+        return ids;
     }
 
     private List<PackageComponent> extractNestedPackages(AssemblyComponents model) {
@@ -1707,7 +1722,7 @@ class ArchiveAnalyzerTest {
         AssemblyComponents model = createAnalyzer().analyze(List.of(new FileEntry("lib/shipped-1.0.jar",
                 SbomUtils.computeHash(digest, shipped.getFile().toPath()))), null);
 
-        assertEquals(List.of(ArtifactCoords.of("org.example", "shipped", "1.0")),
+        assertEquals(List.copyOf(idsOf(model, "shipped")),
                 model.discoveredSboms().stream().map(DiscoveredSbom::owner).toList());
     }
 
@@ -1720,7 +1735,7 @@ class ArchiveAnalyzerTest {
         AssemblyComponents model = createAnalyzer().analyze(List.of(new FileEntry("lib/shared-1.0.jar",
                 SbomUtils.computeHash(digest, first.getFile().toPath()))), null);
 
-        assertEquals(List.of(ArtifactCoords.of("org.example", "first", "1.0")),
+        assertEquals(List.copyOf(idsOf(model, "first")),
                 model.discoveredSboms().stream().map(DiscoveredSbom::owner).toList(),
                 "one file's SBOMs are recorded once, under the first artifact");
     }

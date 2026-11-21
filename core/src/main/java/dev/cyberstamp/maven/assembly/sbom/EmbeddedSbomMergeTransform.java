@@ -26,11 +26,12 @@ final class EmbeddedSbomMergeTransform {
      *
      * @param bom the target BOM to merge into
      * @param model the assembly components model containing discovered SBOMs
-     * @param parentRefResolver resolves a DiscoveredSbom owner PackageRef to a
-     *        parent bom-ref (mirrors SbomGenerator.resolveParentBomRef)
+     * @param parentRefResolver resolves a {@link DiscoveredSbom#owner()} id
+     *        (possibly {@code null}) to the bom-ref of the component to merge
+     *        under, e.g. from {@link RenderedBom#bomRefs()}
      */
     void apply(Bom bom, AssemblyComponents model,
-            Function<PackageRef, String> parentRefResolver) {
+            Function<ComponentId, String> parentRefResolver) {
         if ("ignore".equalsIgnoreCase(mode)) {
             return;
         }

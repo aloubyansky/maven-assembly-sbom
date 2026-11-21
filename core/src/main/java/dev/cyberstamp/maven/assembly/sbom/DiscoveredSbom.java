@@ -22,10 +22,12 @@ import org.cyclonedx.model.Bom;
  * @param archivePath the path of the SBOM file relative to the assembly
  *        root; never {@code null}
  * @param parsedBom the eagerly-parsed BOM content; never {@code null}
- * @param owner the package whose content contains this SBOM, or
- *        {@code null} if at the assembly root or unresolved
+ * @param owner the id of the component copy whose content contains this
+ *        SBOM, or {@code null} if at the assembly root or unresolved. When
+ *        the artifact holding the SBOM ships more than once, this is its first
+ *        top-level copy: the one that keeps the artifact's plain bom-ref.
  */
-public record DiscoveredSbom(String archivePath, Bom parsedBom, PackageRef owner) {
+public record DiscoveredSbom(String archivePath, Bom parsedBom, ComponentId owner) {
 
     /**
      * Requires a non-null {@code archivePath} and {@code parsedBom}.

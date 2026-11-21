@@ -20,9 +20,9 @@ class AssemblyComponentsTest {
     @Test
     void accumulatesDependencyEdges() {
         AssemblyComponents model = new AssemblyComponents();
-        PackageRef parent = ArtifactCoords.of("g", "parent", "1");
-        PackageRef child = ArtifactCoords.of("g", "child", "1");
-        model.addDependencyEdge(new DependencyEdge(parent, child, false));
+        ComponentId parent = ComponentId.generate();
+        ComponentId child = ComponentId.generate();
+        model.addDependencyEdge(new DependencyEdge(parent, child));
         assertEquals(1, model.dependencyEdges().size());
         assertEquals(parent, model.dependencyEdges().get(0).parent());
         assertEquals(child, model.dependencyEdges().get(0).child());
@@ -32,7 +32,7 @@ class AssemblyComponentsTest {
     void accumulatesDiscoveredSboms() {
         AssemblyComponents model = new AssemblyComponents();
         Bom bom = new Bom();
-        PackageRef owner = ArtifactCoords.of("g", "a", "1");
+        ComponentId owner = ComponentId.generate();
         model.addDiscoveredSbom(new DiscoveredSbom("META-INF/sbom.cdx.json", bom, owner));
         assertEquals(1, model.discoveredSboms().size());
         assertSame(bom, model.discoveredSboms().get(0).parsedBom());

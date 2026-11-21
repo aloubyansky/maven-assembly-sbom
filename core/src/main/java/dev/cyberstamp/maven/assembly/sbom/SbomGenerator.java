@@ -5,10 +5,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -168,12 +166,12 @@ public class SbomGenerator {
                 .failOnMissingLicense(failOnMissingLicense)
                 .identityEvidence(identityEvidence)
                 .enrich();
-        Set<Component> dependenciesUnknown = Collections.newSetFromMap(new IdentityHashMap<>());
-        Bom bom = new BomRenderer().render(model, dependenciesUnknown);
+        RenderedBom rendered = new BomRenderer().renderWithRefs(model);
+        Bom bom = rendered.bom();
 
         // Post-processing (detected/external SBOMs, filtering, dedup)
         ArchiveIndex archiveIndex = ArchiveIndex.of(entries, baseDirPrefix, bomHashAlgorithm.getSpec());
-        processDiscoveredSboms(bom, model, archiveIndex);
+        processDiscoveredSboms(rendered, model, archiveIndex);
         processExternalBoms(bom, externalBoms, archiveIndex);
 
         String normalizedAlg = archiveIndex.normalizedAlg();
@@ -182,7 +180,9 @@ public class SbomGenerator {
         if (librariesOnly) {
             removeFileComponents(bom);
         }
-        BomFinalizer.deduplicateBomRefs(bom, dependenciesUnknown);
+        // The renderer gave every copy a unique bom-ref; only merged content can
+        // still duplicate one.
+        BomFinalizer.deduplicateBomRefs(bom, Set.of());
         BomFinalizer.sortDependencies(bom);
         return bom;
     }
@@ -198,10 +198,10 @@ public class SbomGenerator {
         return lastAnalyzer.analyze(entries, baseDirPrefix);
     }
 
-    private void processDiscoveredSboms(Bom bom, AssemblyComponents model, ArchiveIndex archiveIndex) {
+    private void processDiscoveredSboms(RenderedBom rendered, AssemblyComponents model, ArchiveIndex archiveIndex) {
         EmbeddedSbomMergeTransform transform = new EmbeddedSbomMergeTransform(
                 embeddedSboms, archiveIndex);
-        transform.apply(bom, model, owner -> resolveParentBomRef(owner, bom, model));
+        transform.apply(rendered.bom(), model, owner -> resolveParentBomRef(owner, rendered));
     }
 
     static Bom filterSbomByArchive(Bom sbom, ArchiveIndex archiveIndex, String parentPathPrefix) {
@@ -693,61 +693,18 @@ public class SbomGenerator {
     }
 
     /**
-     * Resolves the bom-ref for a discovered SBOM's parent artifact.
+     * Resolves the bom-ref of the component a discovered SBOM is merged under:
+     * the bom-ref the renderer gave the owner's copy, or the main component's
+     * when the SBOM has no owner (it sits at the assembly root) or the owner
+     * was not rendered.
      *
-     * <p>
-     * Returns {@code coords.toPurl().toString()} if {@code coords} is a known
-     * model component (a top-level or nested {@link PackageComponent} ref),
-     * else falls back to the main component bomRef.
-     * </p>
+     * @param owner the id of the owner's copy, or {@code null}
+     * @param rendered the rendered BOM and its bom-refs by component id
+     * @return the parent bom-ref; never {@code null}
      */
-    private String resolveParentBomRef(PackageRef parentRef,
-            Bom bom, AssemblyComponents model) {
-        if (parentRef != null) {
-            String purl = parentRef.toPurl().toString();
-            // Check if this purl exists in the model
-            if (isKnownPackageRef(parentRef, model)) {
-                return purl;
-            }
-        }
-        return bom.getMetadata().getComponent().getBomRef();
-    }
-
-    /**
-     * Checks if a {@link PackageRef} is present in the model as a
-     * {@link PackageComponent}.
-     */
-    private boolean isKnownPackageRef(PackageRef ref, AssemblyComponents model) {
-        for (AssemblyComponent comp : model.components()) {
-            if (containsPackageRef(comp, ref)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Recursively searches for a {@link PackageRef} in a component tree.
-     */
-    private boolean containsPackageRef(AssemblyComponent comp,
-            PackageRef ref) {
-        if (comp instanceof PackageComponent pkg) {
-            if (pkg.ref().toPurl().toString().equals(ref.toPurl().toString())) {
-                return true;
-            }
-            for (AssemblyComponent nested : pkg.nested()) {
-                if (containsPackageRef(nested, ref)) {
-                    return true;
-                }
-            }
-        } else if (comp instanceof FileComponent file) {
-            for (AssemblyComponent nested : file.nested()) {
-                if (containsPackageRef(nested, ref)) {
-                    return true;
-                }
-            }
-        }
-        return false;
+    private static String resolveParentBomRef(ComponentId owner, RenderedBom rendered) {
+        String ref = owner == null ? null : rendered.bomRefs().get(owner);
+        return ref != null ? ref : rendered.bom().getMetadata().getComponent().getBomRef();
     }
 
     /**
@@ -844,12 +801,12 @@ public class SbomGenerator {
                 nestedDepsByParent = Map.of();
             }
             Map<ArtifactCoords, Set<ArtifactCoords>> collectedEdges = collectDependencyEdges(nestedDepsByParent);
-            Set<ArtifactCoords> knownIds = collectKnownArtifactCoords(model);
-            Map<ArtifactCoords, List<ArtifactCoords>> graph = filterEdges(collectedEdges, knownIds);
-            // Add inferred edges to the model with explicit=false
+            Map<ArtifactCoords, ComponentId> copies = firstKnownCopies(model);
+            Map<ArtifactCoords, List<ArtifactCoords>> graph = filterEdges(collectedEdges, copies.keySet());
             for (Map.Entry<ArtifactCoords, List<ArtifactCoords>> entry : graph.entrySet()) {
+                ComponentId parent = copies.get(entry.getKey());
                 for (ArtifactCoords child : entry.getValue()) {
-                    model.addDependencyEdge(new DependencyEdge(entry.getKey(), child, false));
+                    model.addDependencyEdge(new DependencyEdge(parent, copies.get(child)));
                 }
             }
         } catch (Exception e) {
@@ -859,33 +816,34 @@ public class SbomGenerator {
     }
 
     /**
-     * Collects all known artifact coordinates from the model (top-level and
-     * nested {@link PackageComponent}s), for use in dependency graph filtering.
+     * Maps each Maven artifact in the model to the copy that its collected
+     * edges are bound to: the first copy whose dependencies are known, in
+     * model order (top-level first, then depth-first), which is the copy that
+     * keeps the artifact's plain bom-ref.
      */
-    private Set<ArtifactCoords> collectKnownArtifactCoords(AssemblyComponents model) {
-        Set<ArtifactCoords> ids = new HashSet<>();
+    private static Map<ArtifactCoords, ComponentId> firstKnownCopies(AssemblyComponents model) {
+        Map<ArtifactCoords, ComponentId> copies = new HashMap<>();
         for (AssemblyComponent comp : model.components()) {
-            collectPackageRefs(comp, ids);
+            if (comp instanceof PackageComponent pkg && pkg.dependenciesKnown()
+                    && pkg.ref() instanceof ArtifactCoords coords) {
+                copies.putIfAbsent(coords, pkg.id());
+            }
         }
-        return ids;
+        for (AssemblyComponent comp : model.components()) {
+            for (AssemblyComponent nested : comp.nested()) {
+                collectFirstKnownCopies(nested, copies);
+            }
+        }
+        return copies;
     }
 
-    /**
-     * Recursively collects {@link ArtifactCoords} from {@link PackageComponent}s.
-     */
-    private void collectPackageRefs(AssemblyComponent comp,
-            Set<ArtifactCoords> ids) {
-        if (comp instanceof PackageComponent pkg) {
-            if (pkg.ref() instanceof ArtifactCoords coords) {
-                ids.add(coords);
-            }
-            for (AssemblyComponent nested : pkg.nested()) {
-                collectPackageRefs(nested, ids);
-            }
-        } else if (comp instanceof FileComponent file) {
-            for (AssemblyComponent nested : file.nested()) {
-                collectPackageRefs(nested, ids);
-            }
+    private static void collectFirstKnownCopies(AssemblyComponent comp, Map<ArtifactCoords, ComponentId> copies) {
+        if (comp instanceof PackageComponent pkg && pkg.dependenciesKnown()
+                && pkg.ref() instanceof ArtifactCoords coords) {
+            copies.putIfAbsent(coords, pkg.id());
+        }
+        for (AssemblyComponent nested : comp.nested()) {
+            collectFirstKnownCopies(nested, copies);
         }
     }
 

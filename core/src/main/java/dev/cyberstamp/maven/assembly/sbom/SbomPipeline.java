@@ -1,11 +1,8 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
-import java.util.Collections;
-import java.util.IdentityHashMap;
 import java.util.Set;
 
 import org.cyclonedx.model.Bom;
-import org.cyclonedx.model.Component;
 
 /**
  * Runs the standard SBOM enrichment transforms over an {@link AssemblyComponents}
@@ -123,9 +120,8 @@ public final class SbomPipeline {
      */
     public Bom render() {
         enrich();
-        Set<Component> dependenciesUnknown = Collections.newSetFromMap(new IdentityHashMap<>());
-        Bom bom = new BomRenderer().render(model, dependenciesUnknown);
-        BomFinalizer.deduplicateBomRefs(bom, dependenciesUnknown);
+        Bom bom = new BomRenderer().render(model);
+        BomFinalizer.deduplicateBomRefs(bom, Set.of());
         BomFinalizer.sortDependencies(bom);
         return bom;
     }
