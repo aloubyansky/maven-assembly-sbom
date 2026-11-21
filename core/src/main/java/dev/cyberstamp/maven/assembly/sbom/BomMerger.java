@@ -389,7 +389,7 @@ public final class BomMerger {
      * the redundant {@code ?type=jar} qualifier (jar is the PURL-spec
      * default for Maven). Recurses into sub-components.
      */
-    private static void normalizePurls(Component comp) {
+    static void normalizePurls(Component comp) {
         String purl = comp.getPurl();
         if (purl != null) {
             String normalized = normalizeMavenPurl(purl);
@@ -501,7 +501,7 @@ public final class BomMerger {
      * trusted.
      * </p>
      */
-    private static void mergeHashes(Component target, Component source) {
+    static void mergeHashes(Component target, Component source) {
         if (source.getHashes() == null || source.getHashes().isEmpty()) {
             return;
         }
@@ -538,7 +538,7 @@ public final class BomMerger {
      * @param target the component to merge properties into
      * @param source the component to copy properties from
      */
-    private static void mergeProperties(Component target, Component source) {
+    static void mergeProperties(Component target, Component source) {
         if (source.getProperties() == null || source.getProperties().isEmpty()) {
             return;
         }
@@ -573,7 +573,7 @@ public final class BomMerger {
      * @param target the component to merge external references into
      * @param source the component to copy external references from
      */
-    private static void mergeExternalReferences(Component target, Component source) {
+    static void mergeExternalReferences(Component target, Component source) {
         if (source.getExternalReferences() == null
                 || source.getExternalReferences().isEmpty()) {
             return;
