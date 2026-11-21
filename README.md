@@ -319,6 +319,8 @@ The `assembly-sbom-maven-plugin` provides two goals for projects that need SBOM 
 
 Scans an exploded directory (e.g., an exploded WAR produced by `maven-war-plugin`) and generates a CycloneDX SBOM by identifying Maven artifacts via content-hash matching. Uses the same identification engine as the [assembly handler](#assembly-handler).
 
+The goal runs before the archive is packaged. For a `war` module, it leaves out the files the WAR plugin writes at package time: `META-INF/MANIFEST.MF`, and the module's own `META-INF/maven/<groupId>/<artifactId>/pom.xml` and `pom.properties`. A copy of these files in the exploded directory is not what ships. For example, an overlay unpacks the upstream WAR's manifest there, and the WAR plugin replaces it. Descriptors that an overlay brings in ship unchanged, so the SBOM keeps them.
+
 ```xml
 <plugin>
     <groupId>dev.cyberstamp.maven.assembly.sbom</groupId>
