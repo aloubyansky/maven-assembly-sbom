@@ -169,6 +169,20 @@ public record PackageComponent(PackageRef ref, String archivePath, String hash,
     }
 
     /**
+     * Returns a copy of this component declaring whether its dependencies are
+     * known, preserving all other attributes (including {@link #id()}).
+     *
+     * @param known whether this component's dependencies are known
+     * @return this component, or a copy with the given flag
+     */
+    public PackageComponent withDependenciesKnown(boolean known) {
+        if (known == dependenciesKnown) {
+            return this;
+        }
+        return new PackageComponent(ref, archivePath, hash, licenses, nested, known, identification, id);
+    }
+
+    /**
      * Returns {@code true} when replacing {@code current} with {@code candidate}
      * would be a no-op: they are the same list instance, or both are empty
      * ({@code candidate} may be {@code null}). {@code current} is always a

@@ -14,7 +14,9 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
@@ -48,8 +50,10 @@ import org.cyclonedx.model.component.evidence.Occurrence;
 import org.cyclonedx.parsers.JsonParser;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.RepositorySystemSession;
+import org.eclipse.aether.collection.CollectRequest;
 import org.eclipse.aether.collection.CollectResult;
 import org.eclipse.aether.collection.DependencyCollectionContext;
+import org.eclipse.aether.collection.DependencyCollectionException;
 import org.eclipse.aether.collection.DependencySelector;
 import org.eclipse.aether.graph.DefaultDependencyNode;
 import org.eclipse.aether.graph.Dependency;
@@ -288,6 +292,147 @@ class SbomContainerDescriptorHandlerTest {
     }
 
     @Test
+    void warContentIsNotResolved() throws Exception {
+        // the project ships y and x (y -> x) and an unpacked war with its own z
+        Path y = createTestJar("y-1.0.jar", "y-content");
+        Path x = createTestJar("x-1.0.jar", "x-content");
+        Path z = createTestJar("z-2.0.jar", "z-content");
+        Path html = createTestFile("index.html", "<html/>");
+        Path war = createWar("app-1.0.war", Map.of("WEB-INF/lib/z-2.0.jar", z, "index.html", html));
+        when(project.getArtifacts()).thenReturn(new HashSet<>(List.of(
+                createArtifact("org.ex", "y", "1.0", "jar", y.toFile()),
+                createArtifact("org.ex", "x", "1.0", "jar", x.toFile()),
+                createArtifact("org.ex", "app", "1.0", "war", war.toFile()))));
+        mockReactorWar("app", createArtifact("org.ex", "z", "2.0", "jar", z.toFile()));
+        AtomicInteger collects = stubCollectReporting("y", "x");
+
+        ZipArchiver archiver = new ZipArchiver();
+        archiver.setDestFile(tempDir.resolve("out.zip").toFile());
+        archiver.addFile(y.toFile(), "base/lib/y-1.0.jar");
+        archiver.addFile(x.toFile(), "base/lib/x-1.0.jar");
+        archiver.addFile(z.toFile(), "base/web/app.war/WEB-INF/lib/z-2.0.jar");
+        archiver.addFile(html.toFile(), "base/web/app.war/index.html");
+        handler.finalizeArchiveCreation(archiver);
+
+        Bom bom = readBomFromArchiver(archiver);
+        Map<String, List<String>> deps = dependencyMap(bom);
+        assertEquals(List.of("pkg:maven/org.ex/x@1.0"), deps.get("pkg:maven/org.ex/y@1.0"));
+        assertFalse(deps.containsKey("pkg:maven/org.ex/z@2.0"), "the war's jars have unknown dependencies");
+        assertEquals(List.of(), deps.get(warRef(bom)), "containment is not a dependency");
+        assertEquals(1, collects.get(), "only the module is resolved");
+    }
+
+    @Test
+    void projectJarInsideOverlayIsNotTheModulesCopy() throws Exception {
+        // x ships at lib/ and inside the unpacked overlay; both match the
+        // project's x by hash, and the project resolution reports y -> x
+        Path y = createTestJar("y-1.0.jar", "y-content");
+        Path x = createTestJar("x-1.0.jar", "x-content");
+        Path html = createTestFile("index.html", "<html/>");
+        Path war = createWar("app-1.0.war", Map.of("WEB-INF/lib/x-1.0.jar", x, "index.html", html));
+        when(project.getArtifacts()).thenReturn(new HashSet<>(List.of(
+                createArtifact("org.ex", "y", "1.0", "jar", y.toFile()),
+                createArtifact("org.ex", "x", "1.0", "jar", x.toFile()),
+                createArtifact("org.ex", "app", "1.0", "war", war.toFile()))));
+        stubCollectReporting("y", "x");
+
+        ZipArchiver archiver = new ZipArchiver();
+        archiver.setDestFile(tempDir.resolve("out.zip").toFile());
+        archiver.addFile(y.toFile(), "base/lib/y-1.0.jar");
+        archiver.addFile(x.toFile(), "base/lib/x-1.0.jar");
+        archiver.addFile(x.toFile(), "base/web/app.war/WEB-INF/lib/x-1.0.jar");
+        archiver.addFile(html.toFile(), "base/web/app.war/index.html");
+        handler.finalizeArchiveCreation(archiver);
+
+        Bom bom = readBomFromArchiver(archiver);
+        Map<String, List<String>> deps = dependencyMap(bom);
+        assertEquals(List.of("pkg:maven/org.ex/x@1.0"), deps.get("pkg:maven/org.ex/y@1.0"));
+        Component overlayX = findComponent(bom, Component.Type.LIBRARY, "app").getComponents().stream()
+                .filter(c -> "x".equals(c.getName())).findFirst().orElseThrow();
+        assertEquals("pkg:maven/org.ex/x@1.0#2", overlayX.getBomRef());
+        assertFalse(deps.containsKey(overlayX.getBomRef()), "the overlay's copy is not the module's");
+    }
+
+    @Test
+    void collectFailureLeavesModuleCopiesWithoutEntries() throws Exception {
+        Path y = createTestJar("y-1.0.jar", "y-content");
+        when(project.getArtifacts()).thenReturn(Set.of(createArtifact("org.ex", "y", "1.0", "jar", y.toFile())));
+        when(repoSystem.collectDependencies(any(RepositorySystemSession.class), any()))
+                .thenThrow(new DependencyCollectionException(new CollectResult(new CollectRequest())));
+
+        ZipArchiver archiver = buildArchiver("base/lib/y-1.0.jar", y);
+        handler.finalizeArchiveCreation(archiver);
+
+        Map<String, List<String>> deps = dependencyMap(readBomFromArchiver(archiver));
+        assertFalse(deps.containsKey("pkg:maven/org.ex/y@1.0"), "unknown, not none");
+    }
+
+    /**
+     * Stubs every collect request to report the module's root depending on
+     * {@code parent} and {@code parent -> child} (all {@code org.ex:*:1.0}).
+     *
+     * @return the number of collect requests made
+     */
+    private AtomicInteger stubCollectReporting(String parent, String child) throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        org.eclipse.aether.artifact.Artifact parentArtifact = new org.eclipse.aether.artifact.DefaultArtifact(
+                "org.ex", parent, "jar", "1.0");
+        Dependency parentDep = new Dependency(parentArtifact, "compile");
+        Dependency childDep = new Dependency(
+                new org.eclipse.aether.artifact.DefaultArtifact("org.ex", child, "jar", "1.0"), "compile");
+        when(repoSystem.collectDependencies(any(RepositorySystemSession.class), any())).thenAnswer(invocation -> {
+            calls.incrementAndGet();
+            DependencySelector selector = ((RepositorySystemSession) invocation.getArgument(0)).getDependencySelector();
+            DependencySelector rootChild = selector.deriveChildSelector(mockCollectionContext(
+                    new org.eclipse.aether.artifact.DefaultArtifact("com.example", "test-app", "jar", "1.0"), null));
+            rootChild.selectDependency(parentDep);
+            rootChild.deriveChildSelector(mockCollectionContext(parentArtifact, parentDep)).selectDependency(childDep);
+            DefaultDependencyNode root = new DefaultDependencyNode((Dependency) null);
+            root.setChildren(List.of());
+            CollectResult result = new CollectResult(invocation.getArgument(1));
+            result.setRoot(root);
+            return result;
+        });
+        return calls;
+    }
+
+    private Path createWar(String name, Map<String, Path> entries) throws Exception {
+        Path war = tempDir.resolve(name);
+        try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(war))) {
+            for (Map.Entry<String, Path> e : new java.util.TreeMap<>(entries).entrySet()) {
+                jos.putNextEntry(new JarEntry(e.getKey()));
+                jos.write(Files.readAllBytes(e.getValue()));
+                jos.closeEntry();
+            }
+        }
+        return war;
+    }
+
+    /** Registers {@code org.ex:<artifactId>:1.0} as a reactor war module resolving {@code artifacts}. */
+    private void mockReactorWar(String artifactId, Artifact... artifacts) {
+        MavenProject module = mock(MavenProject.class);
+        when(module.getGroupId()).thenReturn("org.ex");
+        when(module.getArtifactId()).thenReturn(artifactId);
+        when(module.getVersion()).thenReturn("1.0");
+        when(module.getPackaging()).thenReturn("war");
+        when(module.getArtifacts()).thenReturn(Set.of(artifacts));
+        when(session.getProjects()).thenReturn(List.of(module));
+    }
+
+    private static String warRef(Bom bom) {
+        return findComponent(bom, Component.Type.LIBRARY, "app").getBomRef();
+    }
+
+    private static Map<String, List<String>> dependencyMap(Bom bom) {
+        Map<String, List<String>> map = new java.util.HashMap<>();
+        for (org.cyclonedx.model.Dependency d : bom.getDependencies()) {
+            map.put(d.getRef(), d.getDependencies() == null ? List.of()
+                    : d.getDependencies().stream().map(org.cyclonedx.model.Dependency::getRef).sorted().toList());
+        }
+        return map;
+    }
+
+    @Test
     void duplicateArtifactAtTwoLocationsMergesOccurrences() throws Exception {
         Path jarFile = createTestJar("jspecify-1.0.jar", "jspecify-content");
         Artifact artifact = createArtifact("org.jspecify", "jspecify", "1.0", "jar", jarFile.toFile());
@@ -374,9 +519,11 @@ class SbomContainerDescriptorHandlerTest {
         var warDep = bom.getDependencies().stream()
                 .filter(d -> warRef.equals(d.getRef())).findFirst().orElse(null);
         assertNotNull(warDep);
-        assertTrue(warDep.getDependencies().stream()
-                .anyMatch(d -> d.getRef().equals(nested.getBomRef())),
-                "WAR should depend on nested-lib");
+        assertTrue(warDep.getDependencies() == null || warDep.getDependencies().stream()
+                .noneMatch(d -> d.getRef().equals(nested.getBomRef())),
+                "containment is not a dependency: the WAR does not depend on nested-lib");
+        assertTrue(bom.getDependencies().stream().noneMatch(d -> d.getRef().equals(nested.getBomRef())),
+                "the WAR is not resolved, so nested-lib's dependencies are unknown");
     }
 
     @Test
@@ -489,9 +636,11 @@ class SbomContainerDescriptorHandlerTest {
         var warDep = bom.getDependencies().stream()
                 .filter(d -> warRef.equals(d.getRef())).findFirst().orElse(null);
         assertNotNull(warDep);
-        assertTrue(warDep.getDependencies().stream()
-                .anyMatch(d -> d.getRef().equals(jolokia.getBomRef())),
-                "WAR should depend on jolokia-json");
+        assertTrue(warDep.getDependencies() == null || warDep.getDependencies().stream()
+                .noneMatch(d -> d.getRef().equals(jolokia.getBomRef())),
+                "containment is not a dependency: the WAR does not depend on jolokia-json");
+        assertTrue(bom.getDependencies().stream().noneMatch(d -> d.getRef().equals(jolokia.getBomRef())),
+                "the WAR is not resolved, so jolokia-json's dependencies are unknown");
     }
 
     @Test

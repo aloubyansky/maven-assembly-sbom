@@ -445,12 +445,13 @@ When the filename is ambiguous (zero or multiple `artifactId` values match), the
 
 ### Dependency Graph
 
-The BOM includes a CycloneDX dependency graph reflecting the Maven dependency tree. Only artifacts that are actually present in the assembly are included.
+The BOM includes a CycloneDX dependency graph reflecting the module's own Maven dependency tree. Only artifacts that are actually present in the assembly are included.
 
 - **Direct vs. transitive** — the graph preserves the Maven dependency hierarchy. Transitive dependencies are connected through their parent, not listed as direct dependencies of the main component.
-- **Unpacked artifact dependencies** — nested JARs identified within unpacked archives are connected to their parent artifact via dependency edges.
-- **Unknown dependencies** — a component whose dependencies were never resolved has no dependency entry, since an empty entry would declare that it has none. This applies to artifacts bundled in a shaded JAR and to JARs identified from their `pom.properties`, a detected SBOM or a remote lookup rather than as project dependencies.
-- **Several copies of an artifact** — when the same artifact ships more than once (e.g. at the top level and inside a WAR, or bundled in a shaded JAR), each copy is a separate component. One keeps the plain bom-ref (the first met, top-level first, or, when the artifact has a dependency entry, the first whose dependencies are known); the others get `#2`, `#3`, ... appended. A copy whose dependencies are known gets the artifact's dependency entry, and a component depending on the artifact also depends on the copies nested in it. The main component depends on what ships at the top level, so its dependency follows the top-level copy, whichever bom-ref it ends up with.
+- **Only the module is resolved** — the module's resolution uses the POM of the build being run. Unpacked WARs and overlays are not resolved, since their published POM may differ from the one their build used: the JARs identified inside them have unknown dependencies, unless the archive carries its own SBOM, which supplies them when it is merged.
+- **Containment is not a dependency** — a component nested inside another (a JAR in an unpacked WAR, a dependency bundled in a shaded JAR) is expressed by nesting only, never by a dependency edge from its parent.
+- **Unknown dependencies** — a component whose dependencies were never resolved has no dependency entry, since an empty entry would declare that it has none. This applies to artifacts bundled in a shaded JAR, to JARs inside unpacked archives, and to JARs identified from their `pom.properties`, a detected SBOM or a remote lookup rather than as project dependencies. If the module's resolution fails, its artifacts have unknown dependencies too.
+- **Several copies of an artifact** — when the same artifact ships more than once (e.g. at the top level and inside a WAR, or bundled in a shaded JAR), each copy is a separate component with its own bom-ref: the first top-level copy keeps the artifact's purl, and the others get `#2`, `#3`, ... appended (top-level components first, then nested ones level by level). Dependency edges connect specific copies: the module's resolution reaches only the module's own copies, never a copy inside another archive.
 
 ### SBOM Merging
 

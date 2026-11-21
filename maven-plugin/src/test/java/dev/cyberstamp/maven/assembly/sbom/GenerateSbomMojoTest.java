@@ -300,8 +300,9 @@ class GenerateSbomMojoTest {
 
     @Test
     void dependencyGraphFailureDoesNotPreventBomGeneration() throws Exception {
-        Files.writeString(inputDir.resolve("data.txt"), "hello");
-        when(project.getArtifacts()).thenReturn(Set.of());
+        Path jarFile = createTestJar("WEB-INF/lib/foo-1.0.jar", "foo-content");
+        when(project.getArtifacts()).thenReturn(Set.of(createArtifact("org.example", "foo", "1.0",
+                "jar", jarFile.toFile())));
         when(repoSystem.collectDependencies(any(), any()))
                 .thenThrow(new RuntimeException("simulated collection failure"));
 
@@ -314,6 +315,8 @@ class GenerateSbomMojoTest {
         assertNotNull(bom);
         assertNotNull(bom.getMetadata());
         assertEquals("test-app", bom.getMetadata().getComponent().getName());
+        assertTrue(bom.getDependencies().stream().noneMatch(d -> d.getRef().startsWith("pkg:maven/org.example/foo@")),
+                "foo's dependencies are unknown, not none");
     }
 
     @Test

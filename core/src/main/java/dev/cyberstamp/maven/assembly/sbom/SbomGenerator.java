@@ -5,6 +5,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -13,7 +14,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.maven.execution.MavenSession;
-import org.apache.maven.model.Model;
 import org.apache.maven.project.MavenProject;
 import org.cyclonedx.Version;
 import org.cyclonedx.model.Bom;
@@ -782,101 +782,89 @@ public class SbomGenerator {
     }
 
     /**
-     * Builds the inferred dependency graph from Maven dependency resolution
-     * and adds the edges to the model as {@link DependencyEdge}s with
-     * {@code explicit=false}.
+     * Adds the module's dependency edges to the model.
      *
      * <p>
-     * Reads {@code nestedDepsByParent} from the analyzer's side-data getter
-     * (Ruling C2-C: Aether confinement) and {@code knownIds} from the model.
-     * Preserves the try/catch warn-and-continue behavior from the legacy
-     * implementation.
+     * The module's own Maven resolution is the only one run: it uses the POM
+     * of the build being run, so it reflects build time by definition.
+     * Unpacked WARs and overlays are not resolved, since a published POM may
+     * differ from the one their build used. Each collected artifact edge
+     * {@code a -> b} is bound to the module's copies of {@code a} and
+     * {@code b} (see {@link ArchiveAnalyzer#moduleCopies()}); an edge with an
+     * end the module does not ship is dropped.
+     * </p>
+     *
+     * <p>
+     * When the resolution fails (e.g. offline, or a descriptor cannot be
+     * read), a warning is logged, no edges are added, and the module's copies
+     * are marked as having unknown dependencies, so they are not rendered as
+     * having none.
      * </p>
      */
     private void buildDependencyGraph(AssemblyComponents model) {
+        Map<ArtifactCoords, ComponentId> copies = lastAnalyzer.moduleCopies();
+        if (copies.isEmpty()) {
+            return;
+        }
+        Map<ArtifactCoords, Set<ArtifactCoords>> collectedEdges;
         try {
-            Map<ArtifactCoords, List<org.eclipse.aether.graph.Dependency>> nestedDepsByParent = lastAnalyzer
-                    .nestedDepsByParent();
-            if (nestedDepsByParent == null) {
-                nestedDepsByParent = Map.of();
-            }
-            Map<ArtifactCoords, Set<ArtifactCoords>> collectedEdges = collectDependencyEdges(nestedDepsByParent);
-            Map<ArtifactCoords, ComponentId> copies = firstKnownCopies(model);
-            Map<ArtifactCoords, List<ArtifactCoords>> graph = filterEdges(collectedEdges, copies.keySet());
-            for (Map.Entry<ArtifactCoords, List<ArtifactCoords>> entry : graph.entrySet()) {
-                ComponentId parent = copies.get(entry.getKey());
-                for (ArtifactCoords child : entry.getValue()) {
-                    model.addDependencyEdge(new DependencyEdge(parent, copies.get(child)));
-                }
-            }
+            collectedEdges = collectDependencyEdges();
         } catch (Exception e) {
             log.warn("Failed to build dependency graph,"
                     + " SBOM will omit dependency information", e);
+            markDependenciesUnknown(model, copies.values());
+            return;
+        }
+        for (Map.Entry<ArtifactCoords, Set<ArtifactCoords>> entry : collectedEdges.entrySet()) {
+            ComponentId parent = copies.get(entry.getKey());
+            if (parent == null) {
+                continue;
+            }
+            for (ArtifactCoords childCoords : entry.getValue()) {
+                ComponentId child = copies.get(childCoords);
+                if (child != null && !child.equals(parent)) {
+                    model.addDependencyEdge(new DependencyEdge(parent, child));
+                }
+            }
         }
     }
 
     /**
-     * Maps each Maven artifact in the model to the copy that its collected
-     * edges are bound to: the first copy whose dependencies are known, in
-     * model order (top-level first, then depth-first), which is the copy that
-     * keeps the artifact's plain bom-ref.
+     * Marks the given top-level copies as having unknown dependencies.
+     *
+     * @param model the model whose top-level components to update
+     * @param ids the ids of the copies to mark; all are top-level
      */
-    private static Map<ArtifactCoords, ComponentId> firstKnownCopies(AssemblyComponents model) {
-        Map<ArtifactCoords, ComponentId> copies = new HashMap<>();
-        for (AssemblyComponent comp : model.components()) {
-            if (comp instanceof PackageComponent pkg && pkg.dependenciesKnown()
-                    && pkg.ref() instanceof ArtifactCoords coords) {
-                copies.putIfAbsent(coords, pkg.id());
+    private static void markDependenciesUnknown(AssemblyComponents model, Collection<ComponentId> ids) {
+        Set<ComponentId> unknown = new HashSet<>(ids);
+        List<AssemblyComponent> components = new ArrayList<>(model.components());
+        for (int i = 0; i < components.size(); i++) {
+            if (components.get(i) instanceof PackageComponent pkg && unknown.contains(pkg.id())) {
+                components.set(i, pkg.withDependenciesKnown(false));
             }
         }
-        for (AssemblyComponent comp : model.components()) {
-            for (AssemblyComponent nested : comp.nested()) {
-                collectFirstKnownCopies(nested, copies);
-            }
-        }
-        return copies;
+        model.setComponents(components);
     }
 
-    private static void collectFirstKnownCopies(AssemblyComponent comp, Map<ArtifactCoords, ComponentId> copies) {
-        if (comp instanceof PackageComponent pkg && pkg.dependenciesKnown()
-                && pkg.ref() instanceof ArtifactCoords coords) {
-            copies.putIfAbsent(coords, pkg.id());
-        }
-        for (AssemblyComponent nested : comp.nested()) {
-            collectFirstKnownCopies(nested, copies);
-        }
-    }
-
-    private Map<ArtifactCoords, Set<ArtifactCoords>> collectDependencyEdges(
-            Map<ArtifactCoords, List<org.eclipse.aether.graph.Dependency>> nestedDepsByParent) throws Exception {
+    /**
+     * Collects the module's artifact-level dependency edges by running one
+     * collect request over the project's dependencies, with its dependency
+     * management, recording every parent-child pair the resolver visits.
+     *
+     * @return the collected edges, by parent coordinates
+     * @throws Exception if the resolution fails
+     */
+    private Map<ArtifactCoords, Set<ArtifactCoords>> collectDependencyEdges() throws Exception {
         Map<ArtifactCoords, Set<ArtifactCoords>> collectedEdges = new ConcurrentHashMap<>();
 
         DefaultRepositorySystemSession mutableSession = new DefaultRepositorySystemSession(session.getRepositorySession());
         mutableSession.setDependencySelector(new EdgeCollectorSelectorFactory(
                 session.getRepositorySession().getDependencySelector(), collectedEdges));
 
-        List<org.eclipse.aether.graph.Dependency> projectManagedDeps = collectManagedDependencies();
         CollectRequest request = buildCollectRequest(
-                toAetherDependencies(project.getDependencies()), projectManagedDeps);
+                toAetherDependencies(project.getDependencies()), collectManagedDependencies());
         repoSystem.collectDependencies(mutableSession, request);
-
-        for (Map.Entry<ArtifactCoords, List<org.eclipse.aether.graph.Dependency>> entry : nestedDepsByParent.entrySet()) {
-            List<org.eclipse.aether.graph.Dependency> parentManagedDeps = resolveManagedDependencies(entry.getKey());
-            CollectRequest nestedRequest = buildCollectRequest(entry.getValue(), parentManagedDeps);
-            repoSystem.collectDependencies(mutableSession, nestedRequest);
-        }
-
         return collectedEdges;
-    }
-
-    private List<org.eclipse.aether.graph.Dependency> resolveManagedDependencies(ArtifactCoords coords) {
-        Model model = effectiveModelResolver.resolveEffectiveModel(
-                coords.groupId(), coords.artifactId(), coords.version());
-        if (model == null || model.getDependencyManagement() == null
-                || model.getDependencyManagement().getDependencies() == null) {
-            return List.of();
-        }
-        return toAetherDependencies(model.getDependencyManagement().getDependencies());
     }
 
     private List<org.eclipse.aether.graph.Dependency> collectManagedDependencies() {
@@ -918,25 +906,5 @@ public class SbomGenerator {
         request.setManagedDependencies(managedDeps);
         request.setRepositories(project.getRemoteProjectRepositories());
         return request;
-    }
-
-    private Map<ArtifactCoords, List<ArtifactCoords>> filterEdges(
-            Map<ArtifactCoords, Set<ArtifactCoords>> collectedEdges,
-            Set<ArtifactCoords> knownIds) {
-        Map<ArtifactCoords, List<ArtifactCoords>> graph = new HashMap<>();
-        for (ArtifactCoords id : knownIds) {
-            Set<ArtifactCoords> children = collectedEdges.get(id);
-            if (children == null) {
-                continue;
-            }
-            List<ArtifactCoords> filtered = new ArrayList<>(children.size());
-            for (ArtifactCoords childId : children) {
-                if (knownIds.contains(childId)) {
-                    filtered.add(childId);
-                }
-            }
-            graph.put(id, filtered);
-        }
-        return graph;
     }
 }

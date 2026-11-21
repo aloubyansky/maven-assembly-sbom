@@ -276,8 +276,8 @@ class ArchiveAnalyzerTest {
         assertEquals(1, extractNestedPackages(model).size(), "nested JAR should be identified");
         assertEquals("nested", ((ArtifactCoords) extractNestedPackages(model).get(0).ref()).artifactId());
         assertEquals("org.nested", ((ArtifactCoords) extractNestedPackages(model).get(0).ref()).groupId());
-        assertTrue(extractNestedPackages(model).get(0).dependenciesKnown(),
-                "a nested jar with a file of its own is resolved as a Maven artifact");
+        assertFalse(extractNestedPackages(model).get(0).dependenciesKnown(),
+                "a jar inside an unpacked archive is not resolved: the archive's build-time resolution is unknown");
     }
 
     @Test
@@ -311,7 +311,7 @@ class ArchiveAnalyzerTest {
         PackageComponent warX = (PackageComponent) war.nested().get(0);
         assertEquals("web/war/WEB-INF/lib/x-1.0.jar", warX.archivePath());
         assertEquals(xHash, warX.hash());
-        assertTrue(warX.dependenciesKnown());
+        assertFalse(warX.dependenciesKnown(), "the war is not resolved");
         PackageComponent shaded = extractPackageComponents(model).stream()
                 .filter(c -> "a-shaded".equals(((ArtifactCoords) c.ref()).artifactId())).findFirst().orElseThrow();
         PackageComponent bundledX = (PackageComponent) shaded.nested().get(0);

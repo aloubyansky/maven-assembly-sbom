@@ -81,7 +81,7 @@ class ArchiveAnalyzer {
     private boolean identityEvidence = true;
     private List<Artifact> allArtifacts;
     private ArtifactHashIndex hashIndex;
-    private Map<ArtifactCoords, List<Dependency>> lastNestedDepsByParent;
+    private Map<ArtifactCoords, ComponentId> lastModuleCopies = Map.of();
     private ClaimedArtifactIndex claimedArtifacts = ClaimedArtifactIndex.empty();
     private Set<Component> rejectedExternalComponents = Set.of();
     private Set<Component> matchedExternalComponents = Set.of();
@@ -224,20 +224,23 @@ class ArchiveAnalyzer {
     }
 
     /**
-     * Returns the Aether-typed nested dependencies collected during the last
-     * {@link #analyze} call. This is analysis side-data that must NOT be stored
-     * on the neutral model.
+     * Returns the module's copies found by the last {@link #analyze} call: the
+     * first top-level copy of every artifact matched against the project's
+     * own resolved artifacts (by hash, or as an unpacked artifact), keyed by
+     * its coordinates.
      *
      * <p>
-     * Exposed as a package-private getter so {@link SbomGenerator} can read it
-     * for {@code buildDependencyGraph} without polluting the neutral model.
+     * These are the copies the module's Maven resolution describes, so its
+     * dependency edges are bound to them, and only to them: a copy inside an
+     * unpacked WAR or overlay belongs to that archive, whose build-time
+     * resolution is not known, even when the module depends on the same
+     * artifact. This is analysis side-data, not stored on the model.
      * </p>
      *
-     * @return the nested dependencies map from the last analysis, or {@code null}
-     *         if {@code analyze} has not been called
+     * @return the module's copies by coordinates; empty before {@code analyze}
      */
-    Map<ArtifactCoords, List<Dependency>> nestedDepsByParent() {
-        return lastNestedDepsByParent;
+    Map<ArtifactCoords, ComponentId> moduleCopies() {
+        return lastModuleCopies;
     }
 
     /**
@@ -321,7 +324,7 @@ class ArchiveAnalyzer {
 
         // Expose the Aether-typed side-data to SbomGenerator without storing
         // it on the neutral model, then assemble and return the model.
-        lastNestedDepsByParent = content.nestedDepsByParent();
+        lastModuleCopies = content.moduleCopies();
         return content.build();
     }
 
@@ -429,15 +432,15 @@ class ArchiveAnalyzer {
                 AssemblyComponentsBuilder.MavenEntry parent = prefixToParent.get(longestPrefix);
                 if (!parent.artifactId().equals(entry.artifactId())) {
                     it.remove();
-                    // explicit=false: an unpacked-overlay child expresses
-                    // containment via nesting only and must not emit a
-                    // dependency edge (matches pre-refactor behavior).
-                    // The moved copy keeps its id, so the bundled copies already
-                    // nested under it stay with it.
+                    // The copy came with the unpacked archive, not with the
+                    // module, even though it matched the module's artifact
+                    // first: the archive's build-time resolution is not
+                    // known, so neither are its dependencies. It keeps its
+                    // id, so the bundled copies already nested under it stay
+                    // with it.
                     content.addNestedEntry(new AssemblyComponentsBuilder.NestedMavenEntry(
                             entry.id(), parent.id(), entry.artifactId(),
-                            entry.archivePath(), entry.hash(), false, entry.identification(),
-                            entry.dependenciesKnown()));
+                            entry.archivePath(), entry.hash(), entry.identification(), false));
                 }
             }
         }
@@ -542,7 +545,7 @@ class ArchiveAnalyzer {
                         // nest it under itself
                         continue;
                     }
-                    content.addNestedEntry(owner, c, null, null, false, Identification.pomProperties(), false);
+                    content.addNestedEntry(owner, c, null, null, Identification.pomProperties(), false);
                 }
             }
             it.remove();
@@ -954,7 +957,7 @@ class ArchiveAnalyzer {
         for (ArtifactCoords coords : bundled) {
             // Coordinates come verbatim from the bundled artifact's own
             // pom.properties, however the owner was identified.
-            content.addNestedEntry(owner, coords, null, null, false, Identification.pomProperties(), false);
+            content.addNestedEntry(owner, coords, null, null, Identification.pomProperties(), false);
         }
     }
 
@@ -1095,7 +1098,14 @@ class ArchiveAnalyzer {
 
     /**
      * Records a jar identified inside an unpacked parent as a copy nested
-     * under the parent's copy, and as a root of the parent's collect request.
+     * under the parent's copy.
+     *
+     * <p>
+     * The parent's build-time resolution is not known (its published POM may
+     * differ from the one its build used), so the copy's dependencies are
+     * unknown; the parent's own SBOM, when it has one, supplies them when it
+     * is merged.
+     * </p>
      *
      * @param parentId the id of the parent's copy
      * @return the nested entry
@@ -1104,14 +1114,8 @@ class ArchiveAnalyzer {
             ComponentId parentId, Set<Artifact> matchedArtifacts,
             AssemblyComponentsBuilder content, Identification identification) {
         matchedArtifacts.add(artifact);
-        ArtifactCoords nestedId = MavenArtifactCoords.of(artifact);
-        AssemblyComponentsBuilder.Entry copy = content.addNestedEntry(
-                parentId, nestedId, archiveEntry.archivePath(), archiveEntry.hash(), true, identification, true);
-        content.addNestedDependency(content.coordsOf(parentId), new Dependency(
-                SbomUtils.toAetherArtifact(artifact.getGroupId(), artifact.getArtifactId(),
-                        artifact.getVersion(), artifact.getType(), artifact.getClassifier()),
-                "compile"));
-        return copy;
+        return content.addNestedEntry(parentId, MavenArtifactCoords.of(artifact), archiveEntry.archivePath(),
+                archiveEntry.hash(), identification, false);
     }
 
     /**
@@ -1534,31 +1538,24 @@ class ArchiveAnalyzer {
          *
          * @param id the id of this copy
          * @param parent the id of the copy this one is nested in
-         * @param explicit {@code true} if this entry was positively identified
-         *        by hash and should produce a {@link DependencyEdge};
-         *        {@code false} for bundled (shaded) deps discovered only via
-         *        pom.properties, where nesting is sufficient
          * @param identification how the entry was identified, or {@code null}
          * @param dependenciesKnown whether the artifact's dependencies are
-         *        resolved; {@code false} for one bundled in a shaded jar, known
-         *        only from its pom.properties
+         *        resolved; always {@code false} today: a copy nested in another
+         *        archive is not described by the module's resolution
          */
         record NestedMavenEntry(ComponentId id, ComponentId parent, ArtifactCoords artifactId,
-                String archivePath, String hash, boolean explicit, Identification identification,
+                String archivePath, String hash, Identification identification,
                 boolean dependenciesKnown) implements Entry {
         }
 
         private final List<MavenEntry> mavenEntries = new ArrayList<>();
         private final List<NestedMavenEntry> nestedEntries = new ArrayList<>();
         private final List<FileEntry> unmatchedFiles = new ArrayList<>();
-        private final Map<ArtifactCoords, List<Dependency>> nestedDepsByParent = new HashMap<>();
         // Maven artifacts discovered inside a file (e.g. via pom.properties in a
         // shaded/fat JAR that could not be positively identified), keyed by the
         // file's archive path so they nest under that file's component.
         private final Map<String, List<ArtifactCoords>> fileNestedByPath = new LinkedHashMap<>();
         private final List<DiscoveredSbom> discoveredSboms = new ArrayList<>();
-        // The artifact of every registered copy, by the copy's id.
-        private final Map<ComponentId, ArtifactCoords> coordsById = new HashMap<>();
         // Whether built components carry their Identification.
         private final boolean identityEvidence;
 
@@ -1578,8 +1575,22 @@ class ArchiveAnalyzer {
             return unmatchedFiles;
         }
 
-        Map<ArtifactCoords, List<Dependency>> nestedDepsByParent() {
-            return nestedDepsByParent;
+        /**
+         * Returns the module's copies: the first top-level copy of each
+         * artifact whose dependencies are known, i.e. one matched against the
+         * project's resolved artifacts. Run after the entries under unpacked
+         * archives were moved out of the top level.
+         *
+         * @return the module's copies by coordinates
+         */
+        Map<ArtifactCoords, ComponentId> moduleCopies() {
+            Map<ArtifactCoords, ComponentId> copies = new HashMap<>((int) (mavenEntries.size() / 0.75f) + 1);
+            for (MavenEntry entry : mavenEntries) {
+                if (entry.dependenciesKnown()) {
+                    copies.putIfAbsent(entry.artifactId(), entry.id());
+                }
+            }
+            return copies;
         }
 
         Map<String, List<ArtifactCoords>> fileNestedByPath() {
@@ -1596,7 +1607,6 @@ class ArchiveAnalyzer {
             MavenEntry entry = new MavenEntry(ComponentId.generate(), artifactId, archivePath, hash,
                     identification, dependenciesKnown);
             mavenEntries.add(entry);
-            coordsById.put(entry.id(), artifactId);
             return entry;
         }
 
@@ -1607,9 +1617,9 @@ class ArchiveAnalyzer {
          * @return the registered entry
          */
         NestedMavenEntry addNestedEntry(ComponentId parent, ArtifactCoords artifactId, String archivePath,
-                String hash, boolean explicit, Identification identification, boolean dependenciesKnown) {
+                String hash, Identification identification, boolean dependenciesKnown) {
             return addNestedEntry(new NestedMavenEntry(ComponentId.generate(), parent, artifactId, archivePath, hash,
-                    explicit, identification, dependenciesKnown));
+                    identification, dependenciesKnown));
         }
 
         /**
@@ -1620,18 +1630,7 @@ class ArchiveAnalyzer {
          */
         NestedMavenEntry addNestedEntry(NestedMavenEntry entry) {
             nestedEntries.add(entry);
-            coordsById.put(entry.id(), entry.artifactId());
             return entry;
-        }
-
-        /**
-         * Returns the artifact a registered copy is a copy of.
-         *
-         * @param id the copy's id
-         * @return its coordinates, or {@code null} if no copy has that id
-         */
-        ArtifactCoords coordsOf(ComponentId id) {
-            return coordsById.get(id);
         }
 
         void addUnmatchedFile(FileEntry entry) {
@@ -1649,11 +1648,6 @@ class ArchiveAnalyzer {
 
         void addDiscoveredSbom(DiscoveredSbom sbom) {
             discoveredSboms.add(sbom);
-        }
-
-        void addNestedDependency(ArtifactCoords parentId, Dependency dependency) {
-            nestedDepsByParent.computeIfAbsent(parentId, k -> new ArrayList<>())
-                    .add(dependency);
         }
 
         /**
@@ -1684,8 +1678,8 @@ class ArchiveAnalyzer {
          * <ul>
          * <li>each {@code MavenEntry} → a top-level {@link PackageComponent}</li>
          * <li>each {@code NestedMavenEntry} → a {@link PackageComponent} nested
-         * under the copy its {@code parent} id names, plus (only when
-         * {@code explicit}) a {@link DependencyEdge}</li>
+         * under the copy its {@code parent} id names; containment is never a
+         * {@link DependencyEdge}</li>
          * <li>every built {@link PackageComponent} carries its entry's id</li>
          * <li>each file-nested artifact → a {@link PackageComponent} (no hash)
          * nested under the {@link FileComponent} at that path</li>
@@ -1695,9 +1689,9 @@ class ArchiveAnalyzer {
          * </p>
          *
          * <p>
-         * The Aether-typed {@link #nestedDepsByParent()} is intentionally not
-         * placed on the model; the analyzer exposes it separately for
-         * {@link SbomGenerator} to consume.
+         * The {@link #moduleCopies() module's copies} are not placed on the
+         * model; the analyzer exposes them separately for {@link SbomGenerator}
+         * to bind the module's dependency edges to.
          * </p>
          *
          * @return the assembled neutral model
@@ -1737,14 +1731,7 @@ class ArchiveAnalyzer {
                 model.addComponent(comp);
             }
 
-            // 4. Dependency edges — only for explicitly-identified nested entries.
-            for (NestedMavenEntry nested : nestedEntries) {
-                if (nested.explicit()) {
-                    model.addDependencyEdge(new DependencyEdge(nested.parent(), nested.id()));
-                }
-            }
-
-            // 5. Discovered embedded SBOMs.
+            // 4. Discovered embedded SBOMs.
             for (DiscoveredSbom discovered : discoveredSboms) {
                 model.addDiscoveredSbom(discovered);
             }
