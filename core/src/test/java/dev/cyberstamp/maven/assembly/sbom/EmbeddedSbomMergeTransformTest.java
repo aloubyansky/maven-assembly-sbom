@@ -17,7 +17,7 @@ class EmbeddedSbomMergeTransformTest {
     void ignoreModeIsNoOp() {
         Bom targetBom = buildTargetBom();
         Bom embeddedBom = buildEmbeddedBom();
-        PackageRef libARef = new ArtifactCoords("org.a", "lib-a", "1.0", null, null);
+        ComponentId libARef = ComponentId.generate();
         DiscoveredSbom discovered = new DiscoveredSbom(
                 "lib/lib-a-1.0.jar!/META-INF/sbom.json",
                 embeddedBom,
@@ -41,7 +41,7 @@ class EmbeddedSbomMergeTransformTest {
     void linkModeAddsBomReference() {
         Bom targetBom = buildTargetBom();
         Bom embeddedBom = buildEmbeddedBom();
-        PackageRef libARef = new ArtifactCoords("org.a", "lib-a", "1.0", null, null);
+        ComponentId libARef = ComponentId.generate();
         DiscoveredSbom discovered = new DiscoveredSbom(
                 "lib/lib-a-1.0.jar!/META-INF/sbom.json",
                 embeddedBom,
@@ -76,7 +76,7 @@ class EmbeddedSbomMergeTransformTest {
         Bom embeddedBom = new Bom();
         embeddedBom.setComponents(new ArrayList<>(List.of(nested)));
 
-        PackageRef libARef = new ArtifactCoords("org.a", "lib-a", "1.0", null, null);
+        ComponentId libARef = ComponentId.generate();
         DiscoveredSbom discovered = new DiscoveredSbom(
                 "lib/lib-a-1.0.jar!/META-INF/sbom.json",
                 embeddedBom,
@@ -99,12 +99,13 @@ class EmbeddedSbomMergeTransformTest {
     @Test
     void mergeModeFlat() {
         Bom targetBom = buildTargetBom();
-        Component additional = createLibrary("org.b", "lib-b", "2.0", "pkg:maven/org.b/lib-b@2.0");
+        // a package that cannot be found as a file, so the layout cannot drop it
+        Component additional = createLibrary("org.b", "lib-b", "2.0", "pkg:npm/lib-b@2.0");
         Bom embeddedBom = new Bom();
         embeddedBom.setComponents(new ArrayList<>(List.of(additional)));
 
-        // PackageRef that doesn't match any component in target BOM
-        PackageRef unknownRef = new ArtifactCoords("org.x", "unknown", "1.0", null, null);
+        // An owner that doesn't match any component in target BOM
+        ComponentId unknownRef = ComponentId.generate();
         DiscoveredSbom discovered = new DiscoveredSbom(
                 "lib/unknown.jar!/META-INF/sbom.json",
                 embeddedBom,
@@ -135,7 +136,7 @@ class EmbeddedSbomMergeTransformTest {
     void parentRefResolverInvoked() {
         Bom targetBom = buildTargetBom();
         Bom embeddedBom = buildEmbeddedBom();
-        PackageRef ownerRef = new ArtifactCoords("org.a", "lib-a", "1.0", null, null);
+        ComponentId ownerRef = ComponentId.generate();
         DiscoveredSbom discovered = new DiscoveredSbom(
                 "lib/lib-a-1.0.jar!/META-INF/sbom.json",
                 embeddedBom,

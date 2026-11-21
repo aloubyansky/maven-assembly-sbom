@@ -3,24 +3,30 @@ package dev.cyberstamp.maven.assembly.sbom;
 import java.util.Objects;
 
 /**
- * A directed dependency relationship between two components, identified by
- * their {@link PackageRef}s.
+ * A directed dependency from one component copy to another, identified by
+ * their {@link ComponentId}s.
  *
  * <p>
- * <strong>Contract:</strong> Edges from Maven dependency resolution must not
- * reference a component already in the parent's {@code nested()} list.
- * Containment is expressed via nesting, not dependency edges. The renderer
- * filters out such inferred edges to avoid duplicate parent-child relationships.
- * However, explicit edges ({@link #explicit()} {@code == true}) bypass this
- * filter to preserve manually-declared dependencies.
+ * An edge names <em>copies</em>, not artifacts: when an artifact ships more
+ * than once (at the top level and inside a WAR, or bundled in a shaded jar),
+ * each copy is its own {@link AssemblyComponent} with its own id, and an edge
+ * says exactly which copy depends on which. The producer records an edge
+ * where it knows both ends, e.g. from the module's own Maven resolution,
+ * which connects the copies that resolution placed in the assembly.
  * </p>
  *
- * @param parent the depending component; never {@code null}
- * @param child the depended-upon component; never {@code null}
- * @param explicit {@code true} if this edge was explicitly declared,
- *        {@code false} if inferred from Maven dependency resolution
+ * <p>
+ * <strong>Contract:</strong> containment is not a dependency. A component's
+ * {@link AssemblyComponent#nested() nested} components are expressed by
+ * nesting alone; producers must not add an edge from a parent to a copy
+ * merely because it is nested in it. An edge whose id names no component in
+ * the model is ignored by {@link BomRenderer}.
+ * </p>
+ *
+ * @param parent the id of the depending copy; never {@code null}
+ * @param child the id of the depended-upon copy; never {@code null}
  */
-public record DependencyEdge(PackageRef parent, PackageRef child, boolean explicit) {
+public record DependencyEdge(ComponentId parent, ComponentId child) {
 
     /**
      * Requires non-null {@code parent} and {@code child}.

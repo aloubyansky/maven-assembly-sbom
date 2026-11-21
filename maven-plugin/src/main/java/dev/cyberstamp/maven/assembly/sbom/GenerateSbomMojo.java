@@ -227,6 +227,9 @@ public class GenerateSbomMojo extends AbstractMojo {
             String excludeHash = previousOutputHash;
             entries.removeIf(e -> excludeHash.equals(e.hash()));
         }
+        if ("war".equals(project.getPackaging())) {
+            excludeFilesWrittenByTheWarPlugin(entries);
+        }
         getLog().info("Scanned " + entries.size() + " files in " + inputDirectory);
 
         SbomGenerator generator = new SbomGenerator(
@@ -294,6 +297,41 @@ public class GenerateSbomMojo extends AbstractMojo {
         return ServerCredentialsResolver.resolve(session, settingsDecrypter, serverId);
     }
 
+    /**
+     * Leaves out the files the WAR plugin writes into the archive at package
+     * time, after this goal has run: {@code META-INF/MANIFEST.MF} and the
+     * module's own Maven descriptor ({@code META-INF/maven/<groupId>/<artifactId>/pom.xml}
+     * and {@code pom.properties}). A copy of them in the exploded directory
+     * (e.g. one an overlay unpacked from the upstream WAR) is not what ships,
+     * so describing it would record a hash the WAR does not contain; the
+     * files that do ship are not there yet. Other descriptors under
+     * {@code META-INF/maven/} (an overlay's own) ship as they are and stay.
+     *
+     * @param entries the scanned files, modified in place
+     */
+    private void excludeFilesWrittenByTheWarPlugin(List<FileEntry> entries) {
+        String descriptorDir = "META-INF/maven/" + project.getGroupId() + '/' + project.getArtifactId() + '/';
+        String pomXml = descriptorDir + "pom.xml";
+        String pomProperties = descriptorDir + "pom.properties";
+        entries.removeIf(e -> {
+            String path = e.archivePath();
+            boolean written = path.equals("META-INF/MANIFEST.MF") || path.equals(pomXml)
+                    || path.equals(pomProperties);
+            if (written) {
+                getLog().debug("Not describing " + path + ": the WAR plugin writes it when packaging");
+            }
+            return written;
+        });
+    }
+
+    /**
+     * Hashes every file under a directory.
+     *
+     * @param dir the directory to scan
+     * @param digest the digest to hash the files with
+     * @return an entry per file, with its path relative to {@code dir}
+     * @throws IOException if a file cannot be read
+     */
     private List<FileEntry> collectDirectoryEntries(Path dir, MessageDigest digest) throws IOException {
         List<FileEntry> entries = new ArrayList<>();
         Files.walkFileTree(dir, new SimpleFileVisitor<>() {

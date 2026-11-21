@@ -16,6 +16,12 @@ final class EmbeddedSbomMergeTransform {
     private final String mode;
     private final ArchiveIndex archiveIndex;
 
+    /**
+     * Creates the transform.
+     *
+     * @param mode {@code merge}, {@code link} or {@code ignore}: what to do with each discovered SBOM
+     * @param archiveIndex the scanned layout merged components are checked against, or {@code null}
+     */
     EmbeddedSbomMergeTransform(String mode, ArchiveIndex archiveIndex) {
         this.mode = mode;
         this.archiveIndex = archiveIndex;
@@ -26,11 +32,12 @@ final class EmbeddedSbomMergeTransform {
      *
      * @param bom the target BOM to merge into
      * @param model the assembly components model containing discovered SBOMs
-     * @param parentRefResolver resolves a DiscoveredSbom owner PackageRef to a
-     *        parent bom-ref (mirrors SbomGenerator.resolveParentBomRef)
+     * @param parentRefResolver resolves a {@link DiscoveredSbom#owner()} id
+     *        (possibly {@code null}) to the bom-ref of the component to merge
+     *        under, e.g. from {@link RenderedBom#bomRefs()}
      */
     void apply(Bom bom, AssemblyComponents model,
-            Function<PackageRef, String> parentRefResolver) {
+            Function<ComponentId, String> parentRefResolver) {
         if ("ignore".equalsIgnoreCase(mode)) {
             return;
         }
@@ -39,17 +46,13 @@ final class EmbeddedSbomMergeTransform {
             if ("link".equalsIgnoreCase(mode)) {
                 BomMerger.addBomReference(bom, parentRef, detected.archivePath());
             } else {
+                // The SBOM describes the copy it was found in; without one it
+                // describes the assembly. The layout drops what does not ship.
                 Component parent = BomMerger.findComponentByBomRef(bom, parentRef);
-                String parentPrefix = parent != null
-                        ? BomMerger.getParentPathPrefix(parent)
-                        : null;
-                Bom filtered = SbomGenerator.filterSbomByArchive(
-                        detected.parsedBom(), archiveIndex, parentPrefix);
-                if (parent != null) {
-                    BomMerger.mergeUnder(bom, parentRef, filtered);
-                } else {
-                    BomMerger.mergeFlat(bom, filtered);
+                if (parent == null) {
+                    parent = bom.getMetadata().getComponent();
                 }
+                AnchoredMerge.merge(bom, detected.parsedBom(), AnchoredMerge.Scope.of(parent, archiveIndex));
             }
         }
     }

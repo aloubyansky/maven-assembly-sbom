@@ -209,13 +209,13 @@ class BomMergerTest {
         BomMerger.mergeUnder(target, "pkg:maven/org.a/war-a@1.0", sourceA);
         BomMerger.mergeUnder(target, "pkg:maven/org.b/war-b@1.0", sourceB);
 
-        long lodashCount = target.getDependencies().stream()
-                .filter(d -> "pkg:npm/lodash@4.17.21".equals(d.getRef()))
-                .count();
-        assertEquals(1, lodashCount,
-                "shared dependency ref should appear only once");
-        assertEquals(3, target.getDependencies().size(),
-                "target should have original + react + lodash (no duplicate)");
+        // each war ships its own copy of lodash, each with its own entry
+        assertEquals(List.of("pkg:maven/com.example/app@1.0", "pkg:npm/lodash@4.17.21",
+                "pkg:npm/lodash@4.17.21#2", "pkg:npm/react@18.3.1"),
+                target.getDependencies().stream().map(Dependency::getRef).sorted().toList());
+        assertEquals("pkg:npm/lodash@4.17.21", target.getDependencies().stream()
+                .filter(d -> "pkg:npm/react@18.3.1".equals(d.getRef())).findFirst().orElseThrow()
+                .getDependencies().get(0).getRef(), "war-a's react depends on war-a's lodash");
     }
 
     @Test
@@ -386,6 +386,7 @@ class BomMergerTest {
 
         Component war = createLibrary("org.a", "war", "1.0",
                 "pkg:maven/org.a/war@1.0?type=war");
+        war.setEvidence(evidenceWithOccurrence("")); // unpacked at the assembly root
 
         Bom target = buildTargetBom("pkg:maven/com.example/app@1.0",
                 war, jspecify);
@@ -422,6 +423,7 @@ class BomMergerTest {
 
         Component war = createLibrary("org.a", "war", "1.0",
                 "pkg:maven/org.a/war@1.0?type=war");
+        war.setEvidence(evidenceWithOccurrence("")); // unpacked at the assembly root
 
         Bom target = buildTargetBom("pkg:maven/com.example/app@1.0",
                 war, topLib);
@@ -458,6 +460,7 @@ class BomMergerTest {
                 identity(Method.Technique.HASH_COMPARISON, 1.0))));
         topLib.setEvidence(evidence);
         Component war = createLibrary("org.a", "war", "1.0", "pkg:maven/org.a/war@1.0?type=war");
+        war.setEvidence(evidenceWithOccurrence("")); // unpacked at the assembly root
         Bom target = buildTargetBom("pkg:maven/com.example/app@1.0", war, topLib);
 
         Component sourceLib = createLibrary("org.jspecify", "jspecify", "1.0.0",
@@ -532,11 +535,11 @@ class BomMergerTest {
         assertNotNull(result.getEvidence(),
                 "evidence should be preserved when merging duplicate");
         assertNotNull(result.getEvidence().getOccurrences(),
-                "occurrences should survive dedup merge");
+                "occurrences should survive the merge");
         assertEquals("WEB-INF/lib/jspecify-1.0.0.jar",
                 result.getEvidence().getOccurrences().get(0).getLocation());
         assertNotNull(result.getEvidence().getIdentities(),
-                "identities should survive dedup merge");
+                "identities should survive the merge");
     }
 
     @Test
@@ -1656,8 +1659,9 @@ class BomMergerTest {
 
         BomMerger.mergeUnder(target, "pkg:maven/org.a/war@1.0", buildSourceBom(wrapper));
 
-        assertFalse(war.getComponents().contains(sibling), "sibling folded into the wrapper child");
-        assertEquals(List.of("web/console.war/WEB-INF/lib/codec-1.0.jar"), locations(wrapperCodec),
+        assertFalse(war.getComponents().contains(sibling), "sibling placed in the wrapper");
+        Component codec = war.getComponents().get(0).getComponents().get(0);
+        assertEquals(List.of("web/console.war/WEB-INF/lib/codec-1.0.jar"), locations(codec),
                 "one file, one occurrence");
     }
 
@@ -1686,9 +1690,10 @@ class BomMergerTest {
         BomMerger.mergeUnder(target, "pkg:maven/org.a/ear@1.0", buildSourceBom(war));
 
         assertEquals(List.of(war), ear.getComponents(), "the file is listed once, under the war");
-        assertEquals(List.of(child), war.getComponents());
-        assertEquals(List.of("deploy/app.ear/app.war/WEB-INF/lib/x-1.0.jar"), locations(child));
-        assertEquals(List.of("aa11"), child.getHashes().stream().map(Hash::getValue).toList(),
-                "the sibling's data moved into the child");
+        assertEquals(1, war.getComponents().size());
+        Component x = war.getComponents().get(0);
+        assertEquals(List.of("deploy/app.ear/app.war/WEB-INF/lib/x-1.0.jar"), locations(x));
+        assertEquals(List.of("aa11"), x.getHashes().stream().map(Hash::getValue).toList(),
+                "the file's copy keeps its data");
     }
 }

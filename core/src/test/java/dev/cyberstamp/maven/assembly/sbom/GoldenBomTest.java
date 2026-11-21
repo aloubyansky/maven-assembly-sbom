@@ -203,11 +203,12 @@ class GoldenBomTest {
 
         // Top-level alpha, identified by hash, with a nested component and an
         // SPDX-id license.
-        model.addComponent(new PackageComponent(alpha, "lib/alpha.jar",
+        PackageComponent alphaCopy = new PackageComponent(alpha, "lib/alpha.jar",
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 List.of(LicenseInfo.spdx("Apache-2.0",
                         "https://www.apache.org/licenses/LICENSE-2.0")),
-                List.of(bundled), true, Identification.hashMatch()));
+                List.of(bundled), true, Identification.hashMatch());
+        model.addComponent(alphaCopy);
 
         // Same PURL again at a second path with no license -> occurrence merge,
         // first-wins licenses.
@@ -217,17 +218,18 @@ class GoldenBomTest {
 
         // Top-level beta with an SPDX-expression license and no identification,
         // so it renders no identity evidence.
-        model.addComponent(new PackageComponent(beta, "lib/beta.jar",
+        PackageComponent betaCopy = new PackageComponent(beta, "lib/beta.jar",
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                List.of(LicenseInfo.expression("(MIT OR Apache-2.0)")), List.of()));
+                List.of(LicenseInfo.expression("(MIT OR Apache-2.0)")), List.of());
+        model.addComponent(betaCopy);
 
         // A plain FILE component (raw license comes from project licenses).
         model.addComponent(new FileComponent("bin/launcher.sh",
                 "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                 List.of()));
 
-        // An explicit inter-artifact dependency: alpha depends on beta.
-        model.addDependencyEdge(new DependencyEdge(alpha, beta, true));
+        // A hand-declared dependency: alpha depends on beta.
+        model.addDependencyEdge(new DependencyEdge(alphaCopy.id(), betaCopy.id()));
 
         return model;
     }

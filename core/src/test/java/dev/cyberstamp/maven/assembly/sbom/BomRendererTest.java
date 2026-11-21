@@ -1,12 +1,16 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Stream;
 
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
@@ -334,11 +338,13 @@ class BomRendererTest {
         ArtifactCoords lib1 = ArtifactCoords.of("com.example", "lib1", "1.0");
         ArtifactCoords lib2 = ArtifactCoords.of("com.example", "lib2", "2.0");
 
-        model.addComponent(PackageComponent.of(lib1, "lib/lib1-1.0.jar", "hash1"));
-        model.addComponent(PackageComponent.of(lib2, "lib/lib2-2.0.jar", "hash2"));
+        PackageComponent lib1Copy = PackageComponent.of(lib1, "lib/lib1-1.0.jar", "hash1");
+        PackageComponent lib2Copy = PackageComponent.of(lib2, "lib/lib2-2.0.jar", "hash2");
+        model.addComponent(lib1Copy);
+        model.addComponent(lib2Copy);
 
         // lib1 depends on lib2
-        model.addDependencyEdge(new DependencyEdge(lib1, lib2, false));
+        model.addDependencyEdge(new DependencyEdge(lib1Copy.id(), lib2Copy.id()));
 
         BomRenderer renderer = new BomRenderer();
         Bom bom = renderer.render(model);
@@ -434,55 +440,6 @@ class BomRendererTest {
      * AND a DependencyEdge(parent → jar) should render a parent Dependency with
      * ZERO children (the nested jar is filtered out per BomBuilder.mergeDependencyGraphs L707).
      */
-    @Test
-    void testNestedComponentFilteredFromDependencyGraph() {
-        AssemblyComponents model = new AssemblyComponents();
-        AssemblyMetadata metadata = new AssemblyMetadata();
-        metadata.setProjectGroupId("org.example");
-        metadata.setProjectArtifactId("my-app");
-        metadata.setProjectVersion("1.0.0");
-        metadata.setHashAlgorithmSpec("SHA-256");
-
-        model.setMetadata(metadata);
-
-        ArtifactCoords jarCoords = ArtifactCoords.of("com.example", "lib", "1.0");
-        PackageComponent nestedJar = PackageComponent.of(
-                jarCoords, "lib/app-2.0.0.jar/WEB-INF/lib/lib-1.0.jar", "nestedhash");
-
-        ArtifactCoords parentCoords = ArtifactCoords.of("com.example", "app", "2.0.0");
-        PackageComponent parent = new PackageComponent(
-                parentCoords,
-                "lib/app-2.0.0.jar",
-                "parenthash",
-                List.of(),
-                List.of(nestedJar)); // jar is nested under parent
-
-        model.addComponent(parent);
-
-        // Add a dependency edge parent → jar (should be filtered out because jar is nested)
-        model.addDependencyEdge(new DependencyEdge(parentCoords, jarCoords, false));
-
-        BomRenderer renderer = new BomRenderer();
-        Bom bom = renderer.render(model);
-
-        // Find the parent's dependency entry
-        String parentPurl = "pkg:maven/com.example/app@2.0.0";
-        Dependency parentDep = null;
-        for (Dependency d : bom.getDependencies()) {
-            if (parentPurl.equals(d.getRef())) {
-                parentDep = d;
-                break;
-            }
-        }
-        assertNotNull(parentDep, "Parent should have a dependency entry");
-
-        // The parent's dependency should have ZERO children (nested jar filtered out)
-        // CycloneDX represents empty dependencies as null or empty list
-        int childCount = parentDep.getDependencies() == null ? 0 : parentDep.getDependencies().size();
-        assertEquals(0, childCount,
-                "Parent dependency should have no children (nested jar filtered out)");
-    }
-
     /**
      * Tests occurrence merge with dependencies: a component that appears at
      * two paths (occurrence merge) and is also a dependency parent should
@@ -503,14 +460,16 @@ class BomRendererTest {
         ArtifactCoords child = ArtifactCoords.of("com.example", "child", "2.0");
 
         // Parent appears at two paths (should trigger occurrence merge)
-        model.addComponent(PackageComponent.of(parent, "lib/parent-1.0.jar", "hash1"));
+        PackageComponent parentCopy = PackageComponent.of(parent, "lib/parent-1.0.jar", "hash1");
+        model.addComponent(parentCopy);
         model.addComponent(PackageComponent.of(parent, "other/parent-1.0.jar", "hash1"));
 
         // Child appears once
-        model.addComponent(PackageComponent.of(child, "lib/child-2.0.jar", "hash2"));
+        PackageComponent childCopy = PackageComponent.of(child, "lib/child-2.0.jar", "hash2");
+        model.addComponent(childCopy);
 
         // parent depends on child
-        model.addDependencyEdge(new DependencyEdge(parent, child, false));
+        model.addDependencyEdge(new DependencyEdge(parentCopy.id(), childCopy.id()));
 
         BomRenderer renderer = new BomRenderer();
         Bom bom = renderer.render(model);
@@ -648,7 +607,9 @@ class BomRendererTest {
     }
 
     @Test
-    void topLevelComponentGetsLeafEntryEvenIfBundledCopyHasUnknownDependencies() {
+    void topLevelGetsLeafEntryAndBundledCopyNone() {
+        // x ships top-level (dependencies known: none) and bundled in a shaded
+        // jar (dependencies unknown); the renderer gives the copies unique bom-refs.
         AssemblyComponents model = new AssemblyComponents();
         AssemblyMetadata metadata = new AssemblyMetadata();
         metadata.setProjectGroupId("org.example");
@@ -665,11 +626,122 @@ class BomRendererTest {
 
         Bom bom = new BomRenderer().render(model);
 
+        Component shaded = bom.getComponents().stream()
+                .filter(c -> "shaded".equals(c.getName())).findFirst().orElseThrow();
+        assertEquals("pkg:maven/com.example/x@1.0#2", shaded.getComponents().get(0).getBomRef());
         List<Dependency> xEntries = bom.getDependencies().stream()
-                .filter(d -> "pkg:maven/com.example/x@1.0".equals(d.getRef()))
+                .filter(d -> d.getRef().startsWith("pkg:maven/com.example/x@1.0"))
                 .toList();
-        assertEquals(1, xEntries.size(), "the top-level x knows its dependencies, so it gets an entry");
+        assertEquals(List.of("pkg:maven/com.example/x@1.0"), xEntries.stream().map(Dependency::getRef).toList(),
+                "the top-level x gets an entry; the bundled copy, whose dependencies are unknown, none");
         assertTrue(xEntries.get(0).getDependencies() == null || xEntries.get(0).getDependencies().isEmpty(),
                 "x depends on nothing, so the entry is a leaf");
+        assertTrue(bom.getDependencies().stream()
+                .flatMap(d -> d.getDependencies() == null ? Stream.empty() : d.getDependencies().stream())
+                .noneMatch(d -> d.getRef().endsWith("#2")),
+                "nothing depends on the bundled copy");
+    }
+
+    /** A model of {@code org.example:my-app:1.0.0} with the given top-level components. */
+    private static AssemblyComponents modelOf(List<AssemblyComponent> components) {
+        AssemblyComponents model = new AssemblyComponents();
+        AssemblyMetadata metadata = new AssemblyMetadata();
+        metadata.setProjectGroupId("org.example");
+        metadata.setProjectArtifactId("my-app");
+        metadata.setProjectVersion("1.0.0");
+        metadata.setHashAlgorithmSpec("SHA-256");
+        model.setMetadata(metadata);
+        components.forEach(model::addComponent);
+        return model;
+    }
+
+    /** The top-level component named {@code name}; fails if there is none. */
+    private static Component topLevel(Bom bom, String name) {
+        return bom.getComponents().stream().filter(c -> name.equals(c.getName())).findFirst().orElseThrow();
+    }
+
+    /** Every dependency entry's sorted children, by the entry's ref. */
+    private static Map<String, List<String>> dependencyMap(Bom bom) {
+        Map<String, List<String>> map = new HashMap<>();
+        for (Dependency d : bom.getDependencies()) {
+            map.put(d.getRef(), d.getDependencies() == null ? List.of()
+                    : d.getDependencies().stream().map(Dependency::getRef).sorted().toList());
+        }
+        return map;
+    }
+
+    private static final String MAIN_REF = "pkg:maven/org.example/my-app@1.0.0";
+    private static final ArtifactCoords X = ArtifactCoords.of("com.example", "x", "1.0");
+    private static final ArtifactCoords Y = ArtifactCoords.of("com.example", "y", "1.0");
+    private static final ArtifactCoords SHADED = ArtifactCoords.of("org.a", "shaded", "1.0");
+    private static final ArtifactCoords WAR = ArtifactCoords.of("org.z", "war", "1.0");
+
+    @Test
+    void edgesConnectSpecificCopies() {
+        // top level y -> x; a war ships its own y -> x
+        PackageComponent topX = PackageComponent.of(X, "lib/x.jar", "hx");
+        PackageComponent topY = PackageComponent.of(Y, "lib/y.jar", "hy");
+        PackageComponent warX = PackageComponent.of(X, "web/war/WEB-INF/lib/x.jar", "hx");
+        PackageComponent warY = PackageComponent.of(Y, "web/war/WEB-INF/lib/y.jar", "hy");
+        PackageComponent war = new PackageComponent(WAR, "web/war/", null, List.of(), List.of(warX, warY));
+        AssemblyComponents model = modelOf(List.of(topX, topY, war));
+        model.addDependencyEdge(new DependencyEdge(topY.id(), topX.id()));
+        model.addDependencyEdge(new DependencyEdge(warY.id(), warX.id()));
+
+        RenderedBom rendered = new BomRenderer().renderWithRefs(model);
+
+        String x = X.toPurl().toString(), y = Y.toPurl().toString();
+        assertEquals(x, rendered.bomRefs().get(topX.id()));
+        assertEquals(x + "#2", rendered.bomRefs().get(warX.id()));
+        Map<String, List<String>> deps = dependencyMap(rendered.bom());
+        assertEquals(List.of(x), deps.get(y));
+        assertEquals(List.of(x + "#2"), deps.get(y + "#2"));
+        assertEquals(List.of(), deps.get(WAR.toPurl().toString()));
+        assertEquals(List.of(y, WAR.toPurl().toString()), deps.get(MAIN_REF), "x is reached through y");
+    }
+
+    @Test
+    void handBuiltModelWithoutEdgesKeepsPlainRefsAtTopLevel() {
+        // x top-level; a shaded jar bundling x (dependencies unknown)
+        PackageComponent shaded = new PackageComponent(SHADED, "lib/shaded.jar", "hs", List.of(),
+                List.of(PackageComponent.of(X, null, null, false)), false);
+        AssemblyComponents model = modelOf(List.of(shaded, PackageComponent.of(X, "lib/x.jar", "hx", false)));
+
+        Bom bom = new BomRenderer().render(model);
+
+        String x = X.toPurl().toString();
+        assertEquals(x, topLevel(bom, "x").getBomRef());
+        assertEquals(x + "#2", topLevel(bom, "shaded").getComponents().get(0).getBomRef());
+        Map<String, List<String>> deps = dependencyMap(bom);
+        assertFalse(deps.containsKey(x));
+        assertFalse(deps.containsKey(x + "#2"));
+        assertEquals(List.of(x, SHADED.toPurl().toString()), deps.get(MAIN_REF));
+    }
+
+    @Test
+    void edgeToEitherTopLevelOccurrenceResolvesToTheMergedComponent() {
+        PackageComponent x1 = PackageComponent.of(X, "lib/x.jar", "hx");
+        PackageComponent x2 = PackageComponent.of(X, "ext/x.jar", "hx");
+        PackageComponent y = PackageComponent.of(Y, "lib/y.jar", "hy");
+        AssemblyComponents model = modelOf(List.of(x1, x2, y));
+        model.addDependencyEdge(new DependencyEdge(y.id(), x2.id()));
+
+        RenderedBom rendered = new BomRenderer().renderWithRefs(model);
+
+        String x = X.toPurl().toString();
+        assertEquals(x, rendered.bomRefs().get(x1.id()));
+        assertEquals(x, rendered.bomRefs().get(x2.id()));
+        assertEquals(List.of(x), dependencyMap(rendered.bom()).get(Y.toPurl().toString()));
+    }
+
+    @Test
+    void edgeWithUnknownIdIsSkipped() {
+        PackageComponent y = PackageComponent.of(Y, "lib/y.jar", "hy");
+        AssemblyComponents model = modelOf(List.of(y));
+        model.addDependencyEdge(new DependencyEdge(y.id(), ComponentId.generate()));
+
+        Map<String, List<String>> deps = dependencyMap(new BomRenderer().render(model));
+
+        assertEquals(List.of(), deps.get(Y.toPurl().toString()));
     }
 }

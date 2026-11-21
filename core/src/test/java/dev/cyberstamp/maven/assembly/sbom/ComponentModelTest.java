@@ -19,6 +19,37 @@ class ComponentModelTest {
         assertTrue(pc.nested().isEmpty());
     }
 
+    private static final ArtifactCoords X = ArtifactCoords.of("org.example", "x", "1.0");
+    private static final ArtifactCoords Y = ArtifactCoords.of("org.example", "y", "1.0");
+
+    @Test
+    void equalCopiesGetDistinctIds() {
+        PackageComponent a = PackageComponent.of(X, "lib/x.jar", "h");
+        PackageComponent b = PackageComponent.of(X, "lib/x.jar", "h");
+        assertNotEquals(a.id(), b.id());
+        assertNotEquals(a, b);
+    }
+
+    @Test
+    void withMethodsKeepTheId() {
+        PackageComponent a = PackageComponent.of(X, "lib/x.jar", "h");
+        assertEquals(a.id(), a.withLicenses(List.of(LicenseInfo.spdx("MIT", null))).id());
+        assertEquals(a.id(), a.withNested(List.of(PackageComponent.of(Y, null, null))).id());
+    }
+
+    @Test
+    void explicitIdIsKept() {
+        ComponentId id = ComponentId.generate();
+        assertEquals(id, new PackageComponent(X, null, null, List.of(), List.of(), true, null, id).id());
+        assertEquals(id, new FileComponent("a.txt", "h", List.of(), id).id());
+    }
+
+    @Test
+    void fileComponentGetsAnIdWhenNoneIsGiven() {
+        assertNotEquals(new FileComponent("a.txt", "h", List.of()).id(),
+                new FileComponent("a.txt", "h", List.of()).id());
+    }
+
     @Test
     void legacyEntryPointsHaveNoIdentification() {
         ArtifactCoords coords = ArtifactCoords.of("org.example", "foo", "1.0");

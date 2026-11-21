@@ -28,6 +28,11 @@ public final class SbomPipeline {
     private boolean failOnMissingLicense;
     private boolean identityEvidence = true;
 
+    /**
+     * Creates a pipeline over a model; {@link #forModel} is the entry point.
+     *
+     * @param model the analyzed components to render
+     */
     private SbomPipeline(AssemblyComponents model) {
         this.model = model;
     }
@@ -108,12 +113,18 @@ public final class SbomPipeline {
     }
 
     /**
-     * {@link #enrich() Enriches} the model, then renders it to a CycloneDX BOM.
+     * {@link #enrich() Enriches} the model, then renders it to a CycloneDX BOM
+     * with unique component bom-refs and sorted dependency entries. Several
+     * copies of an artifact (e.g. shipped at the top level and bundled in a
+     * shaded jar) are separate components: one keeps the artifact's bom-ref,
+     * the others get {@code #2}, {@code #3}, ... appended.
      *
      * @return the rendered BOM
      */
     public Bom render() {
         enrich();
-        return new BomRenderer().render(model);
+        Bom bom = new BomRenderer().render(model);
+        BomFinalizer.sortDependencies(bom);
+        return bom;
     }
 }

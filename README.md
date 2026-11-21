@@ -319,6 +319,8 @@ The `assembly-sbom-maven-plugin` provides two goals for projects that need SBOM 
 
 Scans an exploded directory (e.g., an exploded WAR produced by `maven-war-plugin`) and generates a CycloneDX SBOM by identifying Maven artifacts via content-hash matching. Uses the same identification engine as the [assembly handler](#assembly-handler).
 
+The goal runs before the archive is packaged. For a `war` module, it leaves out the files the WAR plugin writes at package time: `META-INF/MANIFEST.MF`, and the module's own `META-INF/maven/<groupId>/<artifactId>/pom.xml` and `pom.properties`. A copy of these files in the exploded directory is not what ships. For example, an overlay unpacks the upstream WAR's manifest there, and the WAR plugin replaces it. Descriptors that an overlay brings in ship unchanged, so the SBOM keeps them.
+
 ```xml
 <plugin>
     <groupId>dev.cyberstamp.maven.assembly.sbom</groupId>
@@ -445,10 +447,13 @@ When the filename is ambiguous (zero or multiple `artifactId` values match), the
 
 ### Dependency Graph
 
-The BOM includes a CycloneDX dependency graph reflecting the Maven dependency tree. Only artifacts that are actually present in the assembly are included.
+The BOM includes a CycloneDX dependency graph reflecting the module's own Maven dependency tree. Only artifacts that are actually present in the assembly are included.
 
 - **Direct vs. transitive** — the graph preserves the Maven dependency hierarchy. Transitive dependencies are connected through their parent, not listed as direct dependencies of the main component.
-- **Unpacked artifact dependencies** — nested JARs identified within unpacked archives are connected to their parent artifact via dependency edges.
+- **Only the module is resolved** — the module's resolution uses the POM of the build being run. Unpacked WARs and overlays are not resolved, since their published POM may differ from the one their build used: the JARs identified inside them have unknown dependencies, unless the archive carries its own SBOM, which supplies them when it is merged.
+- **Containment is not a dependency** — a component nested inside another (a JAR in an unpacked WAR, a dependency bundled in a shaded JAR) is expressed by nesting only, never by a dependency edge from its parent.
+- **Unknown dependencies** — a component whose dependencies were never resolved has no dependency entry, since an empty entry would declare that it has none. This applies to artifacts bundled in a shaded JAR, to JARs inside unpacked archives, and to JARs identified from their `pom.properties`, a detected SBOM or a remote lookup rather than as project dependencies. If the module's resolution fails, its artifacts have unknown dependencies too.
+- **Several copies of an artifact** — when the same artifact ships more than once (e.g. at the top level and inside a WAR, or bundled in a shaded JAR), each copy is a separate component with its own bom-ref: the first top-level copy keeps the artifact's purl, and the others get `#2`, `#3`, ... appended (top-level components first, then nested ones level by level). Dependency edges connect specific copies: the module's resolution reaches only the module's own copies, never a copy inside another archive.
 
 ### SBOM Merging
 
@@ -478,11 +483,21 @@ The claim is cross-checked against the jar's own `pom.properties` (groupId, arti
 
 When several SBOMs list the same hash, agreeing claims keep the highest confidence; claims naming different purls are all discarded (with a warning) and the jar falls through to `pom.properties`. Setting `embeddedSboms` to `ignore` disables this lookup too.
 
+#### How SBOMs Are Merged
+
+A merged SBOM describes part of the distribution — the jar it was found in, an unpacked WAR, or the whole archive — so merging means recognizing which of its components are already in the BOM, not adding everything it lists:
+
+- **Anchoring** — a component matches a component already in the BOM by its location (relative to the SBOM's own root, which is found by matching the SBOM's top component or another hashed component by hash; e.g. a Quarkus application's `lib/main/x.jar` is the distribution's `lib/lib/main/x.jar`), by content hash, or by purl among its parent's components (inside a binary, a purl names one artifact; side by side, a parent never holds two copies of one). A matched component enriches the existing one (licenses, properties, external references, identity evidence, descriptive metadata); a file it describes takes its package identity. Dependency edges are not used for matching.
+- **Unmatched components** — a component without a location nested in the SBOM under a matched jar or native binary is kept under that binary (e.g. a shaded dependency). A component the archive would show if it shipped — a Maven package or a file with a location, or anything with a hash in the BOM's algorithm — is dropped when the archive does not contain it. Anything else, such as npm packages compiled into a JavaScript bundle, is kept under the component the SBOM describes.
+- **Bom-refs and dependencies** — a kept component whose bom-ref is taken gets `#2`, `#3`, ... appended, and the SBOM's own dependency edges are carried over between the matched or kept components; an edge to a dropped component is dropped.
+
+The `merge` goal applies the same rules to finished SBOMs, except that with no archive to check nothing is dropped.
+
 #### Handling Modes
 
 The `embeddedSboms` option controls what happens with detected SBOMs:
 
-- **`merge`** (default) — the SBOM's components are imported as nested sub-components of the containing artifact. Dependency entries are imported into the distribution BOM's dependency section. No cross-ecosystem dependency edges are created — nesting already captures the containment relationship.
+- **`merge`** (default) — the SBOM is merged as described above, as a description of the containing artifact. No cross-ecosystem dependency edges are created — nesting already captures the containment relationship.
 - **`link`** — an `externalReference` of type `bom` is added to the containing artifact, pointing to the SBOM file's location within the archive. The SBOM file remains in the archive.
 - **`ignore`** — embedded SBOMs are not processed.
 

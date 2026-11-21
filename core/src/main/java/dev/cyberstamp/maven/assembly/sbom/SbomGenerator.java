@@ -5,7 +5,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -13,15 +12,12 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.maven.execution.MavenSession;
-import org.apache.maven.model.Model;
 import org.apache.maven.project.MavenProject;
 import org.cyclonedx.Version;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Dependency;
-import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.Hash;
-import org.cyclonedx.model.component.evidence.Occurrence;
 import org.eclipse.aether.DefaultRepositorySystemSession;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.artifact.DefaultArtifact;
@@ -66,6 +62,22 @@ public class SbomGenerator {
     private List<org.eclipse.aether.graph.Dependency> cachedManagedDeps;
     private ArchiveAnalyzer lastAnalyzer;
 
+    /**
+     * Creates a generator.
+     *
+     * @param project the project whose dependencies archive entries are matched against
+     * @param session the Maven session
+     * @param repoSystem the repository system used to resolve artifacts and dependencies
+     * @param effectiveModelResolver resolves the effective POM of artifacts, for their licenses
+     * @param messageDigest the digest the archive entries were hashed with
+     * @param bomHashAlgorithm the algorithm the BOM records hashes under
+     * @param failOnDuplicateHash whether two artifacts with one hash fail the generation
+     * @param failOnMissingLicense whether a component without a license fails the generation
+     * @param embeddedSboms {@code merge}, {@code link} or {@code ignore}: what to do with SBOMs
+     *        found inside the archive entries
+     * @param librariesOnly whether to leave file components out of the BOM
+     * @param schemaVersion the CycloneDX schema version, or {@code null} for the default
+     */
     SbomGenerator(MavenProject project, MavenSession session,
             RepositorySystem repoSystem,
             EffectiveModelResolver effectiveModelResolver,
@@ -87,6 +99,8 @@ public class SbomGenerator {
 
     /**
      * Returns the resolved CycloneDX schema version.
+     *
+     * @return the schema version the BOM is written in
      */
     Version getSchemaVersion() {
         return schemaVersion;
@@ -94,6 +108,8 @@ public class SbomGenerator {
 
     /**
      * Sets user-configurable metadata for the main BOM component.
+     *
+     * @param product the product information, or {@code null} for none
      */
     void setProduct(ProductInfo product) {
         this.product = product;
@@ -102,6 +118,8 @@ public class SbomGenerator {
     /**
      * Sets whether this tool emits identity evidence for the components it
      * identifies. Identity from external or embedded SBOMs is unaffected.
+     *
+     * @param identityEvidence whether to emit identity evidence
      */
     void setIdentityEvidence(boolean identityEvidence) {
         this.identityEvidence = identityEvidence;
@@ -124,6 +142,7 @@ public class SbomGenerator {
      * @param entries the file entries to analyze
      * @param baseDirPrefix prefix to strip from entry paths, or {@code null}
      * @param externalBoms external SBOMs to merge as top-level components
+     * @param assemblyId the id of the assembly the BOM describes, or {@code null}
      * @param classifier the Maven classifier, or {@code null}
      * @param archiveType the archive type for the main component PURL, or {@code null}
      * @return the assembled BOM
@@ -161,27 +180,35 @@ public class SbomGenerator {
         // pipeline. No jar locator is supplied: the analyzer already performed
         // shaded detection, so only license enrichment runs here.
         buildDependencyGraph(model);
-        Bom bom = SbomPipeline.forModel(model)
+        SbomPipeline.forModel(model)
                 .licenseSource(new EffectiveModelLicenseSource(effectiveModelResolver))
                 .failOnMissingLicense(failOnMissingLicense)
                 .identityEvidence(identityEvidence)
-                .render();
+                .enrich();
+        RenderedBom rendered = new BomRenderer().renderWithRefs(model);
+        Bom bom = rendered.bom();
 
         // Post-processing (detected/external SBOMs, filtering, dedup)
         ArchiveIndex archiveIndex = ArchiveIndex.of(entries, baseDirPrefix, bomHashAlgorithm.getSpec());
-        processDiscoveredSboms(bom, model, archiveIndex);
+        processDiscoveredSboms(rendered, model, archiveIndex);
         processExternalBoms(bom, externalBoms, archiveIndex);
 
-        String normalizedAlg = archiveIndex.normalizedAlg();
-        removeTopLevelFilesDuplicatedByNested(bom, normalizedAlg);
-        replaceFileComponentsWithLibraries(bom, normalizedAlg);
         if (librariesOnly) {
             removeFileComponents(bom);
         }
-        deduplicateBomRefs(bom);
+        // Every copy got a unique bom-ref from the renderer or the merge.
+        BomFinalizer.sortDependencies(bom);
         return bom;
     }
 
+    /**
+     * Identifies the archive entries, keeping the analyzer for the merge steps that follow.
+     *
+     * @param entries the file entries to analyze
+     * @param baseDirPrefix prefix to strip from entry paths, or {@code null}
+     * @param externalBoms external SBOMs whose components may claim archive entries
+     * @return the analyzed components
+     */
     private AssemblyComponents analyzeEntries(List<FileEntry> entries,
             String baseDirPrefix, List<Bom> externalBoms) {
         boolean detectEmbeddedSboms = !"ignore".equalsIgnoreCase(embeddedSboms);
@@ -193,436 +220,39 @@ public class SbomGenerator {
         return lastAnalyzer.analyze(entries, baseDirPrefix);
     }
 
-    private void processDiscoveredSboms(Bom bom, AssemblyComponents model, ArchiveIndex archiveIndex) {
+    /**
+     * Merges or links the SBOMs found inside the scanned archives, each under
+     * the component copy it describes.
+     *
+     * @param rendered the rendered BOM, with the bom-ref of every model copy
+     * @param model the analyzed components, carrying the discovered SBOMs
+     * @param archiveIndex the scanned layout the merged components are checked against
+     */
+    private void processDiscoveredSboms(RenderedBom rendered, AssemblyComponents model, ArchiveIndex archiveIndex) {
         EmbeddedSbomMergeTransform transform = new EmbeddedSbomMergeTransform(
                 embeddedSboms, archiveIndex);
-        transform.apply(bom, model, owner -> resolveParentBomRef(owner, bom, model));
-    }
-
-    static Bom filterSbomByArchive(Bom sbom, ArchiveIndex archiveIndex, String parentPathPrefix) {
-        if (sbom.getComponents() == null) {
-            return sbom;
-        }
-        ArchiveIndex index = archiveIndex.scopedTo(parentPathPrefix);
-        Set<String> survivingRefs = new HashSet<>();
-        List<Component> filtered = new ArrayList<>();
-        for (Component comp : sbom.getComponents()) {
-            ComponentView cv = new ComponentView(comp, index.normalizedAlg());
-            if (matchesArchive(cv, index)) {
-                correctOccurrences(cv, index);
-                if (isUnpackedInArchive(cv, index)) {
-                    filterNestedByArchive(comp, index);
-                }
-                filtered.add(comp);
-                collectBomRefs(comp, survivingRefs);
-            } else {
-                log.debug("Filtering out component {} from SBOM: no matching file in archive", comp.getPurl());
-            }
-        }
-        Bom result = new Bom();
-        result.setComponents(filtered);
-        if (sbom.getDependencies() != null) {
-            List<Dependency> filteredDeps = new ArrayList<>();
-            for (Dependency dep : sbom.getDependencies()) {
-                if (survivingRefs.contains(dep.getRef())) {
-                    Dependency pruned = filterDependencyChildren(dep, survivingRefs);
-                    filteredDeps.add(pruned);
-                }
-            }
-            if (!filteredDeps.isEmpty()) {
-                result.setDependencies(filteredDeps);
-            }
-        }
-        return result;
+        transform.apply(rendered.bom(), model, owner -> resolveParentBomRef(owner, rendered));
     }
 
     /**
-     * Applies the archive check to the sub-components of a surviving component
-     * that is unpacked in the archive: a nested component describing a file the
-     * archive does not contain (e.g. a jar the assembly excluded from an
-     * unpacked war) is dropped together with its own sub-components. The check
-     * descends only through components that are themselves unpacked; the
-     * sub-components of a component matched as a packed file describe its
-     * internals (jar-in-jar entries, shaded artifacts), which are not archive
-     * entries, and are kept as they are.
+     * Merges the configured external SBOMs into the BOM as descriptions of
+     * the whole distribution. Components the analyzer rejected are dropped,
+     * and those it found in the layout are kept where it found them.
+     *
+     * @param bom the BOM to merge into
+     * @param externalBomList the external SBOMs, possibly empty
+     * @param archiveIndex the scanned layout the merged components are checked against
      */
-    private static void filterNestedByArchive(Component comp, ArchiveIndex index) {
-        if (comp.getComponents() == null || comp.getComponents().isEmpty()) {
-            return;
-        }
-        List<Component> kept = new ArrayList<>(comp.getComponents().size());
-        for (Component child : comp.getComponents()) {
-            ComponentView cv = new ComponentView(child, index.normalizedAlg());
-            if (matchesArchive(cv, index)) {
-                correctOccurrences(cv, index);
-                if (isUnpackedInArchive(cv, index)) {
-                    filterNestedByArchive(child, index);
-                }
-                kept.add(child);
-            } else {
-                log.debug("Filtering out nested component {} from SBOM: no matching file in archive", child.getPurl());
-            }
-        }
-        comp.setComponents(kept);
-    }
-
-    private static Dependency filterDependencyChildren(Dependency dep, Set<String> survivingRefs) {
-        if (dep.getDependencies() == null || dep.getDependencies().isEmpty()) {
-            return dep;
-        }
-        Dependency result = new Dependency(
-                dep.getRef());
-        for (Dependency child : dep.getDependencies()) {
-            if (survivingRefs.contains(child.getRef())) {
-                result.addDependency(new Dependency(child.getRef()));
-            }
-        }
-        return result;
-    }
-
-    private static void collectBomRefs(Component comp, Set<String> refs) {
-        if (comp.getBomRef() != null) {
-            refs.add(comp.getBomRef());
-        }
-        if (comp.getComponents() != null) {
-            for (Component child : comp.getComponents()) {
-                collectBomRefs(child, refs);
-            }
-        }
-    }
-
-    /**
-     * Checks whether a component from an external/embedded SBOM corresponds
-     * to a file actually present in the archive.
-     */
-    private static boolean matchesArchive(ComponentView cv, ArchiveIndex index) {
-        if (hasMatchingOccurrence(cv, index)) {
-            if (cv.component().getType() == Component.Type.FILE
-                    && cv.hasVerifiableHash()
-                    && !index.containsHash(cv.hash())) {
-                return false;
-            }
-            return true;
-        }
-        if (hasEmptyOccurrence(cv, index)) {
-            return true;
-        }
-        if (cv.hasOccurrences()) {
-            if (isNpmComponent(cv.component())) {
-                return true;
-            }
-            if (index.findPathByHash(cv.hash()) != null) {
-                return true;
-            }
-            return false;
-        }
-        if (!cv.hasVerifiableHash()) {
-            return true;
-        }
-        return index.containsHash(cv.hash());
-    }
-
-    /**
-     * Whether a component that passed the archive check is unpacked in the
-     * archive, so its sub-components describe archive entries: it occurs at a
-     * directory the archive has files under, or it is the root of a scoped
-     * (unpacked) SBOM, marked by an empty occurrence.
-     */
-    private static boolean isUnpackedInArchive(ComponentView cv, ArchiveIndex index) {
-        if (hasEmptyOccurrence(cv, index)) {
-            return true;
-        }
-        for (String loc : cv.locations()) {
-            if (loc.endsWith("/") && index.containsDirectory(loc)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean hasMatchingOccurrence(ComponentView cv, ArchiveIndex index) {
-        for (String loc : cv.locations()) {
-            if (loc.isEmpty()) {
-                continue;
-            }
-            // a directory occurrence marks an unpacked archive: present when
-            // the archive has files under it
-            if (loc.endsWith("/") ? index.containsDirectory(loc) : index.containsPath(loc)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean hasEmptyOccurrence(ComponentView cv, ArchiveIndex index) {
-        if (!index.isScoped()
-                || cv.component().getType() == Component.Type.FILE) {
-            return false;
-        }
-        for (String loc : cv.locations()) {
-            if (loc.isEmpty()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Corrects occurrence paths on a component that survived archive
-     * filtering. If occurrences already match, this is a no-op.
-     */
-    private static void correctOccurrences(ComponentView cv, ArchiveIndex index) {
-        if (hasMatchingOccurrence(cv, index)) {
-            return;
-        }
-        String location = index.findPathByHash(cv.hash());
-        if (location == null) {
-            return;
-        }
-        Evidence evidence = cv.component().getEvidence();
-        if (evidence == null) {
-            evidence = new Evidence();
-            cv.component().setEvidence(evidence);
-        }
-        List<Occurrence> occurrences = new ArrayList<>(1);
-        Occurrence occ = new Occurrence();
-        occ.setLocation(location);
-        occurrences.add(occ);
-        evidence.setOccurrences(occurrences);
-    }
-
-    private static boolean isNpmComponent(Component comp) {
-        String purl = comp.getPurl();
-        return purl != null && purl.startsWith("pkg:npm/");
-    }
-
     private void processExternalBoms(Bom bom, List<Bom> externalBomList, ArchiveIndex archiveIndex) {
         if (externalBomList.isEmpty()) {
             return;
         }
         Set<Component> rejected = lastAnalyzer.rejectedExternalComponents();
         Set<Component> matched = lastAnalyzer.matchedExternalComponents();
+        AnchoredMerge.Scope scope = new AnchoredMerge.Scope(bom.getMetadata().getComponent(), archiveIndex,
+                rejected, matched);
         for (Bom externalBom : externalBomList) {
-            BomMerger.mergeFlat(bom, filterExternalSbom(externalBom, archiveIndex, rejected, matched));
-        }
-    }
-
-    /**
-     * Filters a configured external SBOM for merging: drops the components the
-     * analyzer rejected (compared by identity, with their sub-components) and
-     * then applies {@link #filterSbomByArchive}, which also prunes the
-     * dependency entries of everything dropped. A rejected component's
-     * descendant that the analyzer matched to a file of its own is not dropped
-     * with it but lifted, with its own sub-components, into the rejected
-     * component's place.
-     *
-     * @param rejected the external components the analyzer rejected
-     * @param matched the external components the analyzer matched to archive entries
-     */
-    static Bom filterExternalSbom(Bom externalBom, ArchiveIndex archiveIndex, Set<Component> rejected,
-            Set<Component> matched) {
-        if (!rejected.isEmpty() && externalBom.getComponents() != null) {
-            externalBom.setComponents(withoutRejected(externalBom.getComponents(), rejected, matched));
-        }
-        return filterSbomByArchive(externalBom, archiveIndex, null);
-    }
-
-    private static List<Component> withoutRejected(List<Component> components, Set<Component> rejected,
-            Set<Component> matched) {
-        List<Component> kept = new ArrayList<>(components.size());
-        for (Component comp : components) {
-            if (rejected.contains(comp)) {
-                log.debug("Not merging external SBOM component {}: its jar was identified otherwise",
-                        comp.getPurl());
-                liftMatchedDescendants(comp.getComponents(), rejected, matched, kept);
-                continue;
-            }
-            if (comp.getComponents() != null) {
-                comp.setComponents(withoutRejected(comp.getComponents(), rejected, matched));
-            }
-            kept.add(comp);
-        }
-        return kept;
-    }
-
-    private static void liftMatchedDescendants(List<Component> components, Set<Component> rejected,
-            Set<Component> matched, List<Component> into) {
-        if (components == null) {
-            return;
-        }
-        for (Component comp : components) {
-            if (matched.contains(comp) && !rejected.contains(comp)) {
-                if (comp.getComponents() != null) {
-                    comp.setComponents(withoutRejected(comp.getComponents(), rejected, matched));
-                }
-                into.add(comp);
-            } else {
-                liftMatchedDescendants(comp.getComponents(), rejected, matched, into);
-            }
-        }
-    }
-
-    static void removeTopLevelFilesDuplicatedByNested(Bom bom, String normalizedAlg) {
-        if (bom.getComponents() == null) {
-            return;
-        }
-        ComponentList comps = ComponentList.of(bom);
-        if (comps.isEmpty()) {
-            return;
-        }
-        Set<String> nestedFileHashes = new HashSet<>();
-        Set<String> nestedFileBomRefs = new HashSet<>();
-        for (Component comp : comps) {
-            collectNestedFileHashes(comp, normalizedAlg, nestedFileHashes);
-            collectNestedFileBomRefs(comp, nestedFileBomRefs);
-        }
-        if (nestedFileHashes.isEmpty()) {
-            return;
-        }
-        Set<String> removedRefs = new HashSet<>();
-        comps.removeIf(comp -> {
-            if (comp.getType() != Component.Type.FILE) {
-                return false;
-            }
-            String hash = SbomUtils.extractHash(comp, normalizedAlg);
-            if (hash != null && nestedFileHashes.contains(hash)) {
-                if (comp.getBomRef() != null) {
-                    removedRefs.add(comp.getBomRef());
-                }
-                return true;
-            }
-            return false;
-        });
-        if (!removedRefs.isEmpty()) {
-            DependencyList deps = DependencyList.of(bom);
-            deps.removeIf(d -> removedRefs.contains(d.getRef())
-                    && !nestedFileBomRefs.contains(d.getRef()));
-            for (Dependency dep : deps) {
-                DependencyList.ofChildren(dep).removeIf(
-                        child -> removedRefs.contains(child.getRef())
-                                && !nestedFileBomRefs.contains(child.getRef()));
-            }
-        }
-    }
-
-    private static void collectNestedFileBomRefs(Component parent, Set<String> bomRefs) {
-        if (parent.getComponents() == null) {
-            return;
-        }
-        for (Component child : parent.getComponents()) {
-            if (child.getType() == Component.Type.FILE && child.getBomRef() != null) {
-                bomRefs.add(child.getBomRef());
-            }
-            collectNestedFileBomRefs(child, bomRefs);
-        }
-    }
-
-    private static void collectNestedFileHashes(Component parent, String normalizedAlg, Set<String> hashes) {
-        if (parent.getComponents() == null) {
-            return;
-        }
-        for (Component child : parent.getComponents()) {
-            if (child.getType() == Component.Type.FILE) {
-                String hash = SbomUtils.extractHash(child, normalizedAlg);
-                if (hash != null) {
-                    hashes.add(hash);
-                }
-            }
-            collectNestedFileHashes(child, normalizedAlg, hashes);
-        }
-    }
-
-    static void replaceFileComponentsWithLibraries(Bom bom, String normalizedAlg) {
-        if (bom.getComponents() == null) {
-            return;
-        }
-        ComponentList comps = ComponentList.of(bom);
-        if (comps.isEmpty()) {
-            return;
-        }
-        Map<String, List<Component>> filesByHash = new HashMap<>();
-        for (Component comp : comps) {
-            if (comp.getBomRef() != null
-                    && comp.getBomRef().startsWith("file:")) {
-                String hash = SbomUtils.extractHash(comp, normalizedAlg);
-                if (hash != null) {
-                    filesByHash.computeIfAbsent(hash,
-                            k -> new ArrayList<>()).add(comp);
-                }
-            }
-        }
-        if (filesByHash.isEmpty()) {
-            return;
-        }
-        Map<String, String> fileToLibRef = new HashMap<>();
-        for (Component comp : comps) {
-            matchFilesByLibraryHash(comp, filesByHash, normalizedAlg, fileToLibRef);
-        }
-        if (fileToLibRef.isEmpty()) {
-            return;
-        }
-        comps.removeIf(c -> fileToLibRef.containsKey(c.getBomRef()));
-        DependencyList deps = DependencyList.of(bom);
-        List<Dependency> toRemove = new ArrayList<>();
-        for (Dependency dep : deps) {
-            String replacement = fileToLibRef.get(dep.getRef());
-            if (replacement != null) {
-                toRemove.add(dep);
-            } else {
-                replaceDependsOnRefs(dep, fileToLibRef);
-            }
-        }
-        for (Dependency dep : toRemove) {
-            deps.remove(dep);
-        }
-    }
-
-    private static void matchFilesByLibraryHash(Component comp,
-            Map<String, List<Component>> filesByHash,
-            String normalizedAlg, Map<String, String> fileToLibRef) {
-        if (comp.getType() == Component.Type.LIBRARY) {
-            String hash = SbomUtils.extractHash(comp, normalizedAlg);
-            if (hash != null) {
-                List<Component> fileComps = filesByHash.get(hash);
-                if (fileComps != null) {
-                    for (Component fileComp : fileComps) {
-                        fileToLibRef.putIfAbsent(fileComp.getBomRef(), comp.getBomRef());
-                    }
-                }
-            }
-        }
-        if (comp.getComponents() != null) {
-            for (Component nested : comp.getComponents()) {
-                matchFilesByLibraryHash(nested, filesByHash,
-                        normalizedAlg, fileToLibRef);
-            }
-        }
-    }
-
-    private static void replaceDependsOnRefs(
-            Dependency dep,
-            Map<String, String> refMap) {
-        DependencyList children = DependencyList.ofChildren(dep);
-        if (children.isEmpty()) {
-            return;
-        }
-        List<Dependency> toAdd = new ArrayList<>();
-        List<Dependency> toRemove = new ArrayList<>();
-        for (Dependency child : children) {
-            String replacement = refMap.get(child.getRef());
-            if (replacement != null) {
-                toRemove.add(child);
-                if (!children.containsRef(replacement)) {
-                    toAdd.add(new Dependency(replacement));
-                }
-            }
-            replaceDependsOnRefs(child, refMap);
-        }
-        for (Dependency r : toRemove) {
-            children.remove(r);
-        }
-        for (Dependency a : toAdd) {
-            children.add(a);
+            AnchoredMerge.merge(bom, externalBom, scope);
         }
     }
 
@@ -650,6 +280,13 @@ public class SbomGenerator {
         }
     }
 
+    /**
+     * Copies a component list without its file components, at any depth.
+     *
+     * @param components the components, possibly {@code null}
+     * @param removedRefs collects the bom-refs of the removed components
+     * @return the remaining components, or {@code null} for {@code null}
+     */
     private static List<Component> filterOutFileComponents(List<Component> components,
             Set<String> removedRefs) {
         if (components == null) {
@@ -687,144 +324,19 @@ public class SbomGenerator {
         }
     }
 
-    static void deduplicateBomRefs(Bom bom) {
-        Map<String, Component> seen = new HashMap<>();
-        Map<String, String> renames = new HashMap<>();
-        if (bom.getComponents() != null) {
-            deduplicateBomRefs(bom.getComponents(), seen, renames);
-        }
-        if (bom.getMetadata() != null && bom.getMetadata().getComponent() != null
-                && bom.getMetadata().getComponent().getComponents() != null) {
-            deduplicateBomRefs(
-                    bom.getMetadata().getComponent().getComponents(), seen, renames);
-        }
-        if (!renames.isEmpty() && bom.getDependencies() != null) {
-            Map<String, List<String>> originalToNew = new HashMap<>();
-            for (Map.Entry<String, String> e : renames.entrySet()) {
-                originalToNew.computeIfAbsent(e.getValue(),
-                        k -> new ArrayList<>()).add(e.getKey());
-            }
-            List<Dependency> toAdd = new ArrayList<>();
-            for (Dependency dep : bom.getDependencies()) {
-                List<String> newRefs = originalToNew.get(dep.getRef());
-                if (newRefs != null) {
-                    for (String newRef : newRefs) {
-                        Dependency clone = new Dependency(newRef);
-                        if (dep.getDependencies() != null) {
-                            for (Dependency child : dep.getDependencies()) {
-                                clone.addDependency(
-                                        new Dependency(
-                                                child.getRef()));
-                            }
-                        }
-                        toAdd.add(clone);
-                    }
-                }
-                addRenamedDependsOnRefs(dep, originalToNew);
-            }
-            bom.getDependencies().addAll(toAdd);
-        }
-    }
-
-    private static void deduplicateBomRefs(
-            List<Component> components,
-            Map<String, Component> seen,
-            Map<String, String> renames) {
-        for (Component comp : components) {
-            String ref = comp.getBomRef();
-            if (ref != null && seen.putIfAbsent(ref, comp) != null) {
-                int suffix = 2;
-                String unique = ref + "#" + suffix;
-                while (seen.containsKey(unique)) {
-                    unique = ref + "#" + ++suffix;
-                }
-                renames.put(unique, ref);
-                comp.setBomRef(unique);
-                seen.put(unique, comp);
-            }
-        }
-        for (Component comp : components) {
-            if (comp.getComponents() != null) {
-                deduplicateBomRefs(comp.getComponents(), seen, renames);
-            }
-        }
-    }
-
-    private static void addRenamedDependsOnRefs(
-            Dependency dep, Map<String, List<String>> originalToNew) {
-        if (dep.getDependencies() == null) {
-            return;
-        }
-        List<Dependency> childrenToAdd = new ArrayList<>();
-        for (Dependency child : dep.getDependencies()) {
-            List<String> newRefs = originalToNew.get(child.getRef());
-            if (newRefs != null) {
-                for (String newRef : newRefs) {
-                    childrenToAdd.add(new Dependency(newRef));
-                }
-            }
-        }
-        for (Dependency d : childrenToAdd) {
-            dep.addDependency(d);
-        }
-    }
-
     /**
-     * Resolves the bom-ref for a discovered SBOM's parent artifact.
+     * Resolves the bom-ref of the component a discovered SBOM is merged under:
+     * the bom-ref the renderer gave the owner's copy, or the main component's
+     * when the SBOM has no owner (it sits at the assembly root) or the owner
+     * was not rendered.
      *
-     * <p>
-     * Returns {@code coords.toPurl().toString()} if {@code coords} is a known
-     * model component (a top-level or nested {@link PackageComponent} ref),
-     * else falls back to the main component bomRef.
-     * </p>
+     * @param owner the id of the owner's copy, or {@code null}
+     * @param rendered the rendered BOM and its bom-refs by component id
+     * @return the parent bom-ref; never {@code null}
      */
-    private String resolveParentBomRef(PackageRef parentRef,
-            Bom bom, AssemblyComponents model) {
-        if (parentRef != null) {
-            String purl = parentRef.toPurl().toString();
-            // Check if this purl exists in the model
-            if (isKnownPackageRef(parentRef, model)) {
-                return purl;
-            }
-        }
-        return bom.getMetadata().getComponent().getBomRef();
-    }
-
-    /**
-     * Checks if a {@link PackageRef} is present in the model as a
-     * {@link PackageComponent}.
-     */
-    private boolean isKnownPackageRef(PackageRef ref, AssemblyComponents model) {
-        for (AssemblyComponent comp : model.components()) {
-            if (containsPackageRef(comp, ref)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Recursively searches for a {@link PackageRef} in a component tree.
-     */
-    private boolean containsPackageRef(AssemblyComponent comp,
-            PackageRef ref) {
-        if (comp instanceof PackageComponent pkg) {
-            if (pkg.ref().toPurl().toString().equals(ref.toPurl().toString())) {
-                return true;
-            }
-            for (AssemblyComponent nested : pkg.nested()) {
-                if (containsPackageRef(nested, ref)) {
-                    return true;
-                }
-            }
-        } else if (comp instanceof FileComponent file) {
-            for (AssemblyComponent nested : file.nested()) {
-                if (containsPackageRef(nested, ref)) {
-                    return true;
-                }
-            }
-        }
-        return false;
+    private static String resolveParentBomRef(ComponentId owner, RenderedBom rendered) {
+        String ref = owner == null ? null : rendered.bomRefs().get(owner);
+        return ref != null ? ref : rendered.bom().getMetadata().getComponent().getBomRef();
     }
 
     /**
@@ -863,12 +375,23 @@ public class SbomGenerator {
         return result;
     }
 
+    /**
+     * The project's {@code project.build.outputTimestamp}, for reproducible builds.
+     *
+     * @return the timestamp property, or {@code null} if unset
+     */
     private String getTimestamp() {
         return project.getProperties() != null
                 ? project.getProperties().getProperty("project.build.outputTimestamp")
                 : null;
     }
 
+    /**
+     * Records this tool's coordinates, licenses and jar hash in the metadata. A license
+     * or hash that cannot be resolved is left out.
+     *
+     * @param metadata the metadata to fill
+     */
     private void populateToolMetadata(AssemblyMetadata metadata) {
         metadata.setToolGroupId(ToolInfo.GROUP_ID);
         metadata.setToolArtifactId(ToolInfo.ARTIFACT_ID);
@@ -883,6 +406,11 @@ public class SbomGenerator {
         resolveToolHash(metadata);
     }
 
+    /**
+     * Resolves this tool's jar and records its hash in the metadata, if it can be resolved.
+     *
+     * @param metadata the metadata to fill
+     */
     private void resolveToolHash(AssemblyMetadata metadata) {
         try {
             DefaultArtifact toolArtifact = new DefaultArtifact(
@@ -902,102 +430,99 @@ public class SbomGenerator {
     }
 
     /**
-     * Builds the inferred dependency graph from Maven dependency resolution
-     * and adds the edges to the model as {@link DependencyEdge}s with
-     * {@code explicit=false}.
+     * Adds the module's dependency edges to the model.
      *
      * <p>
-     * Reads {@code nestedDepsByParent} from the analyzer's side-data getter
-     * (Ruling C2-C: Aether confinement) and {@code knownIds} from the model.
-     * Preserves the try/catch warn-and-continue behavior from the legacy
-     * implementation.
+     * The module's own Maven resolution is the only one run: it uses the POM
+     * of the build being run, so it reflects build time by definition.
+     * Unpacked WARs and overlays are not resolved, since a published POM may
+     * differ from the one their build used. Each collected artifact edge
+     * {@code a -> b} is bound to the module's copies of {@code a} and
+     * {@code b} (see {@link ArchiveAnalyzer#moduleCopies()}); an edge with an
+     * end the module does not ship is dropped.
+     * </p>
+     *
+     * <p>
+     * When the resolution fails (e.g. offline, or a descriptor cannot be
+     * read), a warning is logged, no edges are added, and the module's copies
+     * are marked as having unknown dependencies, so they are not rendered as
+     * having none.
      * </p>
      */
     private void buildDependencyGraph(AssemblyComponents model) {
+        Map<ArtifactCoords, ComponentId> copies = lastAnalyzer.moduleCopies();
+        if (copies.isEmpty()) {
+            return;
+        }
+        Map<ArtifactCoords, Set<ArtifactCoords>> collectedEdges;
         try {
-            Map<ArtifactCoords, List<org.eclipse.aether.graph.Dependency>> nestedDepsByParent = lastAnalyzer
-                    .nestedDepsByParent();
-            if (nestedDepsByParent == null) {
-                nestedDepsByParent = Map.of();
-            }
-            Map<ArtifactCoords, Set<ArtifactCoords>> collectedEdges = collectDependencyEdges(nestedDepsByParent);
-            Set<ArtifactCoords> knownIds = collectKnownArtifactCoords(model);
-            Map<ArtifactCoords, List<ArtifactCoords>> graph = filterEdges(collectedEdges, knownIds);
-            // Add inferred edges to the model with explicit=false
-            for (Map.Entry<ArtifactCoords, List<ArtifactCoords>> entry : graph.entrySet()) {
-                for (ArtifactCoords child : entry.getValue()) {
-                    model.addDependencyEdge(new DependencyEdge(entry.getKey(), child, false));
-                }
-            }
+            collectedEdges = collectDependencyEdges();
         } catch (Exception e) {
             log.warn("Failed to build dependency graph,"
                     + " SBOM will omit dependency information", e);
+            markDependenciesUnknown(model, copies.keySet());
+            return;
+        }
+        for (Map.Entry<ArtifactCoords, Set<ArtifactCoords>> entry : collectedEdges.entrySet()) {
+            ComponentId parent = copies.get(entry.getKey());
+            if (parent == null) {
+                continue;
+            }
+            for (ArtifactCoords childCoords : entry.getValue()) {
+                ComponentId child = copies.get(childCoords);
+                if (child != null && !child.equals(parent)) {
+                    model.addDependencyEdge(new DependencyEdge(parent, child));
+                }
+            }
         }
     }
 
     /**
-     * Collects all known artifact coordinates from the model (top-level and
-     * nested {@link PackageComponent}s), for use in dependency graph filtering.
+     * Marks every top-level copy of the given artifacts as having unknown
+     * dependencies: the copy the module's edges would have been bound to and
+     * any further top-level copy of the same artifact, which the renderer
+     * merges with it.
+     *
+     * @param model the model whose top-level components to update
+     * @param artifacts the coordinates of the module's artifacts
      */
-    private Set<ArtifactCoords> collectKnownArtifactCoords(AssemblyComponents model) {
-        Set<ArtifactCoords> ids = new HashSet<>();
-        for (AssemblyComponent comp : model.components()) {
-            collectPackageRefs(comp, ids);
+    private static void markDependenciesUnknown(AssemblyComponents model, Set<ArtifactCoords> artifacts) {
+        List<AssemblyComponent> components = new ArrayList<>(model.components());
+        for (int i = 0; i < components.size(); i++) {
+            if (components.get(i) instanceof PackageComponent pkg && pkg.dependenciesKnown()
+                    && pkg.ref() instanceof ArtifactCoords coords && artifacts.contains(coords)) {
+                components.set(i, pkg.withDependenciesKnown(false));
+            }
         }
-        return ids;
+        model.setComponents(components);
     }
 
     /**
-     * Recursively collects {@link ArtifactCoords} from {@link PackageComponent}s.
+     * Collects the module's artifact-level dependency edges by running one
+     * collect request over the project's dependencies, with its dependency
+     * management, recording every parent-child pair the resolver visits.
+     *
+     * @return the collected edges, by parent coordinates
+     * @throws Exception if the resolution fails
      */
-    private void collectPackageRefs(AssemblyComponent comp,
-            Set<ArtifactCoords> ids) {
-        if (comp instanceof PackageComponent pkg) {
-            if (pkg.ref() instanceof ArtifactCoords coords) {
-                ids.add(coords);
-            }
-            for (AssemblyComponent nested : pkg.nested()) {
-                collectPackageRefs(nested, ids);
-            }
-        } else if (comp instanceof FileComponent file) {
-            for (AssemblyComponent nested : file.nested()) {
-                collectPackageRefs(nested, ids);
-            }
-        }
-    }
-
-    private Map<ArtifactCoords, Set<ArtifactCoords>> collectDependencyEdges(
-            Map<ArtifactCoords, List<org.eclipse.aether.graph.Dependency>> nestedDepsByParent) throws Exception {
+    private Map<ArtifactCoords, Set<ArtifactCoords>> collectDependencyEdges() throws Exception {
         Map<ArtifactCoords, Set<ArtifactCoords>> collectedEdges = new ConcurrentHashMap<>();
 
         DefaultRepositorySystemSession mutableSession = new DefaultRepositorySystemSession(session.getRepositorySession());
         mutableSession.setDependencySelector(new EdgeCollectorSelectorFactory(
                 session.getRepositorySession().getDependencySelector(), collectedEdges));
 
-        List<org.eclipse.aether.graph.Dependency> projectManagedDeps = collectManagedDependencies();
         CollectRequest request = buildCollectRequest(
-                toAetherDependencies(project.getDependencies()), projectManagedDeps);
+                toAetherDependencies(project.getDependencies()), collectManagedDependencies());
         repoSystem.collectDependencies(mutableSession, request);
-
-        for (Map.Entry<ArtifactCoords, List<org.eclipse.aether.graph.Dependency>> entry : nestedDepsByParent.entrySet()) {
-            List<org.eclipse.aether.graph.Dependency> parentManagedDeps = resolveManagedDependencies(entry.getKey());
-            CollectRequest nestedRequest = buildCollectRequest(entry.getValue(), parentManagedDeps);
-            repoSystem.collectDependencies(mutableSession, nestedRequest);
-        }
-
         return collectedEdges;
     }
 
-    private List<org.eclipse.aether.graph.Dependency> resolveManagedDependencies(ArtifactCoords coords) {
-        Model model = effectiveModelResolver.resolveEffectiveModel(
-                coords.groupId(), coords.artifactId(), coords.version());
-        if (model == null || model.getDependencyManagement() == null
-                || model.getDependencyManagement().getDependencies() == null) {
-            return List.of();
-        }
-        return toAetherDependencies(model.getDependencyManagement().getDependencies());
-    }
-
+    /**
+     * The project's managed dependencies as Aether dependencies, computed once.
+     *
+     * @return the managed dependencies, possibly empty
+     */
     private List<org.eclipse.aether.graph.Dependency> collectManagedDependencies() {
         if (cachedManagedDeps != null) {
             return cachedManagedDeps;
@@ -1014,6 +539,12 @@ public class SbomGenerator {
         return managedDeps;
     }
 
+    /**
+     * Converts Maven model dependencies to Aether dependencies.
+     *
+     * @param deps the model dependencies
+     * @return the Aether dependencies, in order
+     */
     private List<org.eclipse.aether.graph.Dependency> toAetherDependencies(
             List<org.apache.maven.model.Dependency> deps) {
         List<org.eclipse.aether.graph.Dependency> result = new ArrayList<>(deps.size());
@@ -1023,6 +554,12 @@ public class SbomGenerator {
         return result;
     }
 
+    /**
+     * Converts one Maven model dependency to an Aether dependency with the same scope.
+     *
+     * @param dep the model dependency
+     * @return the Aether dependency
+     */
     private static org.eclipse.aether.graph.Dependency toAetherDependency(org.apache.maven.model.Dependency dep) {
         return new org.eclipse.aether.graph.Dependency(
                 SbomUtils.toAetherArtifact(dep.getGroupId(), dep.getArtifactId(),
@@ -1030,6 +567,13 @@ public class SbomGenerator {
                 dep.getScope());
     }
 
+    /**
+     * Builds a collect request against the project's remote repositories.
+     *
+     * @param deps the dependencies to collect
+     * @param managedDeps the dependency management to apply
+     * @return the request
+     */
     private CollectRequest buildCollectRequest(List<org.eclipse.aether.graph.Dependency> deps,
             List<org.eclipse.aether.graph.Dependency> managedDeps) {
         CollectRequest request = new CollectRequest();
@@ -1037,25 +581,5 @@ public class SbomGenerator {
         request.setManagedDependencies(managedDeps);
         request.setRepositories(project.getRemoteProjectRepositories());
         return request;
-    }
-
-    private Map<ArtifactCoords, List<ArtifactCoords>> filterEdges(
-            Map<ArtifactCoords, Set<ArtifactCoords>> collectedEdges,
-            Set<ArtifactCoords> knownIds) {
-        Map<ArtifactCoords, List<ArtifactCoords>> graph = new HashMap<>();
-        for (ArtifactCoords id : knownIds) {
-            Set<ArtifactCoords> children = collectedEdges.get(id);
-            if (children == null) {
-                continue;
-            }
-            List<ArtifactCoords> filtered = new ArrayList<>(children.size());
-            for (ArtifactCoords childId : children) {
-                if (knownIds.contains(childId)) {
-                    filtered.add(childId);
-                }
-            }
-            graph.put(id, filtered);
-        }
-        return graph;
     }
 }

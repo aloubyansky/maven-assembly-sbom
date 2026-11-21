@@ -10,12 +10,10 @@ import java.util.Set;
 
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
-import org.cyclonedx.model.Dependency;
 import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.ExternalReference;
 import org.cyclonedx.model.Hash;
 import org.cyclonedx.model.Property;
-import org.cyclonedx.model.component.evidence.Occurrence;
 
 /**
  * Merges or links external CycloneDX SBOMs into a target SBOM.
@@ -24,19 +22,23 @@ import org.cyclonedx.model.component.evidence.Occurrence;
  * This utility supports three integration modes:
  * </p>
  * <ul>
- * <li><b>Merge nested</b> ({@link #mergeUnder}) — imports the source
- * BOM's components as nested sub-components of a parent component in
- * the target BOM. Deduplicates against existing nested components by
- * PURL, migrates occurrences from top-level components whose files
- * fall under the parent's path, and imports dependency entries.
- * PURLs are normalized (redundant {@code ?type=jar} stripped) on
- * incoming components to ensure consistent matching. When the parent
- * is an unpacked archive, {@code file:} bom-refs and dependency refs
- * are prefixed with the parent's archive path so they use
- * distribution-relative paths.</li>
- * <li><b>Merge flat</b> ({@link #mergeFlat}) — imports the source
- * BOM's components into the target BOM's top-level component list
- * and imports its dependency entries.</li>
+ * <li><b>Merge nested</b> ({@link #mergeUnder}) — merges the source BOM
+ * as a description of one component of the target (e.g. the jar it was
+ * found in).</li>
+ * <li><b>Merge flat</b> ({@link #mergeFlat}) — merges the source BOM as a
+ * description of the target as a whole.</li>
+ * </ul>
+ * <p>
+ * Both merge by {@link AnchoredMerge anchoring}: each source component that
+ * describes a component already in the target (same hash, same location
+ * relative to the source's root, or, inside a binary, same purl) enriches
+ * that component instead of being added; the others are added under the
+ * merge parent with unique bom-refs, and the source's dependency edges are
+ * carried across between the matching components. With no distribution at
+ * hand, nothing is dropped: a component the target does not list may still
+ * be part of it.
+ * </p>
+ * <ul>
  * <li><b>Link</b> ({@link #addBomReference}) — adds a CycloneDX
  * {@code externalReference} of type {@code bom} to a parent
  * component, pointing to the SBOM file's location within the
@@ -47,22 +49,28 @@ public final class BomMerger {
 
     private static final Comparator<Component> COMPONENT_ORDER = BomRenderer.COMPONENT_ORDER;
 
+    /**
+     * Not instantiable: a holder of static merge operations.
+     */
     private BomMerger() {
     }
 
     /**
-     * Merges the source BOM's components as nested sub-components
-     * under the specified parent component in the target BOM.
+     * Merges the source BOM as a description of one component of the
+     * target BOM: the parent (e.g. the jar the SBOM was found in).
      *
      * <p>
-     * Source components are sorted by group/name/version and appended
-     * to the parent's existing nested component list (if any).
-     * Dependency entries from the source BOM are imported into the
-     * target BOM's top-level dependency section. When the parent is
-     * an unpacked archive (has a directory-style occurrence ending
-     * with {@code '/'}), {@code file:} bom-refs on source components
-     * and imported dependency refs are prefixed with the parent's
-     * archive path to produce distribution-relative references.
+     * Each source component that describes a component already in the
+     * target (same hash, same location relative to the source's root, or the
+     * same purl inside the parent) enriches it instead of being added. The
+     * others are nested in the parent with unique bom-refs; when the parent is
+     * an unpacked archive (it has a directory occurrence ending with
+     * {@code '/'}), their locations and {@code file:} bom-refs are made
+     * relative to the distribution. The source's main component maps to the
+     * parent, and the source's dependency entries are carried across between
+     * the matching components, except entries to what a component contains:
+     * containment is not a dependency. With no distribution layout at hand,
+     * nothing is dropped.
      * </p>
      *
      * @param targetBom the distribution BOM to merge into
@@ -76,9 +84,8 @@ public final class BomMerger {
                     "Cannot merge SBOM: parent component with bom-ref '"
                             + parentBomRef + "' not found");
         }
-        String parentPathPrefix = getParentPathPrefix(parent);
-        nestComponents(targetBom, parent, sourceBom.getComponents(), parentPathPrefix);
-        importDependencies(targetBom, sourceBom.getDependencies(), parentPathPrefix);
+        AnchoredMerge.merge(targetBom, sourceBom,
+                new AnchoredMerge.Scope(parent, null, Set.of(), Set.of(), true));
     }
 
     /**
@@ -89,57 +96,11 @@ public final class BomMerger {
      * @param sourceBom the external BOM whose components to import
      */
     public static void mergeFlat(Bom targetBom, Bom sourceBom) {
-        if (sourceBom.getComponents() != null) {
-            ComponentList targetComps = ComponentList.of(targetBom);
-            List<Component> sorted = new ArrayList<>(sourceBom.getComponents());
-            sorted.sort(COMPONENT_ORDER);
-            for (Component comp : sorted) {
-                normalizePurls(comp);
-                Component existing = targetComps.findByPurl(comp.getPurl());
-                if (existing != null) {
-                    mergeComponentData(existing, comp);
-                    mergeProperties(existing, comp);
-                    mergeExternalReferences(existing, comp);
-                    continue;
-                }
-                targetComps.add(comp);
-            }
+        Component main = targetBom.getMetadata() == null ? null : targetBom.getMetadata().getComponent();
+        if (main == null) {
+            throw new IllegalArgumentException("Cannot merge SBOM: the target has no main component");
         }
-        adoptSourceMainDependencies(targetBom, sourceBom);
-        importDependencies(targetBom, sourceBom.getDependencies(), null);
-    }
-
-    private static void adoptSourceMainDependencies(Bom targetBom, Bom sourceBom) {
-        if (sourceBom.getMetadata() == null
-                || sourceBom.getMetadata().getComponent() == null
-                || sourceBom.getDependencies() == null
-                || targetBom.getMetadata() == null
-                || targetBom.getMetadata().getComponent() == null) {
-            return;
-        }
-        String sourceMainRef = canonicalPurl(sourceBom.getMetadata().getComponent().getBomRef());
-        if (sourceMainRef == null) {
-            return;
-        }
-        DependencyList sourceDeps = DependencyList.of(sourceBom);
-        Dependency sourceMainDep = sourceDeps.findByRef(sourceMainRef);
-        if (sourceMainDep == null || sourceMainDep.getDependencies() == null) {
-            return;
-        }
-        String targetMainRef = targetBom.getMetadata().getComponent().getBomRef();
-        DependencyList targetDeps = DependencyList.of(targetBom);
-        Dependency targetMainDep = targetDeps.findByRef(targetMainRef);
-        if (targetMainDep == null) {
-            targetMainDep = new Dependency(targetMainRef);
-            targetDeps.add(targetMainDep);
-        }
-        DependencyList existingChildren = DependencyList.ofChildren(targetMainDep);
-        for (Dependency child : sourceMainDep.getDependencies()) {
-            String normalizedRef = canonicalPurl(child.getRef());
-            if (!existingChildren.containsRef(normalizedRef)) {
-                existingChildren.add(new Dependency(normalizedRef));
-            }
-        }
+        AnchoredMerge.merge(targetBom, sourceBom, AnchoredMerge.Scope.of(main, null));
     }
 
     /**
@@ -168,228 +129,16 @@ public final class BomMerger {
         parent.addExternalReference(ref);
     }
 
-    /**
-     * Merges source components into the parent's nested component list,
-     * deduplicating against existing nested components and migrating
-     * occurrences from top-level components when appropriate.
-     *
-     * <p>
-     * For each source component, three cases are handled:
-     * </p>
-     * <ol>
-     * <li>A nested component with the same PURL already exists under the
-     * parent (e.g. from archive analysis) — the source's hashes, licenses,
-     * and sub-components are merged into the existing component.</li>
-     * <li>A top-level component with the same PURL exists and has occurrences
-     * under the parent's path prefix — those occurrences are migrated to the
-     * source component, which is then added as nested.</li>
-     * <li>Otherwise — the source component is added as a new nested
-     * component.</li>
-     * </ol>
-     *
-     * @param targetBom the target BOM containing top-level components
-     * @param parent the parent component to nest source components under
-     * @param components the source components to merge, or {@code null}
-     */
-    private static void nestComponents(Bom targetBom, Component parent,
-            List<Component> components, String parentPathPrefix) {
-        if (components == null || components.isEmpty()) {
-            return;
-        }
-
-        ComponentList nestedComps = ComponentList.ofNested(parent);
-        ComponentList topLevelComps = ComponentList.of(targetBom);
-
-        List<Component> sorted = new ArrayList<>(components);
-        sorted.sort(COMPONENT_ORDER);
-
-        for (Component comp : sorted) {
-            normalizePurls(comp);
-            // FILE components additionally need their file: bom-ref rewritten.
-            prefixFileBomRef(comp, parentPathPrefix);
-            // Every component merged from an embedded SBOM, its sub-components
-            // included, carries occurrence locations relative to the containing
-            // archive; prefix them so they resolve from the assembly root.
-            // Idempotent (already-prefixed locations are skipped), so it is safe
-            // for FILE components (whose occurrences prefixFileBomRef already
-            // prefixed) and on every merge branch (new, existing-nested, or
-            // top-level counterpart).
-            if (parentPathPrefix != null) {
-                prefixScopeRelativeOccurrencesDeep(comp, parentPathPrefix);
-            }
-            String purl = comp.getPurl();
-
-            if (purl != null) {
-                Component existingNested = nestedComps.findByPurl(purl);
-                if (existingNested != null) {
-                    mergeComponentData(existingNested, comp);
-                    continue;
-                }
-
-                Component topLevel = topLevelComps.findByPurl(purl);
-                if (topLevel != null && topLevel != parent) {
-                    migrateOccurrences(topLevel, comp, parentPathPrefix);
-                    if (!hasOccurrences(topLevel)) {
-                        topLevelComps.remove(topLevel);
-                    }
-                }
-            }
-
-            nestedComps.add(comp);
-            mergeSubComponentsBySiblingOccurrence(comp, nestedComps);
-        }
-    }
-
-    private static void mergeSubComponentsBySiblingOccurrence(
-            Component added, ComponentList parentComps) {
-        if (added.getComponents() == null || added.getComponents().isEmpty()
-                || parentComps.isEmpty()) {
-            return;
-        }
-        Map<String, Component> siblingsByOccurrence = new HashMap<>();
-        for (Component sibling : parentComps) {
-            if (sibling == added) {
-                continue;
-            }
-            String loc = firstOccurrenceLocation(sibling);
-            if (loc != null) {
-                siblingsByOccurrence.put(loc, sibling);
-            }
-        }
-        if (siblingsByOccurrence.isEmpty()) {
-            return;
-        }
-        // An SBOM's occurrences are relative to its root at every depth, and
-        // under an unpacked parent nestComponents has already prefixed them,
-        // so a child's location compares with its siblings' as it is.
-        for (Component child : added.getComponents()) {
-            String childLoc = firstOccurrenceLocation(child);
-            if (childLoc == null) {
-                continue;
-            }
-            Component sibling = siblingsByOccurrence.get(childLoc);
-            if (sibling != null) {
-                migrateOccurrences(sibling, child, null);
-                mergeComponentData(child, sibling);
-                parentComps.remove(sibling);
-            }
-        }
-    }
-
-    private static String firstOccurrenceLocation(Component comp) {
-        Evidence evidence = comp.getEvidence();
-        if (evidence == null || evidence.getOccurrences() == null) {
-            return null;
-        }
-        for (Occurrence occ : evidence.getOccurrences()) {
-            String loc = occ.getLocation();
-            if (loc != null && !loc.isEmpty()) {
-                return loc;
-            }
-        }
-        return null;
-    }
-
     private static final String FILE_BOMREF_PREFIX = "file:";
-
-    /**
-     * Prefixes a file component's bom-ref with the parent's archive path
-     * so it uses distribution-relative paths instead of archive-relative.
-     * Only applies to components whose bom-ref starts with {@code "file:"}
-     * and only when the parent is an unpacked archive (non-null prefix).
-     */
-    private static void prefixFileBomRef(Component comp, String parentPathPrefix) {
-        if (parentPathPrefix == null) {
-            return;
-        }
-        String bomRef = comp.getBomRef();
-        if (bomRef != null && bomRef.startsWith(FILE_BOMREF_PREFIX)) {
-            comp.setBomRef(FILE_BOMREF_PREFIX + parentPathPrefix
-                    + bomRef.substring(FILE_BOMREF_PREFIX.length()));
-            prefixOccurrenceLocations(comp, parentPathPrefix);
-        }
-        if (comp.getComponents() != null) {
-            for (Component child : comp.getComponents()) {
-                prefixFileBomRef(child, parentPathPrefix);
-            }
-        }
-    }
-
-    private static void prefixOccurrenceLocations(Component comp,
-            String parentPathPrefix) {
-        Evidence evidence = comp.getEvidence();
-        if (evidence == null || evidence.getOccurrences() == null) {
-            return;
-        }
-        for (Occurrence occ : evidence.getOccurrences()) {
-            String location = occ.getLocation();
-            if (location != null && !location.isEmpty()) {
-                occ.setLocation(parentPathPrefix + location);
-            }
-        }
-    }
-
-    /**
-     * Applies {@link #prefixScopeRelativeOccurrences} to a component and all
-     * of its sub-components.
-     */
-    private static void prefixScopeRelativeOccurrencesDeep(Component comp, String parentPathPrefix) {
-        prefixScopeRelativeOccurrences(comp, parentPathPrefix);
-        if (comp.getComponents() != null) {
-            for (Component child : comp.getComponents()) {
-                prefixScopeRelativeOccurrencesDeep(child, parentPathPrefix);
-            }
-        }
-    }
-
-    /**
-     * Prefixes a component's own occurrence locations with the parent path
-     * prefix, skipping empty locations and any that already start with the
-     * prefix (so it is safe to call after occurrences were already prefixed or
-     * migrated). Does not recurse into nested components.
-     */
-    private static void prefixScopeRelativeOccurrences(Component comp, String parentPathPrefix) {
-        Evidence evidence = comp.getEvidence();
-        if (evidence == null || evidence.getOccurrences() == null) {
-            return;
-        }
-        for (Occurrence occ : evidence.getOccurrences()) {
-            String location = occ.getLocation();
-            if (location != null && !location.isEmpty()
-                    && !location.startsWith(parentPathPrefix)) {
-                occ.setLocation(parentPathPrefix + location);
-            }
-        }
-    }
-
-    /**
-     * Derives the archive directory prefix from the parent component's
-     * evidence. Returns the first occurrence location that ends with
-     * {@code '/'}, indicating an exploded archive (e.g. {@code "web/console.war/"}).
-     *
-     * @return the directory prefix, or {@code null} if the parent has
-     *         no directory-style occurrence
-     */
-    static String getParentPathPrefix(Component parent) {
-        Evidence evidence = parent.getEvidence();
-        if (evidence == null || evidence.getOccurrences() == null) {
-            return null;
-        }
-        for (Occurrence occ : evidence.getOccurrences()) {
-            String location = occ.getLocation();
-            if (location != null && location.endsWith("/")) {
-                return location;
-            }
-        }
-        return null;
-    }
 
     /**
      * Normalizes a component's PURL and bom-ref in place by stripping
      * the redundant {@code ?type=jar} qualifier (jar is the PURL-spec
      * default for Maven). Recurses into sub-components.
+     *
+     * @param comp the component to normalize in place
      */
-    private static void normalizePurls(Component comp) {
+    static void normalizePurls(Component comp) {
         String purl = comp.getPurl();
         if (purl != null) {
             String normalized = normalizeMavenPurl(purl);
@@ -421,6 +170,9 @@ public final class BomMerger {
      * which omits {@code type=jar}). Unparseable strings fall back to the
      * Maven-normalized raw value, matching prior use-as-is behavior.
      * </p>
+     *
+     * @param purlOrRef a purl or bom-ref, possibly {@code null}
+     * @return the canonical form, or {@code null} for {@code null}
      */
     static String canonicalPurl(String purlOrRef) {
         if (purlOrRef == null) {
@@ -440,6 +192,9 @@ public final class BomMerger {
      * the qualifier in any position ({@code ?type=jar}, {@code ?type=jar&…},
      * or {@code …&type=jar}). Non-Maven PURLs and PURLs with a non-jar
      * type are returned unchanged.
+     *
+     * @param purl a purl, possibly {@code null}
+     * @return the purl without {@code type=jar}
      */
     static String normalizeMavenPurl(String purl) {
         if (purl == null || !purl.startsWith("pkg:maven/")) {
@@ -463,30 +218,6 @@ public final class BomMerger {
         return purl.substring(0, idx) + purl.substring(end + 1);
     }
 
-    private static void mergeComponentData(Component target, Component source) {
-        mergeHashes(target, source);
-        if (target.getLicenses() == null && source.getLicenses() != null) {
-            target.setLicenses(source.getLicenses());
-        }
-        applyEvidenceIfAbsent(target, source);
-        if (source.getComponents() != null) {
-            Set<String> existingPurls = new HashSet<>();
-            if (target.getComponents() != null) {
-                for (Component c : target.getComponents()) {
-                    if (c.getPurl() != null) {
-                        existingPurls.add(canonicalPurl(c.getPurl()));
-                    }
-                }
-            }
-            for (Component nested : source.getComponents()) {
-                String np = canonicalPurl(nested.getPurl());
-                if (np == null || existingPurls.add(np)) {
-                    target.addComponent(nested);
-                }
-            }
-        }
-    }
-
     /**
      * Merges hashes from the source component into the target,
      * adding any hash algorithms that the target does not already
@@ -498,27 +229,38 @@ public final class BomMerger {
      * source hashes are discarded — the mismatch indicates the
      * source may describe a different version of the artifact (e.g.
      * before shading or repackaging), so its hashes cannot be
-     * trusted.
+     * trusted. Algorithms are compared normalized and values
+     * case-insensitively.
      * </p>
+     *
+     * @param target the component to add hashes to
+     * @param source the component whose hashes to add
      */
-    private static void mergeHashes(Component target, Component source) {
+    static void mergeHashes(Component target, Component source) {
         if (source.getHashes() == null || source.getHashes().isEmpty()) {
             return;
         }
+        // algorithms compare normalized and values case-insensitively, as the
+        // hash index does: "sha-256" and "SHA-256" are one algorithm, and hex
+        // case is not part of a hash
         Map<String, String> existingByAlg = new HashMap<>();
         if (target.getHashes() != null) {
             for (Hash h : target.getHashes()) {
-                existingByAlg.put(h.getAlgorithm(), h.getValue());
+                if (h.getAlgorithm() != null) {
+                    existingByAlg.put(SbomUtils.normalizeAlgorithm(h.getAlgorithm()), h.getValue());
+                }
             }
         }
         for (Hash h : source.getHashes()) {
-            String existingValue = existingByAlg.get(h.getAlgorithm());
-            if (existingValue != null && !existingValue.equals(h.getValue())) {
+            String existingValue = h.getAlgorithm() == null ? null
+                    : existingByAlg.get(SbomUtils.normalizeAlgorithm(h.getAlgorithm()));
+            if (existingValue != null && !existingValue.equalsIgnoreCase(h.getValue())) {
                 return;
             }
         }
         for (Hash h : source.getHashes()) {
-            if (existingByAlg.putIfAbsent(h.getAlgorithm(), h.getValue()) == null) {
+            if (h.getAlgorithm() != null
+                    && existingByAlg.putIfAbsent(SbomUtils.normalizeAlgorithm(h.getAlgorithm()), h.getValue()) == null) {
                 target.addHash(h);
             }
         }
@@ -538,7 +280,7 @@ public final class BomMerger {
      * @param target the component to merge properties into
      * @param source the component to copy properties from
      */
-    private static void mergeProperties(Component target, Component source) {
+    static void mergeProperties(Component target, Component source) {
         if (source.getProperties() == null || source.getProperties().isEmpty()) {
             return;
         }
@@ -573,7 +315,7 @@ public final class BomMerger {
      * @param target the component to merge external references into
      * @param source the component to copy external references from
      */
-    private static void mergeExternalReferences(Component target, Component source) {
+    static void mergeExternalReferences(Component target, Component source) {
         if (source.getExternalReferences() == null
                 || source.getExternalReferences().isEmpty()) {
             return;
@@ -595,124 +337,16 @@ public final class BomMerger {
         }
     }
 
-    private static void applyEvidenceIfAbsent(Component target, Component source) {
-        Evidence sourceEvidence = source.getEvidence();
-        if (sourceEvidence == null) {
-            return;
-        }
-        Evidence targetEvidence = target.getEvidence();
-        if (targetEvidence == null) {
-            target.setEvidence(sourceEvidence);
-            return;
-        }
-        if ((targetEvidence.getOccurrences() == null
-                || targetEvidence.getOccurrences().isEmpty())
-                && sourceEvidence.getOccurrences() != null) {
-            targetEvidence.setOccurrences(sourceEvidence.getOccurrences());
-        }
-        if ((targetEvidence.getIdentities() == null
-                || targetEvidence.getIdentities().isEmpty())
-                && sourceEvidence.getIdentities() != null) {
-            targetEvidence.setIdentities(sourceEvidence.getIdentities());
-        }
-    }
-
     /**
-     * Moves occurrence evidence from a top-level component to a nested
-     * component. When {@code pathPrefix} is non-null, only occurrences
-     * whose location starts with that prefix are moved (e.g. occurrences
-     * under an unpacked WAR directory). When {@code pathPrefix} is
-     * {@code null}, all occurrences are moved.
+     * Whether a component lists at least one occurrence.
      *
-     * @param topLevel the top-level component to remove occurrences from
-     * @param nested the nested component to add occurrences to
-     * @param pathPrefix the path prefix filter, or {@code null} to move all
+     * @param component the component
+     * @return {@code true} if it has an occurrence
      */
-    private static void migrateOccurrences(Component topLevel, Component nested,
-            String pathPrefix) {
-        Evidence topEvidence = topLevel.getEvidence();
-        if (topEvidence == null) {
-            return;
-        }
-        List<Occurrence> occurrences = topEvidence.getOccurrences();
-        if (occurrences == null || occurrences.isEmpty()) {
-            return;
-        }
-        Set<String> existingLocations = new HashSet<>();
-        if (nested.getEvidence() != null && nested.getEvidence().getOccurrences() != null) {
-            for (Occurrence o : nested.getEvidence().getOccurrences()) {
-                if (o.getLocation() != null) {
-                    existingLocations.add(o.getLocation());
-                }
-            }
-        }
-        List<Occurrence> remaining = new ArrayList<>();
-        for (Occurrence occ : occurrences) {
-            if (occ.getLocation() != null
-                    && (pathPrefix == null || occ.getLocation().startsWith(pathPrefix))) {
-                if (existingLocations.add(occ.getLocation())) {
-                    if (nested.getEvidence() == null) {
-                        nested.setEvidence(new Evidence());
-                    }
-                    nested.getEvidence().addOccurrence(occ);
-                }
-            } else {
-                remaining.add(occ);
-            }
-        }
-        topEvidence.setOccurrences(remaining);
-        // Identity already in the BOM wins over the incoming SBOM's, as in
-        // mergeComponentData: it describes the same component.
-        if (nested.getEvidence() != null
-                && topEvidence.getIdentities() != null
-                && !topEvidence.getIdentities().isEmpty()) {
-            nested.getEvidence().setIdentities(topEvidence.getIdentities());
-        }
-    }
-
     static boolean hasOccurrences(Component component) {
         Evidence evidence = component.getEvidence();
         return evidence != null && evidence.getOccurrences() != null
                 && !evidence.getOccurrences().isEmpty();
-    }
-
-    /**
-     * Imports dependency entries into the target BOM's dependency section,
-     * skipping entries whose ref already exists in the target.
-     */
-    private static void importDependencies(Bom targetBom, List<Dependency> dependencies,
-            String parentPathPrefix) {
-        if (dependencies == null) {
-            return;
-        }
-        DependencyList targetDeps = DependencyList.of(targetBom);
-        for (Dependency dep : dependencies) {
-            Dependency normalized = normalizeDependency(dep, parentPathPrefix);
-            if (!targetDeps.containsRef(normalized.getRef())) {
-                targetDeps.add(normalized);
-            }
-        }
-    }
-
-    private static Dependency normalizeDependency(Dependency dep,
-            String parentPathPrefix) {
-        String ref = prefixFileRef(canonicalPurl(dep.getRef()), parentPathPrefix);
-        Dependency result = new Dependency(ref);
-        if (dep.getDependencies() != null) {
-            for (Dependency child : dep.getDependencies()) {
-                result.addDependency(normalizeDependency(child, parentPathPrefix));
-            }
-        }
-        return result;
-    }
-
-    private static String prefixFileRef(String ref, String parentPathPrefix) {
-        if (parentPathPrefix != null && ref != null
-                && ref.startsWith(FILE_BOMREF_PREFIX)) {
-            return FILE_BOMREF_PREFIX + parentPathPrefix
-                    + ref.substring(FILE_BOMREF_PREFIX.length());
-        }
-        return ref;
     }
 
     /**

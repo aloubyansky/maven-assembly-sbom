@@ -8,6 +8,7 @@ import java.util.Optional;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import dev.cyberstamp.maven.assembly.sbom.ArtifactCoords;
+import dev.cyberstamp.maven.assembly.sbom.Central;
 import dev.cyberstamp.maven.assembly.sbom.Identification;
 
 /**
@@ -45,11 +46,21 @@ public final class MavenCentralCoordinatesLookup implements CoordinatesLookup {
     private final String searchUrlTemplate;
     private final HttpLookupSupport.FailureLog failures = new HttpLookupSupport.FailureLog("Maven Central");
 
+    /**
+     * Creates a lookup against the public Maven Central search API.
+     *
+     * @param client the HTTP client to send the searches with
+     * @param timeout the timeout of each search
+     */
     MavenCentralCoordinatesLookup(HttpClient client, Duration timeout) {
         this(client, timeout, DEFAULT_SEARCH_URL);
     }
 
     /**
+     * Creates a lookup against a search API of Central's shape.
+     *
+     * @param client the HTTP client to send the searches with
+     * @param timeout the timeout of each search
      * @param searchUrlTemplate a complete search URL containing a literal
      *        {@code {sha1}} placeholder for the content hash; overridable so
      *        tests can point at a stub server instead of the real API
@@ -60,6 +71,15 @@ public final class MavenCentralCoordinatesLookup implements CoordinatesLookup {
         this.searchUrlTemplate = searchUrlTemplate;
     }
 
+    /**
+     * Searches Central for the artifact with this SHA-1. The first hit's
+     * coordinates are taken, with the classifier the file name implies when
+     * Central lists that file for the version.
+     *
+     * @param sha1Hex the lowercase hex SHA-1 of the file
+     * @param fileName the file's name, or {@code null}
+     * @return the match, or empty if Central knows no such file or the search failed
+     */
     @Override
     public Optional<MavenMatch> lookup(String sha1Hex, String fileName) {
         URI uri = URI.create(searchUrlTemplate.replace(PLACEHOLDER, sha1Hex));
@@ -69,6 +89,13 @@ public final class MavenCentralCoordinatesLookup implements CoordinatesLookup {
                 .map(coords -> new MavenMatch(coords, Identification.remoteCoordinatesLookup()));
     }
 
+    /**
+     * Reads the coordinates of the first search hit.
+     *
+     * @param docs the response's {@code docs} array
+     * @param fileName the file's name, or {@code null}
+     * @return the coordinates, or empty if there is no complete hit
+     */
     private static Optional<ArtifactCoords> toCoords(JsonNode docs, String fileName) {
         if (!docs.isArray() || docs.isEmpty()) {
             return Optional.empty();
@@ -93,6 +120,10 @@ public final class MavenCentralCoordinatesLookup implements CoordinatesLookup {
      * {@code -linux-x86_64.jar} suffix, or plain {@code .jar} when there is
      * no classifier) implied by {@code withClassifier} is listed in
      * Central's {@code ec} ("extra content") array for this version.
+     *
+     * @param withClassifier the coordinates derived from the file name
+     * @param ec the hit's {@code ec} array
+     * @return {@code true} if Central lists that file suffix
      */
     private static boolean confirmedByExtraContent(ArtifactCoords withClassifier, JsonNode ec) {
         if (!ec.isArray()) {
@@ -109,6 +140,13 @@ public final class MavenCentralCoordinatesLookup implements CoordinatesLookup {
         return false;
     }
 
+    /**
+     * Reads a non-blank text field.
+     *
+     * @param node the JSON object
+     * @param field the field name
+     * @return the text, or {@code null} if absent, blank or not text
+     */
     private static String text(JsonNode node, String field) {
         JsonNode value = node.path(field);
         return value.isTextual() && !value.asText().isBlank() ? value.asText() : null;

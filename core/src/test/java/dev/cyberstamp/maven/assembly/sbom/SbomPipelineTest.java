@@ -18,8 +18,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Integration-style tests that model the Artemis SBOM pipeline:
- * npm SBOM → WAR SBOM → distribution SBOM with merging, filtering,
- * file replacement, and deduplication.
+ * npm SBOM → WAR SBOM → distribution SBOM, merging each SBOM into the
+ * next by anchoring its components to the copies already there.
  */
 class SbomPipelineTest {
 
@@ -142,7 +142,7 @@ class SbomPipelineTest {
         // Note: uses ?type=jar convention from cyclonedx-maven-plugin
         Bom embeddedSbom = new Bom();
         embeddedSbom.setComponents(new ArrayList<>(List.of(
-                // Maven lib that matches top-level (jspecify) — should dedup
+                // the WAR's copy of the top-level jspecify: split out under the WAR
                 library("jspecify", "pkg:maven/org.jspecify/jspecify@1.0.0?type=jar",
                         "WEB-INF/lib/jspecify-1.0.0.jar", "hash-jspecify"),
                 // Maven lib only in WAR
@@ -178,11 +178,9 @@ class SbomPipelineTest {
                 new FileEntry("web/console.war/hawtconfig.json", "hash-hawtconfig")),
                 null, "sha256");
 
-        // Filter then merge
-        Bom filtered = SbomGenerator.filterSbomByArchive(
-                embeddedSbom, archiveIndex, "web/console.war/");
-        BomMerger.mergeUnder(distBom,
-                "pkg:maven/org.example/artemis-console@1.0?type=war", filtered);
+        // Merge
+        AnchoredMerge.merge(distBom, embeddedSbom, AnchoredMerge.Scope.of(BomMerger.findComponentByBomRef(distBom,
+                "pkg:maven/org.example/artemis-console@1.0?type=war"), archiveIndex));
 
         // jspecify: occurrence at web/console.war/ should migrate to nested,
         // top-level keeps lib/ occurrence
@@ -195,10 +193,10 @@ class SbomPipelineTest {
         // Console WAR should have nested components
         assertNotNull(consoleWar.getComponents());
 
-        // npm components should survive filtering and be nested
+        // npm components should be kept and nested
         assertTrue(consoleWar.getComponents().stream()
                 .anyMatch(c -> "react".equals(c.getName())),
-                "npm components should survive filtering");
+                "npm components should be kept");
         assertTrue(consoleWar.getComponents().stream()
                 .anyMatch(c -> "lodash".equals(c.getName())));
 
@@ -220,7 +218,7 @@ class SbomPipelineTest {
                 nestedHawt.getBomRef(),
                 "file bomRef should be prefixed with parent path");
 
-        // jspecify should also appear as nested (dedup merges data)
+        // jspecify should also appear as the WAR's own nested copy
         assertTrue(consoleWar.getComponents().stream()
                 .anyMatch(c -> "jspecify".equals(c.getName())));
 
@@ -232,198 +230,6 @@ class SbomPipelineTest {
 
         // No duplicate dependency refs
         assertNoDuplicateDepRefs(distBom);
-    }
-
-    // ── Test C: Post-merge cleanup pipeline ─────────────────────────
-
-    @Test
-    void postMergeCleanupPipeline() {
-        Bom bom = newBom("pkg:maven/org.example/dist@1.0");
-
-        // Top-level libraries
-        Component lib1 = library("lib-a", "pkg:maven/g/lib-a@1.0",
-                "lib/lib-a-1.0.jar", "hash-liba");
-        Component lib2 = library("lib-b", "pkg:maven/g/lib-b@2.0",
-                "lib/lib-b-2.0.jar", "hash-libb");
-
-        // Top-level file whose hash matches a nested file (should be
-        // removed by removeTopLevelFilesDuplicatedByNested)
-        Component topFile1 = fileComp("chunk.js",
-                "file:web/app.war/static/chunk.js",
-                "web/app.war/static/chunk.js", "hash-chunk");
-
-        // Top-level file whose hash matches a library (should be
-        // removed by replaceFileComponentsWithLibraries)
-        Component topFile2 = fileComp("lib-c-3.0.jar",
-                "file:lib/lib-c-3.0.jar",
-                "lib/lib-c-3.0.jar", "hash-libc");
-
-        // Top-level file with unique hash (should survive until
-        // removeFileComponents if librariesOnly)
-        Component topFile3 = fileComp("config.xml",
-                "file:etc/config.xml",
-                "etc/config.xml", "hash-config");
-
-        // Parent with nested components
-        Component parent = library("app-war", "pkg:maven/g/app-war@1.0",
-                "web/app.war", "hash-war");
-        parent.setEvidence(evidenceWith("web/app.war/"));
-
-        // Nested file matching topFile1's hash
-        Component nestedChunk = fileComp("chunk.js",
-                "file:static/chunk.js",
-                "static/chunk.js", "hash-chunk");
-
-        // Nested library matching topFile2's hash
-        Component nestedLib = library("lib-c", "pkg:maven/g/lib-c@3.0",
-                "WEB-INF/lib/lib-c-3.0.jar", "hash-libc");
-
-        parent.setComponents(new ArrayList<>(List.of(nestedChunk, nestedLib)));
-
-        addComp(bom, lib1);
-        addComp(bom, lib2);
-        addComp(bom, topFile1);
-        addComp(bom, topFile2);
-        addComp(bom, topFile3);
-        addComp(bom, parent);
-
-        // Dependencies referencing all components
-        Dependency mainDep = new Dependency("pkg:maven/org.example/dist@1.0");
-        mainDep.addDependency(new Dependency("pkg:maven/g/lib-a@1.0"));
-        mainDep.addDependency(new Dependency("pkg:maven/g/lib-b@2.0"));
-        mainDep.addDependency(new Dependency("file:web/app.war/static/chunk.js"));
-        mainDep.addDependency(new Dependency("file:lib/lib-c-3.0.jar"));
-        mainDep.addDependency(new Dependency("file:etc/config.xml"));
-        mainDep.addDependency(new Dependency("pkg:maven/g/app-war@1.0"));
-        bom.addDependency(mainDep);
-        bom.addDependency(new Dependency("pkg:maven/g/lib-a@1.0"));
-        bom.addDependency(new Dependency("pkg:maven/g/lib-b@2.0"));
-        bom.addDependency(new Dependency("file:web/app.war/static/chunk.js"));
-        bom.addDependency(new Dependency("file:lib/lib-c-3.0.jar"));
-        bom.addDependency(new Dependency("file:etc/config.xml"));
-        bom.addDependency(new Dependency("pkg:maven/g/app-war@1.0"));
-
-        String alg = "sha256";
-
-        // Step 1: Remove top-level files duplicated by nested
-        SbomGenerator.removeTopLevelFilesDuplicatedByNested(bom, alg);
-
-        assertFalse(bom.getComponents().stream()
-                .anyMatch(c -> "chunk.js".equals(c.getName())
-                        && c.getType() == Component.Type.FILE
-                        && "file:web/app.war/static/chunk.js".equals(c.getBomRef())),
-                "top-level chunk.js should be removed (duplicated by nested)");
-        assertEquals(5, bom.getComponents().size());
-
-        // Step 2: Replace file components with matching libraries
-        SbomGenerator.replaceFileComponentsWithLibraries(bom, alg);
-
-        assertFalse(bom.getComponents().stream()
-                .anyMatch(c -> "file:lib/lib-c-3.0.jar".equals(c.getBomRef())),
-                "file component should be replaced by matching library");
-        assertEquals(4, bom.getComponents().size());
-
-        // Dependency ref should be rewired from file to library
-        Dependency mainAfterReplace = bom.getDependencies().stream()
-                .filter(d -> "pkg:maven/org.example/dist@1.0".equals(d.getRef()))
-                .findFirst().orElseThrow();
-        assertTrue(mainAfterReplace.getDependencies().stream()
-                .anyMatch(d -> "pkg:maven/g/lib-c@3.0".equals(d.getRef())),
-                "dependency should be rewired to library ref");
-        assertFalse(mainAfterReplace.getDependencies().stream()
-                .anyMatch(d -> "file:lib/lib-c-3.0.jar".equals(d.getRef())),
-                "old file ref should be gone");
-
-        // Step 3: Remove all file components (librariesOnly)
-        SbomGenerator.removeFileComponents(bom);
-
-        assertFalse(bom.getComponents().stream()
-                .anyMatch(c -> c.getType() == Component.Type.FILE),
-                "no FILE components should remain");
-        assertEquals(3, bom.getComponents().size(),
-                "lib-a, lib-b, app-war should remain");
-
-        // config.xml dependency should be cleaned up
-        assertFalse(bom.getDependencies().stream()
-                .anyMatch(d -> "file:etc/config.xml".equals(d.getRef())),
-                "file dependency entry should be removed");
-
-        // No dangling dependency refs
-        Set<String> allBomRefs = collectAllBomRefs(bom);
-        for (Dependency dep : bom.getDependencies()) {
-            assertTrue(allBomRefs.contains(dep.getRef()),
-                    "dependency ref " + dep.getRef()
-                            + " should have a matching component");
-        }
-    }
-
-    // ── Test D: bomRef dedup after large merge ──────────────────────
-
-    @Test
-    void bomRefDedupAfterMerge() {
-        Bom bom = newBom("pkg:maven/org.example/dist@1.0");
-
-        // Top-level component
-        Component topLib = library("shared-lib",
-                "pkg:maven/g/shared-lib@1.0",
-                "lib/shared-lib-1.0.jar", "hash-shared");
-
-        // Parent with nested component having the same bomRef
-        Component parent = library("app-war", "pkg:maven/g/app-war@1.0",
-                "web/app.war", "hash-war");
-        Component nestedLib = library("shared-lib-nested",
-                "pkg:maven/g/shared-lib@1.0",
-                "WEB-INF/lib/shared-lib-1.0.jar", "hash-shared");
-        parent.setComponents(new ArrayList<>(List.of(nestedLib)));
-
-        // Another parent with yet another duplicate
-        Component parent2 = library("other-war", "pkg:maven/g/other-war@1.0",
-                "web/other.war", "hash-other");
-        Component nestedLib2 = library("shared-lib-other",
-                "pkg:maven/g/shared-lib@1.0",
-                "WEB-INF/lib/shared-lib-1.0.jar", "hash-shared");
-        parent2.setComponents(new ArrayList<>(List.of(nestedLib2)));
-
-        addComp(bom, topLib);
-        addComp(bom, parent);
-        addComp(bom, parent2);
-
-        // Dependency for the shared ref
-        Dependency sharedDep = new Dependency("pkg:maven/g/shared-lib@1.0");
-        sharedDep.addDependency(new Dependency("pkg:maven/g/transitive@1.0"));
-        bom.addDependency(sharedDep);
-
-        SbomGenerator.deduplicateBomRefs(bom);
-
-        // Top-level keeps the clean ref
-        assertEquals("pkg:maven/g/shared-lib@1.0", topLib.getBomRef());
-
-        // Nested duplicates get #2, #3
-        Set<String> allRefs = new HashSet<>();
-        collectBomRefs(bom.getComponents(), allRefs);
-        assertTrue(allRefs.contains("pkg:maven/g/shared-lib@1.0"));
-        assertTrue(allRefs.contains("pkg:maven/g/shared-lib@1.0#2"));
-        assertTrue(allRefs.contains("pkg:maven/g/shared-lib@1.0#3"));
-        assertEquals(allRefs.size(), new HashSet<>(allRefs).size(),
-                "all bomRefs should be unique");
-
-        // Dependency entries cloned for renamed refs
-        assertTrue(bom.getDependencies().stream()
-                .anyMatch(d -> "pkg:maven/g/shared-lib@1.0#2".equals(d.getRef())),
-                "cloned dep entry for #2");
-        assertTrue(bom.getDependencies().stream()
-                .anyMatch(d -> "pkg:maven/g/shared-lib@1.0#3".equals(d.getRef())),
-                "cloned dep entry for #3");
-
-        // Cloned entries have the same children
-        for (Dependency dep : bom.getDependencies()) {
-            if (dep.getRef().startsWith("pkg:maven/g/shared-lib@1.0")) {
-                assertNotNull(dep.getDependencies());
-                assertTrue(dep.getDependencies().stream()
-                        .anyMatch(d -> "pkg:maven/g/transitive@1.0".equals(d.getRef())),
-                        dep.getRef() + " should have transitive child");
-            }
-        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────
@@ -541,7 +347,7 @@ class SbomPipelineTest {
         }
     }
 
-    // ── Test E: Merge external SBOM with ?type=jar bom-refs ────────
+    // ── Test C: Merge external SBOM with ?type=jar bom-refs ────────
 
     @Test
     void mergeFlatWithTypeJarBomRefsProducesNoOrphanDeps() {
@@ -592,7 +398,6 @@ class SbomPipelineTest {
         quarkusBom.addDependency(new Dependency("pkg:maven/org.yaml/snakeyaml@2.0?type=jar"));
 
         BomMerger.mergeFlat(distBom, quarkusBom);
-        SbomGenerator.deduplicateBomRefs(distBom);
 
         // No dependency ref with a #N suffix should exist without a matching component
         Set<String> allBomRefs = collectAllBomRefs(distBom);
@@ -608,7 +413,7 @@ class SbomPipelineTest {
         assertNoDuplicateDepRefs(distBom);
     }
 
-    // ── Test F: External SBOM with transitive deps not in archive ──
+    // ── Test D: External SBOM with transitive deps not in archive ──
 
     @Test
     void mergeFlatExternalSbomDoesNotCreateOrphanTransitiveDeps() {
@@ -659,10 +464,8 @@ class SbomPipelineTest {
                 new FileEntry("lib/jboss-logging-3.6.3.jar", "hash-jlog")),
                 null, "sha256");
 
-        Bom filtered = SbomGenerator.filterSbomByArchive(
-                quarkusBom, archiveIndex, null);
-        BomMerger.mergeFlat(distBom, filtered);
-        SbomGenerator.deduplicateBomRefs(distBom);
+        AnchoredMerge.merge(distBom, quarkusBom,
+                AnchoredMerge.Scope.of(distBom.getMetadata().getComponent(), archiveIndex));
 
         // Transitive deps not in archive should not appear in dependency graph
         Set<String> allBomRefs = collectAllBomRefs(distBom);

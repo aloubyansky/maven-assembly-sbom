@@ -12,9 +12,13 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
@@ -48,8 +52,10 @@ import org.cyclonedx.model.component.evidence.Occurrence;
 import org.cyclonedx.parsers.JsonParser;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.RepositorySystemSession;
+import org.eclipse.aether.collection.CollectRequest;
 import org.eclipse.aether.collection.CollectResult;
 import org.eclipse.aether.collection.DependencyCollectionContext;
+import org.eclipse.aether.collection.DependencyCollectionException;
 import org.eclipse.aether.collection.DependencySelector;
 import org.eclipse.aether.graph.DefaultDependencyNode;
 import org.eclipse.aether.graph.Dependency;
@@ -288,6 +294,223 @@ class SbomContainerDescriptorHandlerTest {
     }
 
     @Test
+    void warContentIsNotResolved() throws Exception {
+        // the project ships y and x (y -> x) and an unpacked war with its own z
+        Path y = createTestJar("y-1.0.jar", "y-content");
+        Path x = createTestJar("x-1.0.jar", "x-content");
+        Path z = createTestJar("z-2.0.jar", "z-content");
+        Path html = createTestFile("index.html", "<html/>");
+        Path war = createWar("app-1.0.war", Map.of("WEB-INF/lib/z-2.0.jar", z, "index.html", html));
+        when(project.getArtifacts()).thenReturn(new HashSet<>(List.of(
+                createArtifact("org.ex", "y", "1.0", "jar", y.toFile()),
+                createArtifact("org.ex", "x", "1.0", "jar", x.toFile()),
+                createArtifact("org.ex", "app", "1.0", "war", war.toFile()))));
+        mockReactorWar("app", createArtifact("org.ex", "z", "2.0", "jar", z.toFile()));
+        AtomicInteger collects = stubCollectReporting("y", "x");
+
+        ZipArchiver archiver = new ZipArchiver();
+        archiver.setDestFile(tempDir.resolve("out.zip").toFile());
+        archiver.addFile(y.toFile(), "base/lib/y-1.0.jar");
+        archiver.addFile(x.toFile(), "base/lib/x-1.0.jar");
+        archiver.addFile(z.toFile(), "base/web/app.war/WEB-INF/lib/z-2.0.jar");
+        archiver.addFile(html.toFile(), "base/web/app.war/index.html");
+        handler.finalizeArchiveCreation(archiver);
+
+        Bom bom = readBomFromArchiver(archiver);
+        Map<String, List<String>> deps = dependencyMap(bom);
+        assertEquals(List.of("pkg:maven/org.ex/x@1.0"), deps.get("pkg:maven/org.ex/y@1.0"));
+        assertFalse(deps.containsKey("pkg:maven/org.ex/z@2.0"), "the war's jars have unknown dependencies");
+        assertEquals(List.of(), deps.get(warRef(bom)), "containment is not a dependency");
+        assertEquals(1, collects.get(), "only the module is resolved");
+    }
+
+    @Test
+    void projectJarInsideOverlayIsNotTheModulesCopy() throws Exception {
+        // x ships at lib/ and inside the unpacked overlay; both match the
+        // project's x by hash, and the project resolution reports y -> x
+        Path y = createTestJar("y-1.0.jar", "y-content");
+        Path x = createTestJar("x-1.0.jar", "x-content");
+        Path html = createTestFile("index.html", "<html/>");
+        Path war = createWar("app-1.0.war", Map.of("WEB-INF/lib/x-1.0.jar", x, "index.html", html));
+        when(project.getArtifacts()).thenReturn(new HashSet<>(List.of(
+                createArtifact("org.ex", "y", "1.0", "jar", y.toFile()),
+                createArtifact("org.ex", "x", "1.0", "jar", x.toFile()),
+                createArtifact("org.ex", "app", "1.0", "war", war.toFile()))));
+        stubCollectReporting("y", "x");
+
+        ZipArchiver archiver = new ZipArchiver();
+        archiver.setDestFile(tempDir.resolve("out.zip").toFile());
+        archiver.addFile(y.toFile(), "base/lib/y-1.0.jar");
+        archiver.addFile(x.toFile(), "base/lib/x-1.0.jar");
+        archiver.addFile(x.toFile(), "base/web/app.war/WEB-INF/lib/x-1.0.jar");
+        archiver.addFile(html.toFile(), "base/web/app.war/index.html");
+        handler.finalizeArchiveCreation(archiver);
+
+        Bom bom = readBomFromArchiver(archiver);
+        Map<String, List<String>> deps = dependencyMap(bom);
+        assertEquals(List.of("pkg:maven/org.ex/x@1.0"), deps.get("pkg:maven/org.ex/y@1.0"));
+        Component overlayX = findComponent(bom, Component.Type.LIBRARY, "app").getComponents().stream()
+                .filter(c -> "x".equals(c.getName())).findFirst().orElseThrow();
+        assertEquals("pkg:maven/org.ex/x@1.0#2", overlayX.getBomRef());
+        assertFalse(deps.containsKey(overlayX.getBomRef()), "the overlay's copy is not the module's");
+    }
+
+    @Test
+    void collectFailureLeavesModuleCopiesWithoutEntries() throws Exception {
+        Path y = createTestJar("y-1.0.jar", "y-content");
+        when(project.getArtifacts()).thenReturn(Set.of(createArtifact("org.ex", "y", "1.0", "jar", y.toFile())));
+        when(repoSystem.collectDependencies(any(RepositorySystemSession.class), any()))
+                .thenThrow(new DependencyCollectionException(new CollectResult(new CollectRequest())));
+
+        ZipArchiver archiver = buildArchiver("base/lib/y-1.0.jar", y);
+        handler.finalizeArchiveCreation(archiver);
+
+        Map<String, List<String>> deps = dependencyMap(readBomFromArchiver(archiver));
+        assertFalse(deps.containsKey("pkg:maven/org.ex/y@1.0"), "unknown, not none");
+    }
+
+    @Test
+    void collectFailureLeavesEveryTopLevelCopyWithoutEntries() throws Exception {
+        // y ships twice at the top level: merged into one component, which
+        // must not be rendered as having no dependencies
+        Path y = createTestJar("y-1.0.jar", "y-content");
+        when(project.getArtifacts()).thenReturn(Set.of(createArtifact("org.ex", "y", "1.0", "jar", y.toFile())));
+        when(repoSystem.collectDependencies(any(RepositorySystemSession.class), any()))
+                .thenThrow(new DependencyCollectionException(new CollectResult(new CollectRequest())));
+
+        ZipArchiver archiver = new ZipArchiver();
+        archiver.setDestFile(tempDir.resolve("out.zip").toFile());
+        archiver.addFile(y.toFile(), "base/lib/y-1.0.jar");
+        archiver.addFile(y.toFile(), "base/ext/y-1.0.jar");
+        handler.finalizeArchiveCreation(archiver);
+
+        Map<String, List<String>> deps = dependencyMap(readBomFromArchiver(archiver));
+        assertFalse(deps.containsKey("pkg:maven/org.ex/y@1.0"), "unknown, not none");
+    }
+
+    @Test
+    void embeddedSbomContentNestsUnderItsJarWithUniqueRefs() throws Exception {
+        // a's own SBOM says a bundles b (shaded, no file); b also ships at the top level
+        Bom embedded = new Bom();
+        Metadata metadata = new Metadata();
+        Component aMain = new Component();
+        aMain.setType(Component.Type.LIBRARY);
+        aMain.setName("a");
+        aMain.setBomRef("pkg:maven/org.ex/a@1.0?type=jar");
+        metadata.setComponent(aMain);
+        embedded.setMetadata(metadata);
+        Component bundled = new Component();
+        bundled.setType(Component.Type.LIBRARY);
+        bundled.setGroup("org.ex");
+        bundled.setName("b");
+        bundled.setVersion("1.0");
+        bundled.setPurl("pkg:maven/org.ex/b@1.0");
+        bundled.setBomRef("pkg:maven/org.ex/b@1.0");
+        embedded.addComponent(bundled);
+        org.cyclonedx.model.Dependency aDep = new org.cyclonedx.model.Dependency("pkg:maven/org.ex/a@1.0?type=jar");
+        aDep.addDependency(new org.cyclonedx.model.Dependency("pkg:maven/org.ex/b@1.0"));
+        embedded.addDependency(aDep);
+        Path sbomJson = tempDir.resolve("a.cdx.json");
+        BomWriter.writeJson(embedded, sbomJson, false);
+        Path a = tempDir.resolve("a-1.0.jar");
+        try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(a))) {
+            jos.putNextEntry(new JarEntry("data.txt"));
+            jos.write("a".getBytes(StandardCharsets.UTF_8));
+            jos.closeEntry();
+            jos.putNextEntry(new JarEntry("META-INF/sbom/bom.cdx.json"));
+            jos.write(Files.readAllBytes(sbomJson));
+            jos.closeEntry();
+        }
+        Path b = createTestJar("b-1.0.jar", "b-content");
+        when(project.getArtifacts()).thenReturn(new HashSet<>(List.of(
+                createArtifact("org.ex", "a", "1.0", "jar", a.toFile()),
+                createArtifact("org.ex", "b", "1.0", "jar", b.toFile()))));
+        stubCollectReporting("a", "unshipped");
+
+        ZipArchiver archiver = new ZipArchiver();
+        archiver.setDestFile(tempDir.resolve("out.zip").toFile());
+        archiver.addFile(a.toFile(), "base/lib/a-1.0.jar");
+        archiver.addFile(b.toFile(), "base/lib/b-1.0.jar");
+        handler.finalizeArchiveCreation(archiver);
+
+        Bom bom = readBomFromArchiver(archiver);
+        Component aCopy = findComponent(bom, Component.Type.LIBRARY, "a");
+        assertEquals("pkg:maven/org.ex/b@1.0#2", aCopy.getComponents().get(0).getBomRef(), "a's own copy of b");
+        assertFalse(dependencyMap(bom).getOrDefault(aCopy.getBomRef(), List.of()).contains("pkg:maven/org.ex/b@1.0#2"),
+                "b is nested in a: containment, not a dependency");
+        List<String> refs = allComponentsRecursive(bom).stream().map(Component::getBomRef).toList();
+        assertEquals(refs.size(), new HashSet<>(refs).size(), "bom-refs are unique: " + refs);
+    }
+
+    /**
+     * Stubs every collect request to report the module's root depending on
+     * {@code parent} and {@code parent -> child} (all {@code org.ex:*:1.0}).
+     *
+     * @return the number of collect requests made
+     */
+    private AtomicInteger stubCollectReporting(String parent, String child) throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        org.eclipse.aether.artifact.Artifact parentArtifact = new org.eclipse.aether.artifact.DefaultArtifact(
+                "org.ex", parent, "jar", "1.0");
+        Dependency parentDep = new Dependency(parentArtifact, "compile");
+        Dependency childDep = new Dependency(
+                new org.eclipse.aether.artifact.DefaultArtifact("org.ex", child, "jar", "1.0"), "compile");
+        when(repoSystem.collectDependencies(any(RepositorySystemSession.class), any())).thenAnswer(invocation -> {
+            calls.incrementAndGet();
+            DependencySelector selector = ((RepositorySystemSession) invocation.getArgument(0)).getDependencySelector();
+            DependencySelector rootChild = selector.deriveChildSelector(mockCollectionContext(
+                    new org.eclipse.aether.artifact.DefaultArtifact("com.example", "test-app", "jar", "1.0"), null));
+            rootChild.selectDependency(parentDep);
+            rootChild.deriveChildSelector(mockCollectionContext(parentArtifact, parentDep)).selectDependency(childDep);
+            DefaultDependencyNode root = new DefaultDependencyNode((Dependency) null);
+            root.setChildren(List.of());
+            CollectResult result = new CollectResult(invocation.getArgument(1));
+            result.setRoot(root);
+            return result;
+        });
+        return calls;
+    }
+
+    /** Writes a WAR with the given files, by entry path. */
+    private Path createWar(String name, Map<String, Path> entries) throws Exception {
+        Path war = tempDir.resolve(name);
+        try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(war))) {
+            for (Map.Entry<String, Path> e : new TreeMap<>(entries).entrySet()) {
+                jos.putNextEntry(new JarEntry(e.getKey()));
+                jos.write(Files.readAllBytes(e.getValue()));
+                jos.closeEntry();
+            }
+        }
+        return war;
+    }
+
+    /** Registers {@code org.ex:<artifactId>:1.0} as a reactor war module resolving {@code artifacts}. */
+    private void mockReactorWar(String artifactId, Artifact... artifacts) {
+        MavenProject module = mock(MavenProject.class);
+        when(module.getGroupId()).thenReturn("org.ex");
+        when(module.getArtifactId()).thenReturn(artifactId);
+        when(module.getVersion()).thenReturn("1.0");
+        when(module.getPackaging()).thenReturn("war");
+        when(module.getArtifacts()).thenReturn(Set.of(artifacts));
+        when(session.getProjects()).thenReturn(List.of(module));
+    }
+
+    /** The bom-ref of the {@code app} WAR component. */
+    private static String warRef(Bom bom) {
+        return findComponent(bom, Component.Type.LIBRARY, "app").getBomRef();
+    }
+
+    /** Every dependency entry's sorted children, by the entry's ref. */
+    private static Map<String, List<String>> dependencyMap(Bom bom) {
+        Map<String, List<String>> map = new HashMap<>();
+        for (org.cyclonedx.model.Dependency d : bom.getDependencies()) {
+            map.put(d.getRef(), d.getDependencies() == null ? List.of()
+                    : d.getDependencies().stream().map(org.cyclonedx.model.Dependency::getRef).sorted().toList());
+        }
+        return map;
+    }
+
+    @Test
     void duplicateArtifactAtTwoLocationsMergesOccurrences() throws Exception {
         Path jarFile = createTestJar("jspecify-1.0.jar", "jspecify-content");
         Artifact artifact = createArtifact("org.jspecify", "jspecify", "1.0", "jar", jarFile.toFile());
@@ -374,9 +597,11 @@ class SbomContainerDescriptorHandlerTest {
         var warDep = bom.getDependencies().stream()
                 .filter(d -> warRef.equals(d.getRef())).findFirst().orElse(null);
         assertNotNull(warDep);
-        assertTrue(warDep.getDependencies().stream()
-                .anyMatch(d -> d.getRef().equals(nested.getBomRef())),
-                "WAR should depend on nested-lib");
+        assertTrue(warDep.getDependencies() == null || warDep.getDependencies().stream()
+                .noneMatch(d -> d.getRef().equals(nested.getBomRef())),
+                "containment is not a dependency: the WAR does not depend on nested-lib");
+        assertTrue(bom.getDependencies().stream().noneMatch(d -> d.getRef().equals(nested.getBomRef())),
+                "the WAR is not resolved, so nested-lib's dependencies are unknown");
     }
 
     @Test
@@ -489,9 +714,11 @@ class SbomContainerDescriptorHandlerTest {
         var warDep = bom.getDependencies().stream()
                 .filter(d -> warRef.equals(d.getRef())).findFirst().orElse(null);
         assertNotNull(warDep);
-        assertTrue(warDep.getDependencies().stream()
-                .anyMatch(d -> d.getRef().equals(jolokia.getBomRef())),
-                "WAR should depend on jolokia-json");
+        assertTrue(warDep.getDependencies() == null || warDep.getDependencies().stream()
+                .noneMatch(d -> d.getRef().equals(jolokia.getBomRef())),
+                "containment is not a dependency: the WAR does not depend on jolokia-json");
+        assertTrue(bom.getDependencies().stream().noneMatch(d -> d.getRef().equals(jolokia.getBomRef())),
+                "the WAR is not resolved, so jolokia-json's dependencies are unknown");
     }
 
     @Test
@@ -1036,7 +1263,7 @@ class SbomContainerDescriptorHandlerTest {
         assertTrue(allComponentsRecursive(bom).stream()
                 .anyMatch(c -> "react".equals(c.getName())),
                 "npm component with non-matching source-code occurrence"
-                        + " should survive filtering");
+                        + " should be kept");
     }
 
     @Test
@@ -1113,185 +1340,22 @@ class SbomContainerDescriptorHandlerTest {
                                 .filter(r -> Collections.frequency(allRefs, r) > 1)
                                 .distinct().toList());
 
-        // Every component bom-ref must have a matching dependency entry
+        // The nimbus jars are not project dependencies and the jcip copies are
+        // bundled in them: all are known only from their pom.properties, so
+        // their dependencies are unknown and none has an entry, which would
+        // declare them as none
         Set<String> depRefs = new HashSet<>();
         if (bom.getDependencies() != null) {
             for (org.cyclonedx.model.Dependency dep : bom.getDependencies()) {
                 depRefs.add(dep.getRef());
             }
         }
+        assertEquals(4, allRefs.size(), "two nimbus jars and their bundled jcip copies: " + allRefs);
         for (String ref : allRefs) {
-            assertTrue(depRefs.contains(ref),
-                    "component bom-ref '" + ref
-                            + "' must have a matching dependency entry");
+            assertFalse(depRefs.contains(ref), "'" + ref + "' must have no dependency entry");
         }
-
-        // Renamed (#2) dependency entries must carry the same dependsOn
-        // children as the original
-        if (bom.getDependencies() != null) {
-            for (org.cyclonedx.model.Dependency dep : bom.getDependencies()) {
-                String ref = dep.getRef();
-                int hashIdx = ref.indexOf('#');
-                if (hashIdx > 0) {
-                    String originalRef = ref.substring(0, hashIdx);
-                    org.cyclonedx.model.Dependency originalDep = bom.getDependencies().stream()
-                            .filter(d -> originalRef.equals(d.getRef()))
-                            .findFirst().orElse(null);
-                    assertNotNull(originalDep,
-                            "original dep for " + ref + " must exist");
-                    int cloneSize = dep.getDependencies() == null
-                            ? 0
-                            : dep.getDependencies().size();
-                    int origSize = originalDep.getDependencies() == null
-                            ? 0
-                            : originalDep.getDependencies().size();
-                    assertEquals(origSize, cloneSize,
-                            "cloned dep " + ref
-                                    + " must have same dependsOn count as "
-                                    + originalRef);
-                }
-            }
-        }
-    }
-
-    @Test
-    void fileComponentReplacedByLibraryWithMatchingHash() {
-        String hash = "ca70c90a5d1ce1511880ce9c93d4ad22108f61111d3daf91eb52762b571bd179";
-
-        Bom bom = new Bom();
-        Metadata meta = new Metadata();
-        Component main = new Component();
-        main.setType(Component.Type.APPLICATION);
-        main.setName("app");
-        main.setBomRef("pkg:maven/com.example/app@1.0");
-        meta.setComponent(main);
-        bom.setMetadata(meta);
-
-        Component fileComp = new Component();
-        fileComp.setType(Component.Type.FILE);
-        fileComp.setName("caffeine-3.2.3.jar");
-        fileComp.setBomRef("file:lib/caffeine-3.2.3.jar");
-        fileComp.setPurl("pkg:generic/caffeine-3.2.3.jar?checksum=sha256:" + hash);
-        fileComp.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
-
-        Component libComp = new Component();
-        libComp.setType(Component.Type.LIBRARY);
-        libComp.setGroup("com.github.ben-manes.caffeine");
-        libComp.setName("caffeine");
-        libComp.setVersion("3.2.3");
-        libComp.setBomRef("pkg:maven/com.github.ben-manes.caffeine/caffeine@3.2.3");
-        libComp.setPurl("pkg:maven/com.github.ben-manes.caffeine/caffeine@3.2.3");
-        libComp.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
-
-        bom.setComponents(new ArrayList<>(List.of(fileComp, libComp)));
-
-        org.cyclonedx.model.Dependency mainDep = new org.cyclonedx.model.Dependency(main.getBomRef());
-        mainDep.addDependency(new org.cyclonedx.model.Dependency(
-                fileComp.getBomRef()));
-        bom.addDependency(mainDep);
-        bom.addDependency(new org.cyclonedx.model.Dependency(
-                fileComp.getBomRef()));
-        org.cyclonedx.model.Dependency libDep = new org.cyclonedx.model.Dependency(libComp.getBomRef());
-        libDep.addDependency(new org.cyclonedx.model.Dependency(
-                "pkg:maven/org.jspecify/jspecify@1.0.0"));
-        bom.addDependency(libDep);
-
-        SbomGenerator.replaceFileComponentsWithLibraries(bom, "sha256");
-
-        assertEquals(1, bom.getComponents().size());
-        assertEquals("caffeine", bom.getComponents().get(0).getName());
-        assertEquals(Component.Type.LIBRARY, bom.getComponents().get(0).getType());
-
-        assertFalse(bom.getDependencies().stream()
-                .anyMatch(d -> "file:lib/caffeine-3.2.3.jar".equals(d.getRef())),
-                "file dependency entry should be removed");
-
-        org.cyclonedx.model.Dependency rootDep = bom.getDependencies().stream()
-                .filter(d -> main.getBomRef().equals(d.getRef()))
-                .findFirst().orElse(null);
-        assertNotNull(rootDep);
-        assertNotNull(rootDep.getDependencies());
-        assertTrue(rootDep.getDependencies().stream()
-                .anyMatch(d -> libComp.getBomRef().equals(d.getRef())),
-                "root should now depend on library ref");
-        assertFalse(rootDep.getDependencies().stream()
-                .anyMatch(d -> d.getRef().startsWith("file:")),
-                "root should not have file ref in dependsOn");
-
-        assertTrue(bom.getDependencies().stream()
-                .anyMatch(d -> libComp.getBomRef().equals(d.getRef())),
-                "library dependency entry should be preserved");
-    }
-
-    @Test
-    void multipleFileComponentsWithSameHashAllReplaced() {
-        String hash = "ab12cd34ef56789000000000000000000000000000000000000000000000abcd";
-
-        Bom bom = new Bom();
-        Metadata meta = new Metadata();
-        Component main = new Component();
-        main.setType(Component.Type.APPLICATION);
-        main.setName("app");
-        main.setBomRef("pkg:maven/com.example/app@1.0");
-        meta.setComponent(main);
-        bom.setMetadata(meta);
-
-        Component fileComp1 = new Component();
-        fileComp1.setType(Component.Type.FILE);
-        fileComp1.setName("guava-33.0.jar");
-        fileComp1.setBomRef("file:lib/guava-33.0.jar");
-        fileComp1.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
-
-        Component fileComp2 = new Component();
-        fileComp2.setType(Component.Type.FILE);
-        fileComp2.setName("guava-33.0.jar");
-        fileComp2.setBomRef("file:modules/guava-33.0.jar");
-        fileComp2.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
-
-        Component libComp = new Component();
-        libComp.setType(Component.Type.LIBRARY);
-        libComp.setGroup("com.google.guava");
-        libComp.setName("guava");
-        libComp.setVersion("33.0");
-        libComp.setBomRef("pkg:maven/com.google.guava/guava@33.0");
-        libComp.addHash(new Hash(Hash.Algorithm.SHA_256, hash));
-
-        bom.setComponents(new ArrayList<>(
-                List.of(fileComp1, fileComp2, libComp)));
-
-        org.cyclonedx.model.Dependency mainDep = new org.cyclonedx.model.Dependency(main.getBomRef());
-        mainDep.addDependency(new org.cyclonedx.model.Dependency(
-                fileComp1.getBomRef()));
-        mainDep.addDependency(new org.cyclonedx.model.Dependency(
-                fileComp2.getBomRef()));
-        bom.addDependency(mainDep);
-        bom.addDependency(new org.cyclonedx.model.Dependency(
-                fileComp1.getBomRef()));
-        bom.addDependency(new org.cyclonedx.model.Dependency(
-                fileComp2.getBomRef()));
-        bom.addDependency(new org.cyclonedx.model.Dependency(
-                libComp.getBomRef()));
-
-        SbomGenerator.replaceFileComponentsWithLibraries(bom, "sha256");
-
-        assertEquals(1, bom.getComponents().size(),
-                "only the library component should remain");
-        assertEquals("guava", bom.getComponents().get(0).getName());
-
-        assertFalse(bom.getDependencies().stream()
-                .anyMatch(d -> d.getRef().startsWith("file:")),
-                "no file dependency entries should remain");
-
-        org.cyclonedx.model.Dependency rootDep = bom.getDependencies().stream()
-                .filter(d -> main.getBomRef().equals(d.getRef()))
-                .findFirst().orElse(null);
-        assertNotNull(rootDep);
-        assertTrue(rootDep.getDependencies().stream()
-                .anyMatch(d -> libComp.getBomRef().equals(d.getRef())),
-                "root should depend on library ref");
-        assertFalse(rootDep.getDependencies().stream()
-                .anyMatch(d -> d.getRef().startsWith("file:")),
-                "root should not have any file refs in dependsOn");
+        assertEquals(2, allRefs.stream().filter(r -> r.startsWith("pkg:maven/org.x/jcip@1.0")).count(),
+                "both bundled copies are listed");
     }
 
     @Test
@@ -1493,13 +1557,13 @@ class SbomContainerDescriptorHandlerTest {
     }
 
     @Test
-    void unpackedWarEmbeddedSbomComponentsSurviveFiltering() throws Exception {
+    void unpackedWarEmbeddedSbomComponentsAreKept() throws Exception {
         // Models the real pipeline: an embedded SBOM inside an unpacked WAR
         // has flat top-level components — the upstream WAR component (with
         // empty occurrence meaning "the root"), npm components (no hashes,
         // no occurrences), a file component with a file: bom-ref, and a
-        // Maven library matched by occurrence path. All must survive
-        // filterSbomByArchive and get merged under the unpacked WAR.
+        // Maven library matched by occurrence path. All must be kept and
+        // merged under the unpacked WAR.
         Path nestedJar = createTestJar("hawtio-1.0.jar", "hawtio-content");
         Path jsFile = createTestFile("main.js", "console.log('hello')");
 
@@ -1619,25 +1683,25 @@ class SbomContainerDescriptorHandlerTest {
         assertNotNull(war, "unpacked WAR should be detected as LIBRARY");
         assertNotNull(war.getComponents(), "WAR should have nested components");
 
-        // Empty-occurrence component survives filterSbomByArchive
+        // Empty-occurrence component is kept
         assertTrue(war.getComponents().stream()
                 .anyMatch(c -> "upstream-war".equals(c.getName())),
-                "component with empty occurrence should survive filtering");
+                "component with empty occurrence should be kept");
 
-        // Flat npm components (no hashes) survive via can't-verify path
+        // Flat npm components (no hashes) cannot be found as files, so they are kept
         assertTrue(war.getComponents().stream()
                 .anyMatch(c -> "react".equals(c.getName())),
-                "npm component without hashes should survive filtering");
+                "npm component without hashes should be kept");
         assertTrue(war.getComponents().stream()
                 .anyMatch(c -> "react-dom".equals(c.getName())),
-                "npm component without hashes should survive filtering");
+                "npm component without hashes should be kept");
 
         // Maven library matched by occurrence survives
         assertTrue(war.getComponents().stream()
                 .anyMatch(c -> "hawtio".equals(c.getName())),
-                "Maven library matched by occurrence should survive filtering");
+                "Maven library matched by occurrence should be kept");
 
-        // npm dependency entries survive (not pruned by filterSbomByArchive)
+        // npm dependency entries are carried across
         var reactDomDepEntry = bom.getDependencies().stream()
                 .filter(d -> d.getRef().equals("pkg:npm/react-dom@18.0.0"))
                 .findFirst().orElse(null);
@@ -1647,15 +1711,11 @@ class SbomContainerDescriptorHandlerTest {
                 .anyMatch(d -> d.getRef().equals("pkg:npm/react@18.0.0")),
                 "react-dom should depend on react");
 
-        // file: bom-ref prefixed consistently with dependency entry ref
-        String expectedFileRef = "file:web/app.war/static/js/app.js";
-        assertTrue(war.getComponents().stream()
-                .anyMatch(c -> expectedFileRef.equals(c.getBomRef())),
-                "file: bom-ref should be prefixed with parent path");
-        assertNotNull(bom.getDependencies().stream()
-                .filter(d -> d.getRef().equals(expectedFileRef))
-                .findFirst().orElse(null),
-                "dependency entry ref should match prefixed bom-ref");
+        // the SBOM's static/js/app.js is not in the distribution (main.js is): not shipped, not merged
+        String unshippedFileRef = "file:web/app.war/static/js/app.js";
+        assertTrue(war.getComponents().stream().noneMatch(c -> unshippedFileRef.equals(c.getBomRef())),
+                "a file the layout does not contain is not merged");
+        assertTrue(bom.getDependencies().stream().noneMatch(d -> d.getRef().equals(unshippedFileRef)));
     }
 
     @Test

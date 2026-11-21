@@ -22,6 +22,22 @@ import java.util.List;
 public sealed interface AssemblyComponent permits PackageComponent, FileComponent {
 
     /**
+     * Returns the id of this copy of the component.
+     *
+     * <p>
+     * Two copies of the same artifact (e.g. one at the top level and one
+     * inside a WAR) are different components with different ids, while their
+     * other attributes may be equal. Transforms that rebuild a component (such
+     * as {@code withLicenses} or {@code withNested}) keep its id, so the id
+     * follows the copy through the whole pipeline; {@link DependencyEdge}s
+     * refer to it.
+     * </p>
+     *
+     * @return this component's id; never {@code null}
+     */
+    ComponentId id();
+
+    /**
      * Returns the licenses attached to this component.
      *
      * @return the licenses attached to this component; never {@code null}

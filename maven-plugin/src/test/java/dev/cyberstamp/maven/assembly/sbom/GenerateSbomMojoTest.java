@@ -10,6 +10,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -182,6 +183,59 @@ class GenerateSbomMojoTest {
     }
 
     @Test
+    void warSkipsTheFilesTheWarPluginWritesWhenPackaging() throws Exception {
+        // an overlay unpacked the upstream WAR's manifest and descriptor into
+        // the exploded directory; the WAR plugin writes a new manifest and the
+        // module's own descriptor into the archive at package time
+        when(project.getPackaging()).thenReturn("war");
+        Files.createDirectories(inputDir.resolve("META-INF/maven/com.example/test-app"));
+        Files.createDirectories(inputDir.resolve("META-INF/maven/org.upstream/upstream-war"));
+        Files.writeString(inputDir.resolve("META-INF/MANIFEST.MF"), "Created-By: upstream\n");
+        Files.writeString(inputDir.resolve("META-INF/maven/com.example/test-app/pom.properties"), "stale");
+        Files.writeString(inputDir.resolve("META-INF/maven/com.example/test-app/pom.xml"), "<project/>");
+        Files.writeString(inputDir.resolve("META-INF/maven/org.upstream/upstream-war/pom.properties"), "up");
+        Files.writeString(inputDir.resolve("WEB-INF/web.xml"), "<web-app/>");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        File output = tempDir.resolve("output.cdx.json").toFile();
+        createMojo(output).execute();
+
+        assertEquals(List.of("META-INF/maven/org.upstream/upstream-war/pom.properties", "WEB-INF/web.xml"),
+                locations(BomReader.readBom(output)),
+                "the upstream WAR's descriptor ships unchanged; the manifest and the module's descriptor do not");
+    }
+
+    @Test
+    void nonWarPackagingScansTheManifest() throws Exception {
+        Files.createDirectories(inputDir.resolve("META-INF"));
+        Files.writeString(inputDir.resolve("META-INF/MANIFEST.MF"), "Created-By: someone\n");
+        when(project.getArtifacts()).thenReturn(Set.of());
+
+        File output = tempDir.resolve("output.cdx.json").toFile();
+        createMojo(output).execute();
+
+        assertEquals(List.of("META-INF/MANIFEST.MF"), locations(BomReader.readBom(output)));
+    }
+
+    /** Every occurrence location in the BOM, at any depth, sorted. */
+    private static List<String> locations(Bom bom) {
+        List<String> result = new ArrayList<>();
+        ArrayDeque<Component> queue = new ArrayDeque<>(
+                bom.getComponents() == null ? List.of() : bom.getComponents());
+        while (!queue.isEmpty()) {
+            Component c = queue.poll();
+            if (c.getEvidence() != null && c.getEvidence().getOccurrences() != null) {
+                c.getEvidence().getOccurrences().forEach(o -> result.add(o.getLocation()));
+            }
+            if (c.getComponents() != null) {
+                queue.addAll(c.getComponents());
+            }
+        }
+        result.sort(null);
+        return result;
+    }
+
+    @Test
     void jarPackagingOmitsTypeFromPurl() throws Exception {
         when(project.getPackaging()).thenReturn("jar");
         Files.writeString(inputDir.resolve("data.txt"), "hello");
@@ -300,8 +354,9 @@ class GenerateSbomMojoTest {
 
     @Test
     void dependencyGraphFailureDoesNotPreventBomGeneration() throws Exception {
-        Files.writeString(inputDir.resolve("data.txt"), "hello");
-        when(project.getArtifacts()).thenReturn(Set.of());
+        Path jarFile = createTestJar("WEB-INF/lib/foo-1.0.jar", "foo-content");
+        when(project.getArtifacts()).thenReturn(Set.of(createArtifact("org.example", "foo", "1.0",
+                "jar", jarFile.toFile())));
         when(repoSystem.collectDependencies(any(), any()))
                 .thenThrow(new RuntimeException("simulated collection failure"));
 
@@ -314,6 +369,8 @@ class GenerateSbomMojoTest {
         assertNotNull(bom);
         assertNotNull(bom.getMetadata());
         assertEquals("test-app", bom.getMetadata().getComponent().getName());
+        assertTrue(bom.getDependencies().stream().noneMatch(d -> d.getRef().startsWith("pkg:maven/org.example/foo@")),
+                "foo's dependencies are unknown, not none");
     }
 
     @Test

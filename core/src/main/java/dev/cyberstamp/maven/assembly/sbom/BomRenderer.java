@@ -10,6 +10,7 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
@@ -41,6 +42,30 @@ import org.cyclonedx.model.metadata.ToolInformation;
  * hash/licenses, first non-null for identity). Nested components are emitted per-instance without
  * deduplication.
  * </p>
+ *
+ * <h2>Bom-refs</h2>
+ * <p>
+ * Every copy of a component is its own CycloneDX component with a unique
+ * bom-ref. A package's bom-ref is its purl and a file's is
+ * {@code file:<archivePath>}. When several copies share one, the first in
+ * output order keeps it and the others get {@code #2}, {@code #3}, ...
+ * appended. Output order is the sorted top-level components first, then the
+ * nested components breadth-first, level by level, so a top-level copy
+ * always keeps the plain purl. <strong>This is a contract:</strong> producers
+ * (e.g. one merging an embedded SBOM under {@code coords.toPurl()}) rely on
+ * the plain purl naming the top-level copy. {@link #renderWithRefs} reports
+ * the bom-ref given to each model {@link ComponentId}.
+ * </p>
+ *
+ * <h2>Dependencies</h2>
+ * <p>
+ * Dependency entries come from the model's {@link DependencyEdge}s, which
+ * name copies by id, so an entry always lists the specific copies its
+ * component depends on. A component whose dependencies are unknown gets no
+ * entry unless an edge starts from it (an empty entry would declare that it
+ * has none); the main component depends on every top-level component that no
+ * edge points to.
+ * </p>
  */
 public class BomRenderer {
 
@@ -60,6 +85,17 @@ public class BomRenderer {
      * @return the assembled BOM, ready for serialization
      */
     public Bom render(AssemblyComponents model) {
+        return renderWithRefs(model).bom();
+    }
+
+    /**
+     * Renders the model and reports the bom-ref given to each of its
+     * component copies (see "Bom-refs" in the class description).
+     *
+     * @param model the assembly components to render; never {@code null}
+     * @return the assembled BOM and the bom-ref of every component id
+     */
+    RenderedBom renderWithRefs(AssemblyComponents model) {
         AssemblyMetadata metadata = model.metadata();
         Hash.Algorithm hashAlgorithm = parseHashAlgorithm(metadata.getHashAlgorithmSpec());
         String normalizedAlg = SbomUtils.normalizeAlgorithm(hashAlgorithm.getSpec());
@@ -68,14 +104,66 @@ public class BomRenderer {
 
         buildTopLevelComponents(model, ctx);
         attachNestedComponents(ctx);
+        List<Component> topLevel = buildSortedComponentList(ctx);
+        assignUniqueBomRefs(topLevel);
 
         Bom bom = new Bom();
         Component mainComponent = createMainComponent(metadata);
         bom.setMetadata(createMetadata(mainComponent, metadata, ctx));
-        bom.setComponents(buildSortedComponentList(ctx));
+        bom.setComponents(topLevel);
         buildDependencyTree(bom, mainComponent.getBomRef(), model, ctx);
 
-        return bom;
+        return new RenderedBom(bom, collectBomRefs(ctx));
+    }
+
+    /**
+     * Gives every rendered component a unique bom-ref: walking the sorted
+     * top-level components first and then the nested ones breadth-first, the
+     * first holder of a bom-ref keeps it and each later one gets the next free
+     * {@code #n} (from 2). Nested lists are already sorted by
+     * {@link #attachNestedComponents}, so the order, and thus the naming, is
+     * deterministic.
+     *
+     * @param topLevel the sorted top-level components
+     */
+    private static void assignUniqueBomRefs(List<Component> topLevel) {
+        Set<String> taken = new HashSet<>();
+        List<Component> level = topLevel;
+        while (!level.isEmpty()) {
+            List<Component> next = null;
+            for (Component comp : level) {
+                String base = comp.getBomRef();
+                if (base != null && !taken.add(base)) {
+                    int n = 2;
+                    String unique = base + '#' + n;
+                    while (!taken.add(unique)) {
+                        unique = base + '#' + ++n;
+                    }
+                    comp.setBomRef(unique);
+                }
+                List<Component> nested = comp.getComponents();
+                if (nested != null && !nested.isEmpty()) {
+                    if (next == null) {
+                        next = new ArrayList<>();
+                    }
+                    next.addAll(nested);
+                }
+            }
+            level = next == null ? List.of() : next;
+        }
+    }
+
+    /**
+     * Collects the final bom-ref of every rendered component copy.
+     *
+     * @return an unmodifiable map from component id to bom-ref
+     */
+    private static Map<ComponentId, String> collectBomRefs(RenderContext ctx) {
+        Map<ComponentId, String> refs = new HashMap<>((int) (ctx.byId.size() / 0.75f) + 1);
+        for (Map.Entry<ComponentId, Component> e : ctx.byId.entrySet()) {
+            refs.put(e.getKey(), e.getValue().getBomRef());
+        }
+        return Collections.unmodifiableMap(refs);
     }
 
     /**
@@ -135,21 +223,22 @@ public class BomRenderer {
                 Component existing = topLevelById.get(purl);
                 if (existing != null) {
                     // Occurrence merge: append occurrence, first-wins for licenses,
-                    // first non-null for identity
+                    // first non-null for identity. The merged copy's id names
+                    // the merged component, so edges to or from it resolve.
+                    ctx.byId.put(pkg.id(), existing);
+                    if (pkg.dependenciesKnown()) {
+                        ctx.knownDependencies.add(existing);
+                    }
                     appendOccurrence(existing, pkg.archivePath());
                     applyIdentityIfAbsent(existing, pkg);
                     applyLicensesIfAbsent(existing, CycloneDxLicenses.toLicenseChoice(pkg.licenses()));
                 } else {
                     Component comp = createPackageComponent(pkg, ctx);
                     topLevelById.put(purl, comp);
-                    ctx.componentsById.put(purl, comp);
                     allComponents.add(comp);
-                    ctx.directChildren.add(comp.getBomRef());
                 }
             } else if (neutralComp instanceof FileComponent file) {
-                Component comp = createFileComponent(file, ctx);
-                allComponents.add(comp);
-                ctx.directChildren.add(comp.getBomRef());
+                allComponents.add(createFileComponent(file, ctx));
             }
         }
 
@@ -192,9 +281,11 @@ public class BomRenderer {
 
         // Components whose dependencies are unknown must not be declared as empty
         // leaf entries in the dependency graph (unknown != no dependencies).
-        if (!pkg.dependenciesKnown()) {
-            ctx.dependenciesUnknown.add(comp);
+        if (pkg.dependenciesKnown()) {
+            ctx.knownDependencies.add(comp);
         }
+        ctx.packages.add(comp);
+        ctx.byId.put(pkg.id(), comp);
 
         return comp;
     }
@@ -274,6 +365,9 @@ public class BomRenderer {
     /**
      * Renders an {@link Identification} as a CycloneDX purl identity with a
      * single method and no value.
+     *
+     * @param identification how a component was identified
+     * @return the identity
      */
     static Identity toIdentity(Identification identification) {
         Method method = new Method();
@@ -342,6 +436,7 @@ public class BomRenderer {
             comp.addHash(new Hash(ctx.hashAlgorithm, file.hash()));
         }
         comp.setEvidence(buildFileEvidence(file.archivePath()));
+        ctx.byId.put(file.id(), comp);
         LicenseChoice projectLicenses = CycloneDxLicenses.toLicenseChoice(ctx.metadata.getProjectLicenses());
         if (projectLicenses != null) {
             comp.setLicenses(projectLicenses);
@@ -394,13 +489,9 @@ public class BomRenderer {
         List<Component> result = new ArrayList<>(neutral.size());
         for (AssemblyComponent neutralComp : neutral) {
             if (neutralComp instanceof PackageComponent pkg) {
-                Component comp = createPackageComponent(pkg, ctx);
-                result.add(comp);
-                String purl = pkg.ref().toPurl().toString();
-                ctx.componentsById.putIfAbsent(purl, comp);
+                result.add(createPackageComponent(pkg, ctx));
             } else if (neutralComp instanceof FileComponent file) {
-                Component comp = createFileComponent(file, ctx);
-                result.add(comp);
+                result.add(createFileComponent(file, ctx));
             }
         }
         return result;
@@ -598,201 +689,82 @@ public class BomRenderer {
     }
 
     /**
-     * Populates the BOM's dependency section from the registered
-     * dependency graph and explicit dependencies.
+     * Populates the BOM's dependency section from the model's
+     * {@link DependencyEdge}s.
+     *
+     * <ul>
+     * <li>The main component depends on every top-level component that no
+     * edge points to (the others are reached through their dependents).</li>
+     * <li>Every edge's parent gets an entry listing the bom-refs of its
+     * children, each once.</li>
+     * <li>Every other package component whose dependencies are known, and
+     * every top-level file component, gets an empty (leaf) entry.</li>
+     * <li>A component whose dependencies are unknown and from which no edge
+     * starts gets no entry: an empty one would declare that it has none.</li>
+     * </ul>
      *
      * <p>
-     * Ported from {@code BomBuilder#buildDependencyTree}.
+     * Edges are resolved by id, so they connect exactly the copies they name.
+     * An edge naming an id that is not in the model (e.g. a component a
+     * transform dropped) is skipped. Entries, and each entry's children, are
+     * sorted by ref.
      * </p>
      */
     private void buildDependencyTree(Bom bom, String mainBomRef, AssemblyComponents model, RenderContext ctx) {
-        Dependency mainDep = buildMainDependency(mainBomRef, model, ctx);
-        bom.addDependency(mainDep);
-        addInterArtifactDependencies(bom, model, ctx);
-        addFileDependencyEntries(bom, ctx);
-        addLeafEntriesForMissingRefs(bom, ctx);
-        bom.getDependencies().sort(Comparator.comparing(Dependency::getRef));
-    }
-
-    /**
-     * Creates the dependency entry for the main component, listing only
-     * direct (non-transitive) children.
-     *
-     * <p>
-     * Ported from {@code BomBuilder#buildMainDependency}.
-     * </p>
-     */
-    private Dependency buildMainDependency(String mainBomRef, AssemblyComponents model, RenderContext ctx) {
-        Set<String> transitiveChildren = collectTransitiveChildren(model, ctx);
-        Dependency mainDep = new Dependency(mainBomRef);
-        ctx.directChildren.stream()
-                .filter(ref -> !transitiveChildren.contains(ref))
-                .sorted()
-                .forEach(ref -> mainDep.addDependency(new Dependency(ref)));
-        return mainDep;
-    }
-
-    /**
-     * Collects all bom-refs that appear as a child in any dependency edge.
-     */
-    private Set<String> collectTransitiveChildren(AssemblyComponents model, RenderContext ctx) {
-        Set<String> transitiveChildren = new HashSet<>();
+        // Children kept as bom-refs in a sorted set: two ids of one merged
+        // top-level component resolve to one ref, listed once.
+        Map<Component, Set<String>> childRefsByParent = new IdentityHashMap<>();
+        Set<Component> edgeTargets = Collections.newSetFromMap(new IdentityHashMap<>());
         for (DependencyEdge edge : model.dependencyEdges()) {
-            String childPurl = edge.child().toPurl().toString();
-            Component child = ctx.componentsById.get(childPurl);
-            if (child != null) {
-                transitiveChildren.add(child.getBomRef());
-            }
-        }
-        return transitiveChildren;
-    }
-
-    /**
-     * Adds inter-artifact dependency entries to the BOM, excluding
-     * inferred dependencies that are already nested components of their parent.
-     * Explicit dependencies bypass this filter (matches {@code BomBuilder}'s
-     * old {@code mergeDependencyGraphs} L697-718: filters {@code artifactDependencyGraph}
-     * but not {@code explicitDeps}).
-     */
-    private void addInterArtifactDependencies(Bom bom, AssemblyComponents model, RenderContext ctx) {
-        // Build nested-refs lookup: for each parent purl, collect purls of its nested PackageComponents
-        Map<String, Set<String>> nestedRefsByParent = buildNestedRefsLookup(model);
-
-        Map<String, Set<String>> depMap = new HashMap<>();
-        for (DependencyEdge edge : model.dependencyEdges()) {
-            String parentPurl = edge.parent().toPurl().toString();
-            String childPurl = edge.child().toPurl().toString();
-
-            // Filter out INFERRED edges where child is nested under parent (BomBuilder L703-709)
-            // Explicit edges bypass this filter to preserve manually-declared dependencies
-            if (!edge.explicit()) {
-                Set<String> nested = nestedRefsByParent.getOrDefault(parentPurl, Set.of());
-                if (nested.contains(childPurl)) {
-                    continue; // skip: containment is expressed via nesting, not dependency edges
-                }
-            }
-
-            depMap.computeIfAbsent(parentPurl, k -> new HashSet<>()).add(childPurl);
-        }
-
-        for (Map.Entry<String, Set<String>> entry : depMap.entrySet()) {
-            Component parent = ctx.componentsById.get(entry.getKey());
-            if (parent == null) {
+            Component parent = ctx.byId.get(edge.parent());
+            Component child = ctx.byId.get(edge.child());
+            if (parent == null || child == null) {
                 continue;
             }
-            Dependency dep = new Dependency(parent.getBomRef());
-            resolveChildPurls(entry.getValue(), ctx).forEach(childRef -> dep.addDependency(new Dependency(childRef)));
-            bom.addDependency(dep);
+            childRefsByParent.computeIfAbsent(parent, k -> new TreeSet<>()).add(child.getBomRef());
+            edgeTargets.add(child);
         }
-    }
 
-    /**
-     * Builds a map of nested package refs for each parent component,
-     * used to filter dependency edges whose child is already nested
-     * (replicates BomBuilder's nestedIdsByParent role).
-     *
-     * <p>
-     * {@link #collectNestedRefs} recurses through the component tree so that
-     * every parent at any depth gets its own entry, but each entry's set holds
-     * only that parent's <em>direct</em> nested {@code PackageComponent} refs
-     * (grandchildren appear under their own immediate parent, not here). This
-     * mirrors {@code BomBuilder}'s direct-only {@code nestedIdsByParent}.
-     * </p>
-     */
-    private Map<String, Set<String>> buildNestedRefsLookup(AssemblyComponents model) {
-        Map<String, Set<String>> lookup = new HashMap<>();
-        for (AssemblyComponent comp : model.components()) {
-            collectNestedRefs(comp, lookup);
-        }
-        return lookup;
-    }
-
-    /**
-     * Recursively collects nested PackageComponent refs under a parent.
-     */
-    private void collectNestedRefs(AssemblyComponent comp, Map<String, Set<String>> lookup) {
-        if (comp instanceof PackageComponent pkg) {
-            String parentPurl = pkg.ref().toPurl().toString();
-            Set<String> nestedRefs = new HashSet<>();
-            for (AssemblyComponent nested : pkg.nested()) {
-                if (nested instanceof PackageComponent nestedPkg) {
-                    nestedRefs.add(nestedPkg.ref().toPurl().toString());
-                }
-                collectNestedRefs(nested, lookup); // recurse for deeply nested
-            }
-            if (!nestedRefs.isEmpty()) {
-                lookup.put(parentPurl, nestedRefs);
-            }
-        } else if (comp instanceof FileComponent file) {
-            // FileComponents can also have nested PackageComponents (e.g. shaded JARs)
-            for (AssemblyComponent nested : file.nested()) {
-                collectNestedRefs(nested, lookup);
-            }
-        }
-    }
-
-    /**
-     * Resolves purl strings to bom-refs, filtering out unknown packages,
-     * returning sorted results.
-     *
-     * <p>
-     * Ported from {@code BomBuilder#resolveChildRefs}.
-     * </p>
-     */
-    private List<String> resolveChildPurls(Set<String> childPurls, RenderContext ctx) {
-        List<String> bomRefs = new ArrayList<>(childPurls.size());
-        for (String childPurl : childPurls) {
-            Component child = ctx.componentsById.get(childPurl);
-            if (child != null) {
-                bomRefs.add(child.getBomRef());
-            }
-        }
-        bomRefs.sort(Comparator.naturalOrder());
-        return bomRefs;
-    }
-
-    /**
-     * Adds empty (leaf-node) dependency entries for all FILE components.
-     *
-     * <p>
-     * Ported verbatim from {@code BomBuilder#addFileDependencyEntries}.
-     * </p>
-     */
-    private void addFileDependencyEntries(Bom bom, RenderContext ctx) {
+        List<Dependency> dependencies = new ArrayList<>(ctx.packages.size() + ctx.components.size() + 1);
+        Set<String> emitted = new HashSet<>();
+        Set<String> mainChildren = new TreeSet<>();
         for (Component comp : ctx.components) {
-            if (comp.getType() == Component.Type.FILE) {
-                bom.addDependency(new Dependency(comp.getBomRef()));
+            if (!edgeTargets.contains(comp)) {
+                mainChildren.add(comp.getBomRef());
             }
         }
+        dependencies.add(dependencyOf(mainBomRef, mainChildren));
+        emitted.add(mainBomRef);
+        for (Map.Entry<Component, Set<String>> e : childRefsByParent.entrySet()) {
+            String ref = e.getKey().getBomRef();
+            if (emitted.add(ref)) {
+                dependencies.add(dependencyOf(ref, e.getValue()));
+            }
+        }
+        for (Component comp : ctx.packages) {
+            if (ctx.knownDependencies.contains(comp) && emitted.add(comp.getBomRef())) {
+                dependencies.add(new Dependency(comp.getBomRef()));
+            }
+        }
+        for (Component comp : ctx.components) {
+            if (comp.getType() == Component.Type.FILE && emitted.add(comp.getBomRef())) {
+                dependencies.add(new Dependency(comp.getBomRef()));
+            }
+        }
+        dependencies.sort(Comparator.comparing(Dependency::getRef));
+        bom.setDependencies(dependencies);
     }
 
     /**
-     * Adds empty (leaf-node) dependency entries for any registered
-     * component whose bom-ref does not yet appear in the dependency
-     * graph. This ensures components discovered outside the Maven
-     * dependency tree (e.g. shaded artifacts found via pom.properties)
-     * still have a dependency entry per the CycloneDX spec.
-     *
-     * <p>
-     * Ported from {@code BomBuilder#addLeafEntriesForMissingRefs}.
-     * </p>
+     * Creates a dependency entry for {@code ref} listing {@code childRefs}, in
+     * their iteration order.
      */
-    private void addLeafEntriesForMissingRefs(Bom bom, RenderContext ctx) {
-        List<Dependency> dependencies = bom.getDependencies();
-        Set<String> existingRefs = new HashSet<>(dependencies.size());
-        for (Dependency d : dependencies) {
-            existingRefs.add(d.getRef());
+    private static Dependency dependencyOf(String ref, Set<String> childRefs) {
+        Dependency dep = new Dependency(ref);
+        for (String childRef : childRefs) {
+            dep.addDependency(new Dependency(childRef));
         }
-        for (Component comp : ctx.componentsById.values()) {
-            // Skip components whose dependencies are unknown: declaring an empty
-            // leaf entry would misreport "unknown" as "no dependencies".
-            if (ctx.dependenciesUnknown.contains(comp)) {
-                continue;
-            }
-            if (existingRefs.add(comp.getBomRef())) {
-                bom.addDependency(new Dependency(comp.getBomRef()));
-            }
-        }
+        return dep;
     }
 
     /**
@@ -803,19 +775,31 @@ public class BomRenderer {
         final String normalizedAlg;
         final AssemblyMetadata metadata;
 
+        /** The top-level components, in model order. */
         final List<Component> components = new ArrayList<>();
-        // Keyed by purl string to match occurrence-merge deduplication key
-        final Map<String, Component> componentsById = new HashMap<>();
+        /** Every rendered package component, top-level and nested. */
+        final List<Component> packages = new ArrayList<>();
         /**
-         * Rendered instances whose dependencies are unknown, compared by
-         * identity: a bundled copy with unknown dependencies says nothing
-         * about the top-level instance sharing its bom-ref. Excluded from
-         * leaf dependency entries.
+         * The rendered component of every model copy, by id. Top-level copies
+         * merged by occurrence map to the one merged component.
          */
-        final Set<Component> dependenciesUnknown = Collections.newSetFromMap(new IdentityHashMap<>());
-        final Map<Component, List<Component>> nestedComponentsByParent = new HashMap<>();
-        final Set<String> directChildren = new HashSet<>();
+        final Map<ComponentId, Component> byId = new HashMap<>();
+        /**
+         * Rendered package components whose dependencies are known, compared
+         * by identity (CycloneDX components compare by value, and two copies of
+         * an artifact may be equal). Only these get leaf dependency entries.
+         */
+        final Set<Component> knownDependencies = Collections.newSetFromMap(new IdentityHashMap<>());
+        /** Nested components by parent, compared by identity for the same reason. */
+        final Map<Component, List<Component>> nestedComponentsByParent = new IdentityHashMap<>();
 
+        /**
+         * Creates the state of one rendering.
+         *
+         * @param hashAlgorithm the algorithm of the rendered hashes
+         * @param normalizedAlg the normalized name of that algorithm
+         * @param metadata the assembly metadata
+         */
         RenderContext(Hash.Algorithm hashAlgorithm, String normalizedAlg, AssemblyMetadata metadata) {
             this.hashAlgorithm = hashAlgorithm;
             this.normalizedAlg = normalizedAlg;

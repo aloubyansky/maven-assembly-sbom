@@ -19,21 +19,46 @@ import java.util.Objects;
  * @param identification how this component's identity was determined, or
  *        {@code null} if not known, in which case no identity evidence is
  *        emitted for it
+ * @param id the id of this copy (see {@link AssemblyComponent#id()});
+ *        {@code null} gets a {@link ComponentId#generate() generated} one.
+ *        Every {@code with*} copy keeps it.
  */
 public record PackageComponent(PackageRef ref, String archivePath, String hash,
         List<LicenseInfo> licenses, List<AssemblyComponent> nested, boolean dependenciesKnown,
-        Identification identification)
+        Identification identification, ComponentId id)
         implements
             AssemblyComponent {
 
     /**
-     * Requires a non-null {@code ref} and defensively copies the license and
-     * nested lists (a {@code null} list becomes empty).
+     * Requires a non-null {@code ref}, defensively copies the license and
+     * nested lists (a {@code null} list becomes empty) and generates an id
+     * when none is given.
      */
     public PackageComponent {
         Objects.requireNonNull(ref, "ref");
         licenses = licenses == null ? List.of() : List.copyOf(licenses);
         nested = nested == null ? List.of() : List.copyOf(nested);
+        if (id == null) {
+            id = ComponentId.generate();
+        }
+    }
+
+    /**
+     * Creates a package component with a {@link ComponentId#generate()
+     * generated} id.
+     *
+     * @param ref the package identity; never {@code null}
+     * @param archivePath the path within the assembly, or {@code null}
+     * @param hash the content hash, or {@code null}
+     * @param licenses the attached licenses ({@code null} becomes empty)
+     * @param nested the nested components ({@code null} becomes empty)
+     * @param dependenciesKnown whether this component's dependencies are known
+     * @param identification how this component was identified, or {@code null}
+     */
+    public PackageComponent(PackageRef ref, String archivePath, String hash,
+            List<LicenseInfo> licenses, List<AssemblyComponent> nested, boolean dependenciesKnown,
+            Identification identification) {
+        this(ref, archivePath, hash, licenses, nested, dependenciesKnown, identification, null);
     }
 
     /**
@@ -113,8 +138,8 @@ public record PackageComponent(PackageRef ref, String archivePath, String hash,
 
     /**
      * Returns a copy of this component with the given licenses, preserving all
-     * other attributes (including {@link #dependenciesKnown()} and
-     * {@link #identification()}).
+     * other attributes (including {@link #dependenciesKnown()},
+     * {@link #identification()} and {@link #id()}).
      *
      * @param licenses the licenses to attach
      * @return this component, or a copy with the given licenses
@@ -124,13 +149,13 @@ public record PackageComponent(PackageRef ref, String archivePath, String hash,
             return this;
         }
         return new PackageComponent(ref, archivePath, hash, licenses, nested, dependenciesKnown,
-                identification);
+                identification, id);
     }
 
     /**
      * Returns a copy of this component with the given nested components,
-     * preserving all other attributes (including {@link #dependenciesKnown()} and
-     * {@link #identification()}).
+     * preserving all other attributes (including {@link #dependenciesKnown()},
+     * {@link #identification()} and {@link #id()}).
      *
      * @param nested the nested components
      * @return this component, or a copy with the given nested components
@@ -140,7 +165,21 @@ public record PackageComponent(PackageRef ref, String archivePath, String hash,
             return this;
         }
         return new PackageComponent(ref, archivePath, hash, licenses, nested, dependenciesKnown,
-                identification);
+                identification, id);
+    }
+
+    /**
+     * Returns a copy of this component declaring whether its dependencies are
+     * known, preserving all other attributes (including {@link #id()}).
+     *
+     * @param known whether this component's dependencies are known
+     * @return this component, or a copy with the given flag
+     */
+    public PackageComponent withDependenciesKnown(boolean known) {
+        if (known == dependenciesKnown) {
+            return this;
+        }
+        return new PackageComponent(ref, archivePath, hash, licenses, nested, known, identification, id);
     }
 
     /**

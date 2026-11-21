@@ -4,13 +4,17 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.Hash;
+import org.cyclonedx.model.Metadata;
 import org.cyclonedx.model.component.evidence.Identity;
 import org.cyclonedx.model.component.evidence.Method;
 import org.cyclonedx.model.component.evidence.Occurrence;
@@ -60,7 +64,7 @@ class ExternalSbomMergeEvidenceTest {
         ArchiveIndex index = buildIndex(Map.of(hash,
                 List.of("lib/main/jackson-core-2.22.0.jar")));
 
-        Bom filtered = SbomGenerator.filterSbomByArchive(external, index, null);
+        Bom filtered = mergeShipped(external, index);
 
         assertEquals(1, filtered.getComponents().size());
         Component c = filtered.getComponents().get(0);
@@ -84,7 +88,7 @@ class ExternalSbomMergeEvidenceTest {
         comp.getEvidence().setIdentities(new ArrayList<>(List.of(identity)));
         ArchiveIndex index = buildIndex(Map.of(hash, List.of("lib/main/jackson-core-2.22.0.jar")));
 
-        Bom filtered = SbomGenerator.filterSbomByArchive(bomOf(comp), index, null);
+        Bom filtered = mergeShipped(bomOf(comp), index);
 
         List<Identity> identities = filtered.getComponents().get(0).getEvidence().getIdentities();
         assertEquals(1, identities.size());
@@ -96,16 +100,14 @@ class ExternalSbomMergeEvidenceTest {
     }
 
     /**
-     * No occurrences and no hash in the configured algorithm: admitted with
-     * nothing verified.
+     * A Maven package the distribution would show if it shipped it, but does
+     * not: not merged.
      */
     @Test
-    void unverifiedExternalComponentGainsNoIdentity() {
-        Bom filtered = SbomGenerator.filterSbomByArchive(
-                bomOf(externalMaven(null, null)), buildIndex(Map.of()), null);
+    void unshippedExternalMavenComponentIsNotMerged() {
+        Bom merged = merge(bomOf(externalMaven(null, "lib/main/jackson-core-2.22.0.jar")), buildIndex(Map.of()));
 
-        assertEquals(1, filtered.getComponents().size());
-        assertNoIdentity(filtered.getComponents().get(0));
+        assertTrue(merged.getComponents() == null || merged.getComponents().isEmpty());
     }
 
     private static void assertNoIdentity(Component c) {
@@ -128,13 +130,42 @@ class ExternalSbomMergeEvidenceTest {
         npm.setEvidence(e);
 
         Bom external = bomOf(npm);
-        // npm components survive filtering even without an archive match
-        Bom filtered = SbomGenerator.filterSbomByArchive(external, buildIndex(Map.of()), null);
+        // npm components cannot be found as files, so they are merged without an archive match
+        Bom filtered = merge(external, buildIndex(Map.of()));
 
         assertEquals(1, filtered.getComponents().size());
         Evidence ev = filtered.getComponents().get(0).getEvidence();
         assertTrue(ev == null || ev.getIdentities() == null || ev.getIdentities().isEmpty(),
                 "non-Maven components must not gain a maven manifest-analysis identity");
+    }
+
+    /** Merges into an empty distribution BOM, as the generator merges a configured external SBOM. */
+    private static Bom merge(Bom external, ArchiveIndex index) {
+        return merge(external, index, Set.of());
+    }
+
+    /** Like {@link #merge}, with the external components the analyzer matched to archive files. */
+    private static Bom mergeShipped(Bom external, ArchiveIndex index) {
+        Set<Component> shipped = Collections.newSetFromMap(new IdentityHashMap<>());
+        shipped.addAll(external.getComponents());
+        return merge(external, index, shipped);
+    }
+
+    /**
+     * Merges into an empty distribution BOM, treating {@code shipped} as the components the
+     * analyzer matched to archive files.
+     */
+    private static Bom merge(Bom external, ArchiveIndex index, Set<Component> shipped) {
+        Bom target = new Bom();
+        Metadata metadata = new Metadata();
+        Component main = new Component();
+        main.setType(Component.Type.APPLICATION);
+        main.setName("dist");
+        main.setBomRef("dist");
+        metadata.setComponent(main);
+        target.setMetadata(metadata);
+        AnchoredMerge.merge(target, external, new AnchoredMerge.Scope(main, index, Set.of(), shipped));
+        return target;
     }
 
     private static ArchiveIndex buildIndex(Map<String, List<String>> hashToPaths) {
