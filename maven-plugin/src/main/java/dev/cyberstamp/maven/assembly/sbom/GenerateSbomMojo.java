@@ -324,6 +324,14 @@ public class GenerateSbomMojo extends AbstractMojo {
         });
     }
 
+    /**
+     * Hashes every file under a directory.
+     *
+     * @param dir the directory to scan
+     * @param digest the digest to hash the files with
+     * @return an entry per file, with its path relative to {@code dir}
+     * @throws IOException if a file cannot be read
+     */
     private List<FileEntry> collectDirectoryEntries(Path dir, MessageDigest digest) throws IOException {
         List<FileEntry> entries = new ArrayList<>();
         Files.walkFileTree(dir, new SimpleFileVisitor<>() {

@@ -28,6 +28,11 @@ public final class SbomPipeline {
     private boolean failOnMissingLicense;
     private boolean identityEvidence = true;
 
+    /**
+     * Creates a pipeline over a model; {@link #forModel} is the entry point.
+     *
+     * @param model the analyzed components to render
+     */
     private SbomPipeline(AssemblyComponents model) {
         this.model = model;
     }

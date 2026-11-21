@@ -365,6 +365,9 @@ public class BomRenderer {
     /**
      * Renders an {@link Identification} as a CycloneDX purl identity with a
      * single method and no value.
+     *
+     * @param identification how a component was identified
+     * @return the identity
      */
     static Identity toIdentity(Identification identification) {
         Method method = new Method();
@@ -790,6 +793,13 @@ public class BomRenderer {
         /** Nested components by parent, compared by identity for the same reason. */
         final Map<Component, List<Component>> nestedComponentsByParent = new IdentityHashMap<>();
 
+        /**
+         * Creates the state of one rendering.
+         *
+         * @param hashAlgorithm the algorithm of the rendered hashes
+         * @param normalizedAlg the normalized name of that algorithm
+         * @param metadata the assembly metadata
+         */
         RenderContext(Hash.Algorithm hashAlgorithm, String normalizedAlg, AssemblyMetadata metadata) {
             this.hashAlgorithm = hashAlgorithm;
             this.normalizedAlg = normalizedAlg;

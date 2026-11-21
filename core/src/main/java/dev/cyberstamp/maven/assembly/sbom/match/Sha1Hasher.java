@@ -21,7 +21,7 @@ import dev.cyberstamp.maven.assembly.sbom.SbomUtils;
  * each file only once.
  *
  * <p>
- * Not thread-safe, like the rest of the {@link ArchiveAnalyzer} pipeline.
+ * Not thread-safe, like the rest of the {@code ArchiveAnalyzer} pipeline.
  * </p>
  */
 final class Sha1Hasher {
@@ -31,6 +31,7 @@ final class Sha1Hasher {
     private final MessageDigest digest;
     private final Map<File, Optional<String>> hashes = new HashMap<>();
 
+    /** Creates a hasher with an empty cache. */
     Sha1Hasher() {
         try {
             digest = MessageDigest.getInstance("SHA-1");
@@ -43,6 +44,9 @@ final class Sha1Hasher {
     /**
      * Returns the lowercase hex SHA-1 of the entry's source file, or empty if
      * the entry has no readable source file.
+     *
+     * @param entry the archive entry
+     * @return the SHA-1, computed once per file
      */
     Optional<String> sha1(FileEntry entry) {
         File file = entry.sourceFile();
@@ -52,6 +56,12 @@ final class Sha1Hasher {
         return hashes.computeIfAbsent(file, this::compute);
     }
 
+    /**
+     * Hashes a file, logging a failure instead of throwing it.
+     *
+     * @param file the file
+     * @return the SHA-1, or empty if the file could not be read
+     */
     private Optional<String> compute(File file) {
         try {
             return Optional.of(SbomUtils.computeHash(digest, file.toPath()));

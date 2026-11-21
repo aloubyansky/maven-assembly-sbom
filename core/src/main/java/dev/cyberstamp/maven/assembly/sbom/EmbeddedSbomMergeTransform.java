@@ -16,6 +16,12 @@ final class EmbeddedSbomMergeTransform {
     private final String mode;
     private final ArchiveIndex archiveIndex;
 
+    /**
+     * Creates the transform.
+     *
+     * @param mode {@code merge}, {@code link} or {@code ignore}: what to do with each discovered SBOM
+     * @param archiveIndex the scanned layout merged components are checked against, or {@code null}
+     */
     EmbeddedSbomMergeTransform(String mode, ArchiveIndex archiveIndex) {
         this.mode = mode;
         this.archiveIndex = archiveIndex;

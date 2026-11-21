@@ -113,7 +113,11 @@ class ArchiveAnalyzer {
      */
     record ZipScanResult(Set<FileEntry> matchedArchiveEntries, Map<String, List<String>> hashToZipEntryNames) {
 
-        /** Returns {@code true} if at least one entry matched. */
+        /**
+         * Whether at least one entry matched.
+         *
+         * @return {@code true} if an entry matched
+         */
         boolean hasMatchedEntries() {
             return !matchedArchiveEntries.isEmpty();
         }
@@ -151,6 +155,17 @@ class ArchiveAnalyzer {
         }
     }
 
+    /**
+     * Creates an analyzer with no external SBOMs and no artifact matcher, detecting
+     * embedded SBOMs.
+     *
+     * @param effectiveModelResolver resolves the effective POM of artifacts, for their licenses
+     * @param repoSystem the repository system used to resolve artifacts
+     * @param project the project whose dependencies the archive entries are matched against
+     * @param session the Maven session, also listing the reactor modules
+     * @param messageDigest the digest the archive entries were hashed with
+     * @param failOnDuplicateHash whether two artifacts with one hash fail the analysis
+     */
     ArchiveAnalyzer(EffectiveModelResolver effectiveModelResolver,
             RepositorySystem repoSystem,
             MavenProject project,
@@ -161,6 +176,18 @@ class ArchiveAnalyzer {
                 messageDigest, failOnDuplicateHash, List.of(), true, null);
     }
 
+    /**
+     * Creates an analyzer with no artifact matcher.
+     *
+     * @param effectiveModelResolver resolves the effective POM of artifacts, for their licenses
+     * @param repoSystem the repository system used to resolve artifacts
+     * @param project the project whose dependencies the archive entries are matched against
+     * @param session the Maven session, also listing the reactor modules
+     * @param messageDigest the digest the archive entries were hashed with
+     * @param failOnDuplicateHash whether two artifacts with one hash fail the analysis
+     * @param externalBoms external SBOMs whose components may claim archive entries
+     * @param detectEmbeddedSboms whether to look for SBOMs inside the archive entries
+     */
     ArchiveAnalyzer(EffectiveModelResolver effectiveModelResolver,
             RepositorySystem repoSystem,
             MavenProject project,
@@ -173,6 +200,20 @@ class ArchiveAnalyzer {
                 messageDigest, failOnDuplicateHash, externalBoms, detectEmbeddedSboms, null);
     }
 
+    /**
+     * Creates an analyzer.
+     *
+     * @param effectiveModelResolver resolves the effective POM of artifacts, for their licenses
+     * @param repoSystem the repository system used to resolve artifacts
+     * @param project the project whose dependencies the archive entries are matched against
+     * @param session the Maven session, also listing the reactor modules
+     * @param messageDigest the digest the archive entries were hashed with
+     * @param failOnDuplicateHash whether two artifacts with one hash fail the analysis
+     * @param externalBoms external SBOMs whose components may claim archive entries
+     * @param detectEmbeddedSboms whether to look for SBOMs inside the archive entries
+     * @param mavenArtifactMatcher identifies otherwise unmatched entries (e.g. by a
+     *        remote checksum search), or {@code null} for none
+     */
     ArchiveAnalyzer(EffectiveModelResolver effectiveModelResolver,
             RepositorySystem repoSystem,
             MavenProject project,
@@ -269,6 +310,8 @@ class ArchiveAnalyzer {
     /**
      * Sets whether the components this analyzer identifies carry their
      * {@link Identification}. When {@code false} none is recorded.
+     *
+     * @param identityEvidence whether to record identity evidence
      */
     void setIdentityEvidence(boolean identityEvidence) {
         this.identityEvidence = identityEvidence;
@@ -576,6 +619,13 @@ class ArchiveAnalyzer {
         }
     }
 
+    /**
+     * Reads the {@code pom.properties} descriptors of a zip-based entry, to cross-check
+     * an SBOM's claim about it.
+     *
+     * @param fileEntry the archive entry
+     * @return the descriptors, or an empty list if the entry is not a readable zip
+     */
     private static List<Properties> readTopLevelDescriptors(FileEntry fileEntry) {
         if (!hasZipBasedExtension(fileEntry.archivePath())) {
             return List.of();
@@ -665,6 +715,12 @@ class ArchiveAnalyzer {
         return archivePath;
     }
 
+    /**
+     * Whether a path names a zip-based archive (a jar, war, ear and the like).
+     *
+     * @param path an archive path
+     * @return {@code true} for a zip-based extension
+     */
     private static boolean hasZipBasedExtension(String path) {
         int dot = path.lastIndexOf('.');
         return dot >= 0 && ZIP_BASED_EXTENSIONS.contains(path.substring(dot));
@@ -846,6 +902,12 @@ class ArchiveAnalyzer {
         return result;
     }
 
+    /**
+     * Converts coordinates to a compile-scope Maven artifact with a default handler for their type.
+     *
+     * @param coords the coordinates
+     * @return the artifact, without a file
+     */
     private static Artifact toArtifact(ArtifactCoords coords) {
         return new DefaultArtifact(coords.groupId(), coords.artifactId(), coords.version(),
                 "compile", coords.type(), coords.classifier(),
@@ -1320,6 +1382,13 @@ class ArchiveAnalyzer {
         }
     }
 
+    /**
+     * Nests under an external SBOM's component the artifacts its jar bundles (as declared
+     * by the jar's {@code pom.properties}) that the component does not list yet.
+     *
+     * @param component an external component claiming a jar, modified in place
+     * @param descriptors the coordinates the jar's descriptors declare
+     */
     private static void addUnlistedBundledDescriptors(Component component, List<ArtifactCoords> descriptors) {
         ArtifactCoords owner = ClaimedArtifactIndex.mavenCoordsOf(component.getPurl());
         Set<String> listed = new HashSet<>();
@@ -1347,6 +1416,13 @@ class ArchiveAnalyzer {
         }
     }
 
+    /**
+     * Gives nested components whose coordinates one of the jar's descriptors declares
+     * exactly this tool's {@code pom.properties} identity, at any depth.
+     *
+     * @param nested the nested components, possibly {@code null}
+     * @param descriptors the coordinates the jar's descriptors declare
+     */
     private static void confirmNestedByDescriptors(List<Component> nested, List<ArtifactCoords> descriptors) {
         if (nested == null || descriptors.isEmpty()) {
             return;
@@ -1361,6 +1437,11 @@ class ArchiveAnalyzer {
         }
     }
 
+    /**
+     * Adds a {@code pom.properties} purl identity unless the component already has a purl identity.
+     *
+     * @param component the component, modified in place
+     */
     private static void addManifestIdentityIfAbsent(Component component) {
         if (hasPurlIdentity(component)) {
             return;
@@ -1375,12 +1456,24 @@ class ArchiveAnalyzer {
         component.getEvidence().setIdentities(identities);
     }
 
+    /**
+     * Whether a component carries identity evidence for its purl.
+     *
+     * @param component the component
+     * @return {@code true} if it has a purl identity
+     */
     private static boolean hasPurlIdentity(Component component) {
         Evidence evidence = component.getEvidence();
         return evidence != null && evidence.getIdentities() != null
                 && evidence.getIdentities().stream().anyMatch(i -> i.getField() == Identity.Field.PURL);
     }
 
+    /**
+     * Replaces a component's occurrences with the archive paths it was matched at.
+     *
+     * @param component the component, modified in place
+     * @param archivePaths the matched paths
+     */
     private static void setOccurrences(Component component, List<String> archivePaths) {
         Evidence evidence = component.getEvidence();
         if (evidence == null) {
@@ -1580,6 +1673,11 @@ class ArchiveAnalyzer {
         // Whether built components carry their Identification.
         private final boolean identityEvidence;
 
+        /**
+         * Creates an empty builder.
+         *
+         * @param identityEvidence whether the built components carry their identification
+         */
         AssemblyComponentsBuilder(boolean identityEvidence) {
             this.identityEvidence = identityEvidence;
         }
@@ -1689,26 +1787,50 @@ class ArchiveAnalyzer {
             return entry;
         }
 
+        /**
+         * Records a file no artifact was identified for.
+         *
+         * @param entry the file
+         */
         void addUnmatchedFile(FileEntry entry) {
             unmatchedFiles.add(entry);
         }
 
+        /**
+         * Records an artifact bundled in an unidentified file.
+         *
+         * @param archivePath the archive path of the file
+         * @param artifactId the bundled artifact
+         */
         void addFileNestedArtifact(String archivePath, ArtifactCoords artifactId) {
             fileNestedByPath.computeIfAbsent(archivePath, k -> new ArrayList<>())
                     .add(artifactId);
         }
 
+        /**
+         * Returns the SBOMs found in the archive, with the copies they describe.
+         *
+         * @return the live list of discovered SBOMs
+         */
         List<DiscoveredSbom> discoveredSboms() {
             return discoveredSboms;
         }
 
+        /**
+         * Records an SBOM found in the archive.
+         *
+         * @param sbom the SBOM and the copy it describes
+         */
         void addDiscoveredSbom(DiscoveredSbom sbom) {
             discoveredSboms.add(sbom);
         }
 
         /**
-         * Collects all known artifact ids from both top-level and nested
-         * entries, for use in dependency graph filtering.
+         * Collects the coordinates of every identified copy, top-level,
+         * nested or bundled in a file, so that only their artifacts are
+         * searched for embedded SBOMs.
+         *
+         * @return the coordinates
          */
         Set<ArtifactCoords> collectKnownArtifactCoords() {
             Set<ArtifactCoords> ids = new HashSet<>(mavenEntries.size() + nestedEntries.size() + fileNestedByPath.size());

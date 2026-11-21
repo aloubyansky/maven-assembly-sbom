@@ -62,6 +62,22 @@ public class SbomGenerator {
     private List<org.eclipse.aether.graph.Dependency> cachedManagedDeps;
     private ArchiveAnalyzer lastAnalyzer;
 
+    /**
+     * Creates a generator.
+     *
+     * @param project the project whose dependencies archive entries are matched against
+     * @param session the Maven session
+     * @param repoSystem the repository system used to resolve artifacts and dependencies
+     * @param effectiveModelResolver resolves the effective POM of artifacts, for their licenses
+     * @param messageDigest the digest the archive entries were hashed with
+     * @param bomHashAlgorithm the algorithm the BOM records hashes under
+     * @param failOnDuplicateHash whether two artifacts with one hash fail the generation
+     * @param failOnMissingLicense whether a component without a license fails the generation
+     * @param embeddedSboms {@code merge}, {@code link} or {@code ignore}: what to do with SBOMs
+     *        found inside the archive entries
+     * @param librariesOnly whether to leave file components out of the BOM
+     * @param schemaVersion the CycloneDX schema version, or {@code null} for the default
+     */
     SbomGenerator(MavenProject project, MavenSession session,
             RepositorySystem repoSystem,
             EffectiveModelResolver effectiveModelResolver,
@@ -83,6 +99,8 @@ public class SbomGenerator {
 
     /**
      * Returns the resolved CycloneDX schema version.
+     *
+     * @return the schema version the BOM is written in
      */
     Version getSchemaVersion() {
         return schemaVersion;
@@ -90,6 +108,8 @@ public class SbomGenerator {
 
     /**
      * Sets user-configurable metadata for the main BOM component.
+     *
+     * @param product the product information, or {@code null} for none
      */
     void setProduct(ProductInfo product) {
         this.product = product;
@@ -98,6 +118,8 @@ public class SbomGenerator {
     /**
      * Sets whether this tool emits identity evidence for the components it
      * identifies. Identity from external or embedded SBOMs is unaffected.
+     *
+     * @param identityEvidence whether to emit identity evidence
      */
     void setIdentityEvidence(boolean identityEvidence) {
         this.identityEvidence = identityEvidence;
@@ -120,6 +142,7 @@ public class SbomGenerator {
      * @param entries the file entries to analyze
      * @param baseDirPrefix prefix to strip from entry paths, or {@code null}
      * @param externalBoms external SBOMs to merge as top-level components
+     * @param assemblyId the id of the assembly the BOM describes, or {@code null}
      * @param classifier the Maven classifier, or {@code null}
      * @param archiveType the archive type for the main component PURL, or {@code null}
      * @return the assembled BOM
@@ -178,6 +201,14 @@ public class SbomGenerator {
         return bom;
     }
 
+    /**
+     * Identifies the archive entries, keeping the analyzer for the merge steps that follow.
+     *
+     * @param entries the file entries to analyze
+     * @param baseDirPrefix prefix to strip from entry paths, or {@code null}
+     * @param externalBoms external SBOMs whose components may claim archive entries
+     * @return the analyzed components
+     */
     private AssemblyComponents analyzeEntries(List<FileEntry> entries,
             String baseDirPrefix, List<Bom> externalBoms) {
         boolean detectEmbeddedSboms = !"ignore".equalsIgnoreCase(embeddedSboms);
@@ -249,6 +280,13 @@ public class SbomGenerator {
         }
     }
 
+    /**
+     * Copies a component list without its file components, at any depth.
+     *
+     * @param components the components, possibly {@code null}
+     * @param removedRefs collects the bom-refs of the removed components
+     * @return the remaining components, or {@code null} for {@code null}
+     */
     private static List<Component> filterOutFileComponents(List<Component> components,
             Set<String> removedRefs) {
         if (components == null) {
@@ -337,12 +375,23 @@ public class SbomGenerator {
         return result;
     }
 
+    /**
+     * The project's {@code project.build.outputTimestamp}, for reproducible builds.
+     *
+     * @return the timestamp property, or {@code null} if unset
+     */
     private String getTimestamp() {
         return project.getProperties() != null
                 ? project.getProperties().getProperty("project.build.outputTimestamp")
                 : null;
     }
 
+    /**
+     * Records this tool's coordinates, licenses and jar hash in the metadata. A license
+     * or hash that cannot be resolved is left out.
+     *
+     * @param metadata the metadata to fill
+     */
     private void populateToolMetadata(AssemblyMetadata metadata) {
         metadata.setToolGroupId(ToolInfo.GROUP_ID);
         metadata.setToolArtifactId(ToolInfo.ARTIFACT_ID);
@@ -357,6 +406,11 @@ public class SbomGenerator {
         resolveToolHash(metadata);
     }
 
+    /**
+     * Resolves this tool's jar and records its hash in the metadata, if it can be resolved.
+     *
+     * @param metadata the metadata to fill
+     */
     private void resolveToolHash(AssemblyMetadata metadata) {
         try {
             DefaultArtifact toolArtifact = new DefaultArtifact(
@@ -464,6 +518,11 @@ public class SbomGenerator {
         return collectedEdges;
     }
 
+    /**
+     * The project's managed dependencies as Aether dependencies, computed once.
+     *
+     * @return the managed dependencies, possibly empty
+     */
     private List<org.eclipse.aether.graph.Dependency> collectManagedDependencies() {
         if (cachedManagedDeps != null) {
             return cachedManagedDeps;
@@ -480,6 +539,12 @@ public class SbomGenerator {
         return managedDeps;
     }
 
+    /**
+     * Converts Maven model dependencies to Aether dependencies.
+     *
+     * @param deps the model dependencies
+     * @return the Aether dependencies, in order
+     */
     private List<org.eclipse.aether.graph.Dependency> toAetherDependencies(
             List<org.apache.maven.model.Dependency> deps) {
         List<org.eclipse.aether.graph.Dependency> result = new ArrayList<>(deps.size());
@@ -489,6 +554,12 @@ public class SbomGenerator {
         return result;
     }
 
+    /**
+     * Converts one Maven model dependency to an Aether dependency with the same scope.
+     *
+     * @param dep the model dependency
+     * @return the Aether dependency
+     */
     private static org.eclipse.aether.graph.Dependency toAetherDependency(org.apache.maven.model.Dependency dep) {
         return new org.eclipse.aether.graph.Dependency(
                 SbomUtils.toAetherArtifact(dep.getGroupId(), dep.getArtifactId(),
@@ -496,6 +567,13 @@ public class SbomGenerator {
                 dep.getScope());
     }
 
+    /**
+     * Builds a collect request against the project's remote repositories.
+     *
+     * @param deps the dependencies to collect
+     * @param managedDeps the dependency management to apply
+     * @return the request
+     */
     private CollectRequest buildCollectRequest(List<org.eclipse.aether.graph.Dependency> deps,
             List<org.eclipse.aether.graph.Dependency> managedDeps) {
         CollectRequest request = new CollectRequest();

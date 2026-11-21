@@ -49,6 +49,9 @@ public final class BomMerger {
 
     private static final Comparator<Component> COMPONENT_ORDER = BomRenderer.COMPONENT_ORDER;
 
+    /**
+     * Not instantiable: a holder of static merge operations.
+     */
     private BomMerger() {
     }
 
@@ -167,6 +170,9 @@ public final class BomMerger {
      * which omits {@code type=jar}). Unparseable strings fall back to the
      * Maven-normalized raw value, matching prior use-as-is behavior.
      * </p>
+     *
+     * @param purlOrRef a purl or bom-ref, possibly {@code null}
+     * @return the canonical form, or {@code null} for {@code null}
      */
     static String canonicalPurl(String purlOrRef) {
         if (purlOrRef == null) {
@@ -186,6 +192,9 @@ public final class BomMerger {
      * the qualifier in any position ({@code ?type=jar}, {@code ?type=jar&…},
      * or {@code …&type=jar}). Non-Maven PURLs and PURLs with a non-jar
      * type are returned unchanged.
+     *
+     * @param purl a purl, possibly {@code null}
+     * @return the purl without {@code type=jar}
      */
     static String normalizeMavenPurl(String purl) {
         if (purl == null || !purl.startsWith("pkg:maven/")) {
@@ -328,6 +337,12 @@ public final class BomMerger {
         }
     }
 
+    /**
+     * Whether a component lists at least one occurrence.
+     *
+     * @param component the component
+     * @return {@code true} if it has an occurrence
+     */
     static boolean hasOccurrences(Component component) {
         Evidence evidence = component.getEvidence();
         return evidence != null && evidence.getOccurrences() != null
