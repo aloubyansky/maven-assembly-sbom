@@ -433,6 +433,20 @@ final class MergeTarget {
         parents.put(component, newParent);
     }
 
+    /**
+     * Makes {@code owner} the copy found at {@code location}, after the
+     * occurrence moved to it from another copy (the index otherwise keeps
+     * the first copy registered at a location).
+     *
+     * @param location an occurrence location of {@code owner}
+     * @param owner an indexed component
+     */
+    void relocate(String location, Component owner) {
+        if (location != null && !location.isEmpty()) {
+            byLocation.put(location, owner);
+        }
+    }
+
     /** Whether {@code component} is {@code ancestor} or nested in it at any depth. */
     boolean isWithin(Component component, Component ancestor) {
         for (Component c = component; c != null; c = parents.get(c)) {

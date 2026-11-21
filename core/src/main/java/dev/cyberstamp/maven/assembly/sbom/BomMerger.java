@@ -10,7 +10,6 @@ import java.util.Set;
 
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
-import org.cyclonedx.model.Dependency;
 import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.ExternalReference;
 import org.cyclonedx.model.Hash;
@@ -54,18 +53,21 @@ public final class BomMerger {
     }
 
     /**
-     * Merges the source BOM's components as nested sub-components
-     * under the specified parent component in the target BOM.
+     * Merges the source BOM as a description of one component of the
+     * target BOM: the parent (e.g. the jar the SBOM was found in).
      *
      * <p>
-     * Source components are sorted by group/name/version and appended
-     * to the parent's existing nested component list (if any).
-     * Dependency entries from the source BOM are imported into the
-     * target BOM's top-level dependency section. When the parent is
-     * an unpacked archive (has a directory-style occurrence ending
-     * with {@code '/'}), {@code file:} bom-refs on source components
-     * and imported dependency refs are prefixed with the parent's
-     * archive path to produce distribution-relative references.
+     * Each source component that describes a component already in the
+     * target (same hash, same location relative to the source's root, or the
+     * same purl inside the parent) enriches it instead of being added. The
+     * others are nested in the parent with unique bom-refs; when the parent is
+     * an unpacked archive (it has a directory occurrence ending with
+     * {@code '/'}), their locations and {@code file:} bom-refs are made
+     * relative to the distribution. The source's main component maps to the
+     * parent, and the source's dependency entries are carried across between
+     * the matching components, except entries to what a component contains:
+     * containment is not a dependency. With no distribution layout at hand,
+     * nothing is dropped.
      * </p>
      *
      * @param targetBom the distribution BOM to merge into
@@ -223,20 +225,27 @@ public final class BomMerger {
         if (source.getHashes() == null || source.getHashes().isEmpty()) {
             return;
         }
+        // algorithms compare normalized and values case-insensitively, as the
+        // hash index does: "sha-256" and "SHA-256" are one algorithm, and hex
+        // case is not part of a hash
         Map<String, String> existingByAlg = new HashMap<>();
         if (target.getHashes() != null) {
             for (Hash h : target.getHashes()) {
-                existingByAlg.put(h.getAlgorithm(), h.getValue());
+                if (h.getAlgorithm() != null) {
+                    existingByAlg.put(SbomUtils.normalizeAlgorithm(h.getAlgorithm()), h.getValue());
+                }
             }
         }
         for (Hash h : source.getHashes()) {
-            String existingValue = existingByAlg.get(h.getAlgorithm());
-            if (existingValue != null && !existingValue.equals(h.getValue())) {
+            String existingValue = h.getAlgorithm() == null ? null
+                    : existingByAlg.get(SbomUtils.normalizeAlgorithm(h.getAlgorithm()));
+            if (existingValue != null && !existingValue.equalsIgnoreCase(h.getValue())) {
                 return;
             }
         }
         for (Hash h : source.getHashes()) {
-            if (existingByAlg.putIfAbsent(h.getAlgorithm(), h.getValue()) == null) {
+            if (h.getAlgorithm() != null
+                    && existingByAlg.putIfAbsent(SbomUtils.normalizeAlgorithm(h.getAlgorithm()), h.getValue()) == null) {
                 target.addHash(h);
             }
         }

@@ -480,6 +480,110 @@ class AnchoredMergeTest {
         assertEquals(List.of("web/app.war/"), locations(war.getComponents().get(0)));
     }
 
+    // Follow-up fixes
+
+    @Test
+    void distributionRelativeLocationsOfAnUnpackedWarAreNotPrefixedTwice() {
+        // the WAR's SBOM already uses paths relative to the distribution root
+        Component x = lib("x", "pkg:maven/g/x@1", "xx", "web/app.war/WEB-INF/lib/x.jar");
+        Component war = war("pkg:maven/g/app@1?type=war", "web/app.war/", x);
+        Bom target = bom(war);
+        Component react = npm("react", "pkg:npm/react@19", "rr", "web/app.war/js/app.js");
+
+        AnchoredMerge.merge(target, bom(lib("x", "pkg:maven/g/x@1", "xx", "web/app.war/WEB-INF/lib/x.jar"), react),
+                AnchoredMerge.Scope.of(war, null));
+
+        assertEquals(List.of("web/app.war/js/app.js"), locations(react));
+    }
+
+    @Test
+    void splitOutCopyOwnsItsLocationForLaterComponents() {
+        // x is merged at the top level from lib/ and the war; the war's SBOM
+        // lists x twice at its war location (as a file and as a library)
+        Component x = lib("x", "pkg:maven/g/x@1", null, "lib/x.jar");
+        x.getEvidence().addOccurrence(evidence("web/war/WEB-INF/lib/x.jar").getOccurrences().get(0));
+        Component war = war("pkg:maven/g/war@1?type=war", "web/war/");
+        Bom target = bom(war, x);
+        Component file = new Component();
+        file.setType(Component.Type.FILE);
+        file.setName("x.jar");
+        file.setBomRef("file:WEB-INF/lib/x.jar");
+        file.setEvidence(evidence("WEB-INF/lib/x.jar"));
+
+        AnchoredMerge.merge(target, bom(file, lib("x", "pkg:maven/g/x@1", null, "WEB-INF/lib/x.jar")),
+                AnchoredMerge.Scope.of(war, null));
+
+        assertEquals(1, war.getComponents().size(), "both describe the war's one copy of x");
+    }
+
+    @Test
+    void edgeToAFileCopyThatTookALibraryIdentityFollowsTheRename() {
+        Component copy = new Component();
+        copy.setType(Component.Type.FILE);
+        copy.setName("a.jar");
+        copy.setBomRef("file:lib/a.jar");
+        copy.addHash(new Hash("SHA-256", "aa"));
+        copy.setEvidence(evidence("lib/a.jar"));
+        Bom target = bom(copy);
+        Component file = new Component();
+        file.setType(Component.Type.FILE);
+        file.setName("a.jar");
+        file.setBomRef("file:lib/a.jar");
+        file.addHash(new Hash("SHA-256", "aa"));
+        Component y = npm("y", "pkg:npm/y@1", "y1", null);
+        y.setBomRef("uuid-y");
+        Bom source = bom(file, lib("lib-a", "pkg:maven/g/lib-a@1", "aa", null), y);
+        source.addDependency(dependency("uuid-y", "file:lib/a.jar"));
+
+        AnchoredMerge.merge(target, source, flat(target, null));
+
+        assertEquals("pkg:maven/g/lib-a@1", copy.getBomRef());
+        assertEquals(List.of("pkg:maven/g/lib-a@1"), dependsOn(target, "uuid-y"));
+    }
+
+    @Test
+    void hashesDifferingOnlyInCaseAreOneHash() {
+        Component copy = lib("a", "pkg:maven/g/a@1", "AA", "lib/a.jar");
+        Bom target = bom(copy);
+        Component described = lib("a", "pkg:maven/g/a@1", "aa", null);
+        described.addHash(new Hash("SHA-1", "s1"));
+
+        AnchoredMerge.merge(target, bom(described), flat(target, null));
+
+        assertEquals(List.of("SHA-256", "SHA-1"), copy.getHashes().stream().map(Hash::getAlgorithm).toList());
+    }
+
+    @Test
+    void directoryOccurrenceWithNothingUnderItIsDropped() {
+        Component war = war("pkg:maven/g/app@1?type=war", "web/app.war/");
+        Bom target = bom(war);
+        ArchiveIndex layout = ArchiveIndex.of(List.of(new FileEntry("web/app.war/index.html", "ii")), null, "SHA-256");
+        Component sub = lib("sub", "pkg:maven/g/sub@1?type=war", null, null);
+        sub.setEvidence(evidence("sub/"));
+
+        AnchoredMerge.Result result = AnchoredMerge.merge(target, bom(sub), AnchoredMerge.Scope.of(war, layout));
+
+        assertEquals(1, result.dropped());
+        assertNull(war.getComponents());
+    }
+
+    @Test
+    void hashShippedOnlyOutsideAnUnpackedWarDoesNotShipInIt() {
+        Component war = war("pkg:maven/g/app@1?type=war", "web/app.war/");
+        Bom target = bom(war);
+        ArchiveIndex layout = ArchiveIndex.of(List.of(new FileEntry("conf/x.txt", "ll"),
+                new FileEntry("web/app.war/index.html", "ii")), null, "SHA-256");
+        Component file = new Component();
+        file.setType(Component.Type.FILE);
+        file.setName("x.txt");
+        file.setBomRef("file:WEB-INF/x.txt");
+        file.addHash(new Hash("SHA-256", "ll"));
+
+        AnchoredMerge.Result result = AnchoredMerge.merge(target, bom(file), AnchoredMerge.Scope.of(war, layout));
+
+        assertEquals(1, result.dropped());
+    }
+
     static AnchoredMerge.Scope flat(Bom target, ArchiveIndex layout) {
         return AnchoredMerge.Scope.of(target.getMetadata().getComponent(), layout);
     }

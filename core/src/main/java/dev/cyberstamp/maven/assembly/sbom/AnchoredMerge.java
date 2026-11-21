@@ -187,7 +187,9 @@ final class AnchoredMerge {
     static Result merge(Bom target, Bom source, Scope scope) {
         MergeTarget index = MergeTarget.of(target);
         String offset = rootOffset(source, index);
-        if (offset.isEmpty()) {
+        if (offset == null) {
+            // no hashed copy shows where the root sits: an unpacked parent's
+            // SBOM is relative to its directory, any other one to the root
             String directory = directoryOf(scope.parent());
             offset = directory == null ? "" : directory;
         }
@@ -196,6 +198,9 @@ final class AnchoredMerge {
         merge.mergeSourceMain(source);
         merge.renameTargetRefs(target);
         merge.mergeDependencies(target, source);
+        if (!merge.renamedTargetRefs.isEmpty()) {
+            merge.refMap.replaceAll((sourceRef, ref) -> merge.renamedTargetRefs.getOrDefault(ref, ref));
+        }
         return new Result(merge.refMap, merge.anchored, merge.kept, merge.dropped);
     }
 
@@ -213,7 +218,9 @@ final class AnchoredMerge {
      *
      * @param source the SBOM to merge
      * @param target the indexed target
-     * @return the prefix to put before the SBOM's locations, possibly empty
+     * @return the prefix to put before the SBOM's locations: empty when they
+     *         are already relative to the target's root, {@code null} when no
+     *         component shows where the root sits
      */
     static String rootOffset(Bom source, MergeTarget target) {
         Component main = source.getMetadata() == null ? null : source.getMetadata().getComponent();
@@ -229,7 +236,7 @@ final class AnchoredMerge {
                 }
             }
         }
-        return "";
+        return null;
     }
 
     /** The offset implied by one component anchored by hash, or {@code null}. */
@@ -445,6 +452,7 @@ final class AnchoredMerge {
         }
         c.setBomRef(target.claimRef(copy.getBomRef()));
         target.add(c, parent);
+        target.relocate(inside.getLocation(), c);
         c.setComponents(children);
         return c;
     }
@@ -644,6 +652,7 @@ final class AnchoredMerge {
             String oldRef = copy.getBomRef();
             String newRef = target.claimRef(c.getPurl());
             copy.setBomRef(newRef);
+            copiesByRef.putIfAbsent(newRef, copy);
             if (oldRef != null) {
                 renamedTargetRefs.put(oldRef, newRef);
             }
@@ -704,13 +713,20 @@ final class AnchoredMerge {
         }
     }
 
-    /** The target ref a source ref maps to, also trying its normalized Maven purl form. */
+    /**
+     * The target ref a source ref maps to, also trying its normalized Maven
+     * purl form; a ref the copy gave up for a library's identity after it was
+     * mapped resolves to the copy's current ref.
+     */
     private String mapped(String sourceRef) {
         if (sourceRef == null) {
             return null;
         }
         String ref = refMap.get(sourceRef);
-        return ref != null ? ref : refMap.get(BomMerger.normalizeMavenPurl(sourceRef));
+        if (ref == null) {
+            ref = refMap.get(BomMerger.normalizeMavenPurl(sourceRef));
+        }
+        return ref == null ? null : renamedTargetRefs.getOrDefault(ref, ref);
     }
 
     private static Set<String> childRefs(Dependency entry) {
