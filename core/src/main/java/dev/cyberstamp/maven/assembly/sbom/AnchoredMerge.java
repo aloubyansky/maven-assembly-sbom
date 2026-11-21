@@ -1,6 +1,8 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -139,6 +141,7 @@ final class AnchoredMerge {
         AnchoredMerge merge = new AnchoredMerge(index, scope, offset);
         merge.mergeComponents(source);
         merge.renameTargetRefs(target);
+        merge.mergeDependencies(target, source);
         return new Result(merge.refMap, merge.anchored, merge.kept, merge.dropped);
     }
 
@@ -365,6 +368,68 @@ final class AnchoredMerge {
                 renamedTargetRefs.put(oldRef, newRef);
             }
         }
+    }
+
+    /**
+     * Translates the source's dependency entries through the ref map: the
+     * target entry of each mapped source component (created if absent, so a
+     * copy whose dependencies were unknown learns them from the source) gains
+     * every mapped child it does not list yet. A child that was dropped is
+     * left out, and so is a self-reference two source components anchoring
+     * to one copy would create.
+     */
+    private void mergeDependencies(Bom bom, Bom source) {
+        if (source.getDependencies() == null || source.getDependencies().isEmpty()) {
+            return;
+        }
+        Map<String, Dependency> entries = new HashMap<>();
+        if (bom.getDependencies() != null) {
+            for (Dependency d : bom.getDependencies()) {
+                entries.putIfAbsent(d.getRef(), d);
+            }
+        }
+        Map<Dependency, Set<String>> listed = new IdentityHashMap<>();
+        for (Dependency d : source.getDependencies()) {
+            String parent = mapped(d.getRef());
+            if (parent == null) {
+                continue;
+            }
+            Dependency entry = entries.get(parent);
+            if (entry == null) {
+                entry = new Dependency(parent);
+                bom.addDependency(entry);
+                entries.put(parent, entry);
+            }
+            if (d.getDependencies() == null) {
+                continue;
+            }
+            Set<String> children = listed.computeIfAbsent(entry, AnchoredMerge::childRefs);
+            for (Dependency child : d.getDependencies()) {
+                String ref = mapped(child.getRef());
+                if (ref != null && !ref.equals(parent) && children.add(ref)) {
+                    entry.addDependency(new Dependency(ref));
+                }
+            }
+        }
+    }
+
+    /** The target ref a source ref maps to, also trying its normalized Maven purl form. */
+    private String mapped(String sourceRef) {
+        if (sourceRef == null) {
+            return null;
+        }
+        String ref = refMap.get(sourceRef);
+        return ref != null ? ref : refMap.get(BomMerger.normalizeMavenPurl(sourceRef));
+    }
+
+    private static Set<String> childRefs(Dependency entry) {
+        Set<String> refs = new HashSet<>();
+        if (entry.getDependencies() != null) {
+            for (Dependency child : entry.getDependencies()) {
+                refs.add(child.getRef());
+            }
+        }
+        return refs;
     }
 
     /** Records the target ref of a source component; a ref seen twice keeps its first copy. */

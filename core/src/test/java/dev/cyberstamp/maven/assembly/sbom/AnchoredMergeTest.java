@@ -196,6 +196,102 @@ class AnchoredMergeTest {
         assertFalse(result.refMap().containsKey("pkg:maven/g/a@1"));
     }
 
+    @Test
+    void sourceEdgesConnectTheMappedCopies() {
+        Component x = lib("x", "pkg:maven/g/x@1", "xx", "lib/x.jar");
+        Bom target = bom(x, lib("y", "pkg:npm/y@1", "other", "web/y.js"));
+        Bom source = bom(lib("y", "pkg:npm/y@1", "yy", null), lib("x", "pkg:maven/g/x@1", "xx", null));
+        source.addDependency(dependency("pkg:npm/y@1", "pkg:maven/g/x@1"));
+
+        AnchoredMerge.merge(target, source, flat(target, LAYOUT));
+
+        assertEquals(List.of("pkg:maven/g/x@1"), dependsOn(target, "pkg:npm/y@1#2"));
+    }
+
+    @Test
+    void edgeWithDroppedEndIsDropped() {
+        Bom target = bom();
+        Bom source = bom(lib("y", "pkg:npm/y@1", "yy", null), lib("z", "pkg:maven/g/z@1", "zz", "lib/z.jar"));
+        source.addDependency(dependency("pkg:npm/y@1", "pkg:maven/g/z@1"));
+
+        AnchoredMerge.merge(target, source, flat(target, LAYOUT));
+
+        assertEquals(List.of(), dependsOn(target, "pkg:npm/y@1"));
+    }
+
+    @Test
+    void sourceMainEdgesGoToTheMergeParent() {
+        Component jar = lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar");
+        Bom target = bom(jar);
+        Bom source = bom(lib("x", "pkg:maven/g/x@1", null, null));
+        source.getMetadata().getComponent().setBomRef("pkg:maven/g/a@1?type=jar");
+        source.addDependency(dependency("pkg:maven/g/a@1?type=jar", "pkg:maven/g/x@1"));
+
+        AnchoredMerge.merge(target, source, new AnchoredMerge.Scope(jar, LAYOUT, Set.of()));
+
+        assertEquals("pkg:maven/g/x@1", jar.getComponents().get(0).getBomRef(), "shaded in the jar");
+        assertEquals(List.of("pkg:maven/g/x@1"), dependsOn(target, "pkg:maven/g/a@1"));
+    }
+
+    @Test
+    void anchoredCopyWithoutEntryGetsTheSourceEntry() {
+        Bom target = bom(lib("x", "pkg:maven/g/x@1", "xx", "lib/x.jar"), lib("y", "pkg:maven/g/y@1", "yy", "lib/y.jar"));
+        Bom source = bom(lib("x", "pkg:maven/g/x@1", "xx", null), lib("y", "pkg:maven/g/y@1", "yy", null));
+        source.addDependency(dependency("pkg:maven/g/x@1", "pkg:maven/g/y@1"));
+        source.addDependency(dependency("pkg:maven/g/y@1"));
+
+        AnchoredMerge.merge(target, source, flat(target, LAYOUT));
+
+        assertEquals(List.of("pkg:maven/g/y@1"), dependsOn(target, "pkg:maven/g/x@1"));
+        assertEquals(List.of(), dependsOn(target, "pkg:maven/g/y@1"), "the source says y has none");
+    }
+
+    @Test
+    void mergingTheSameSbomTwiceAddsNothing() {
+        Component jar = lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar");
+        Bom target = bom(jar);
+
+        AnchoredMerge.merge(target, sbomOfJar(), flat(target, LAYOUT));
+        int components = target.getComponents().size();
+        int entries = target.getDependencies().size();
+        AnchoredMerge.Result second = AnchoredMerge.merge(target, sbomOfJar(), flat(target, LAYOUT));
+
+        assertEquals(0, second.kept());
+        assertEquals(components, target.getComponents().size());
+        assertEquals(1, jar.getComponents().size());
+        assertEquals(entries, target.getDependencies().size());
+        assertTrue(target.getDependencies().stream().noneMatch(d -> d.getRef().contains("#")));
+    }
+
+    private static Bom sbomOfJar() {
+        Bom source = bom(lib("a", "pkg:maven/g/a@1", "aa", null, lib("x", "pkg:maven/g/x@1", null, null)),
+                lib("react", "pkg:npm/react@19", "rr", null));
+        source.addDependency(dependency("pkg:npm/react@19"));
+        source.addDependency(dependency("pkg:maven/g/a@1", "pkg:maven/g/x@1"));
+        return source;
+    }
+
+    static org.cyclonedx.model.Dependency dependency(String ref, String... children) {
+        org.cyclonedx.model.Dependency d = new org.cyclonedx.model.Dependency(ref);
+        for (String child : children) {
+            d.addDependency(new org.cyclonedx.model.Dependency(child));
+        }
+        return d;
+    }
+
+    /** The sorted refs an entry lists; fails if the entry is missing. */
+    static List<String> dependsOn(Bom bom, String ref) {
+        org.cyclonedx.model.Dependency entry = bom.getDependencies() == null ? null
+                : bom.getDependencies().stream().filter(d -> ref.equals(d.getRef())).findFirst().orElse(null);
+        if (entry == null) {
+            throw new AssertionError("no entry for " + ref + " in "
+                    + (bom.getDependencies() == null ? "[]"
+                            : bom.getDependencies().stream().map(org.cyclonedx.model.Dependency::getRef).toList()));
+        }
+        return entry.getDependencies() == null ? List.of()
+                : entry.getDependencies().stream().map(org.cyclonedx.model.Dependency::getRef).sorted().toList();
+    }
+
     static AnchoredMerge.Scope flat(Bom target, ArchiveIndex layout) {
         return new AnchoredMerge.Scope(target.getMetadata().getComponent(), layout, Set.of());
     }
