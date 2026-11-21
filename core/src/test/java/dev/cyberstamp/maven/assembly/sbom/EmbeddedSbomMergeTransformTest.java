@@ -99,7 +99,8 @@ class EmbeddedSbomMergeTransformTest {
     @Test
     void mergeModeFlat() {
         Bom targetBom = buildTargetBom();
-        Component additional = createLibrary("org.b", "lib-b", "2.0", "pkg:maven/org.b/lib-b@2.0");
+        // a package that cannot be found as a file, so the layout cannot drop it
+        Component additional = createLibrary("org.b", "lib-b", "2.0", "pkg:npm/lib-b@2.0");
         Bom embeddedBom = new Bom();
         embeddedBom.setComponents(new ArrayList<>(List.of(additional)));
 

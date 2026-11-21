@@ -1,7 +1,5 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
-import java.util.Set;
-
 import org.cyclonedx.model.Bom;
 
 /**
@@ -121,7 +119,6 @@ public final class SbomPipeline {
     public Bom render() {
         enrich();
         Bom bom = new BomRenderer().render(model);
-        BomFinalizer.deduplicateBomRefs(bom, Set.of());
         BomFinalizer.sortDependencies(bom);
         return bom;
     }

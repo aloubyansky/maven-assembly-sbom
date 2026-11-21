@@ -44,6 +44,8 @@ final class MergeTarget {
     private final Map<String, Component> byLocation = new HashMap<>();
     private final Map<Component, Component> parents = new IdentityHashMap<>();
     private final Set<String> takenRefs = new HashSet<>();
+    // canonical purl -> components, built on first use
+    private Map<String, List<Component>> byPurl;
 
     private MergeTarget(Bom bom) {
         this.bom = bom;
@@ -141,6 +143,93 @@ final class MergeTarget {
     }
 
     /**
+     * Returns the component with the given purl among a parent's direct
+     * children.
+     *
+     * <p>
+     * A component never holds two copies of one artifact side by side (the
+     * renderer merges top-level copies with one purl into one component), so
+     * among one parent's children a purl names one copy. For the main
+     * component, its children are the BOM's top-level components.
+     * </p>
+     *
+     * @param parent the parent whose children to search; {@code null} or the
+     *        main component for the top level
+     * @param purl the purl to look for
+     * @return the matching child, or {@code null}
+     */
+    Component byPurlAmongChildren(Component parent, String purl) {
+        String wanted = BomMerger.canonicalPurl(purl);
+        List<Component> children = parent == null || parent == main ? bom.getComponents() : parent.getComponents();
+        if (wanted == null || children == null) {
+            return null;
+        }
+        for (Component c : children) {
+            if (wanted.equals(BomMerger.canonicalPurl(c.getPurl()))) {
+                return c;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Returns a component with the given purl that has an occurrence under a
+     * directory, wherever the target lists it.
+     *
+     * <p>
+     * Used when an SBOM of an unpacked archive describes a component the
+     * target lists outside the archive's component, e.g. a file of an
+     * unpacked WAR the analyzer could not identify: the purl and the location
+     * under the archive's directory together name the copy.
+     * </p>
+     *
+     * @param purl the purl to look for
+     * @param directory a directory location ending with {@code /}
+     * @return the first such component in index order, or {@code null}
+     */
+    Component byPurlUnderDirectory(String purl, String directory) {
+        String wanted = BomMerger.canonicalPurl(purl);
+        if (wanted == null) {
+            return null;
+        }
+        if (byPurl == null) {
+            byPurl = new HashMap<>();
+            for (Component c : parents.keySet()) {
+                indexPurl(c);
+            }
+            if (bom.getComponents() != null) {
+                for (Component c : bom.getComponents()) {
+                    indexPurl(c);
+                }
+            }
+        }
+        for (Component c : byPurl.getOrDefault(wanted, List.of())) {
+            Evidence evidence = c.getEvidence();
+            if (evidence != null && evidence.getOccurrences() != null) {
+                for (Occurrence o : evidence.getOccurrences()) {
+                    if (o.getLocation() != null && o.getLocation().startsWith(directory)) {
+                        return c;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private void indexPurl(Component c) {
+        String key = BomMerger.canonicalPurl(c.getPurl());
+        if (key != null) {
+            List<Component> list = byPurl.computeIfAbsent(key, k -> new ArrayList<>(1));
+            for (Component existing : list) {
+                if (existing == c) {
+                    return;
+                }
+            }
+            list.add(c);
+        }
+    }
+
+    /**
      * Returns the component a component is nested in.
      *
      * @param component an indexed component
@@ -197,18 +286,93 @@ final class MergeTarget {
      *        component for the top level
      */
     void add(Component component, Component parent) {
-        if (parent == null || parent == main) {
+        add(component, parent, true);
+    }
+
+    /**
+     * Like {@link #add(Component, Component)}, choosing what a component kept
+     * under the main component becomes.
+     *
+     * @param mainChildrenAtTopLevel {@code true} to make a child of the main
+     *        component a top-level component, {@code false} to nest it in the
+     *        main component (an explicit nested merge under it)
+     */
+    void add(Component component, Component parent, boolean mainChildrenAtTopLevel) {
+        if (parent == null || (parent == main && mainChildrenAtTopLevel)) {
             if (bom.getComponents() == null) {
                 bom.setComponents(new ArrayList<>());
+            } else if (!(bom.getComponents() instanceof ArrayList)) {
+                bom.setComponents(new ArrayList<>(bom.getComponents()));
             }
             bom.getComponents().add(component);
         } else {
+            if (parent.getComponents() != null && !(parent.getComponents() instanceof ArrayList)) {
+                parent.setComponents(new ArrayList<>(parent.getComponents()));
+            }
             parent.addComponent(component);
             parents.put(component, parent);
         }
         List<Component> level = new ArrayList<>(1);
         level.add(component);
         indexLevels(level);
+        if (byPurl != null) {
+            indexSubtreePurls(component);
+        }
+    }
+
+    private void indexSubtreePurls(Component c) {
+        indexPurl(c);
+        if (c.getComponents() != null) {
+            for (Component child : c.getComponents()) {
+                indexSubtreePurls(child);
+            }
+        }
+    }
+
+    /**
+     * Moves a component, with its subtree, under another parent.
+     *
+     * @param component an indexed component
+     * @param newParent the component to nest it in
+     */
+    void move(Component component, Component newParent) {
+        Component oldParent = parents.get(component);
+        List<Component> siblings = oldParent == null ? bom.getComponents() : oldParent.getComponents();
+        if (siblings != null) {
+            for (int i = 0; i < siblings.size(); i++) {
+                if (siblings.get(i) == component) {
+                    if (oldParent == null) {
+                        bom.setComponents(withoutIndex(siblings, i));
+                    } else {
+                        oldParent.setComponents(withoutIndex(siblings, i));
+                    }
+                    break;
+                }
+            }
+        }
+        newParent.addComponent(component);
+        parents.put(component, newParent);
+    }
+
+    /** Whether {@code component} is {@code ancestor} or nested in it at any depth. */
+    boolean isWithin(Component component, Component ancestor) {
+        for (Component c = component; c != null; c = parents.get(c)) {
+            if (c == ancestor) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** A modifiable copy of {@code list} without the element at {@code index} (lists may be unmodifiable). */
+    private static List<Component> withoutIndex(List<Component> list, int index) {
+        List<Component> result = new ArrayList<>(list.size() - 1);
+        for (int i = 0; i < list.size(); i++) {
+            if (i != index) {
+                result.add(list.get(i));
+            }
+        }
+        return result;
     }
 
     /** Indexes components level by level, starting with {@code level}. */

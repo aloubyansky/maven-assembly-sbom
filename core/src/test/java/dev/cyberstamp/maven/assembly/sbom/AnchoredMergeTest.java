@@ -122,7 +122,8 @@ class AnchoredMergeTest {
     void npmPackageWithoutFileIsKeptUnderTheMergeParent() {
         Bom target = bom();
 
-        AnchoredMerge.merge(target, bom(lib("react", "pkg:npm/react@19", "sha", null)), flat(target, LAYOUT));
+        AnchoredMerge.merge(target, bom(npm("react", "pkg:npm/react@19", "sha", "node_modules/react/index.js")),
+                flat(target, LAYOUT));
 
         assertEquals("pkg:npm/react@19", target.getComponents().get(0).getBomRef());
     }
@@ -150,14 +151,16 @@ class AnchoredMergeTest {
 
     @Test
     void keptComponentWithTakenRefGetsNextSuffix() {
-        Component other = lib("p", "pkg:npm/p@1", "p1", "web/p.js");
-        Bom target = bom(other);
+        // p@1 is already used inside a jar: not a sibling, so only its ref is taken
+        Component other = npm("p", "pkg:npm/p@1", "p1", null);
+        Bom target = bom(lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar", other));
 
-        AnchoredMerge.Result result = AnchoredMerge.merge(target, bom(lib("p", "pkg:npm/p@1", "p2", null)),
+        AnchoredMerge.Result result = AnchoredMerge.merge(target, bom(npm("p", "pkg:npm/p@1", "p2", null)),
                 flat(target, LAYOUT));
 
         assertEquals("pkg:npm/p@1#2", result.refMap().get("pkg:npm/p@1"));
         assertEquals("pkg:npm/p@1#2", target.getComponents().get(1).getBomRef());
+        assertEquals(1, target.getComponents().get(0).getComponents().size());
     }
 
     @Test
@@ -189,7 +192,7 @@ class AnchoredMergeTest {
         excluded.add(rejected);
 
         AnchoredMerge.Result result = AnchoredMerge.merge(target, bom(rejected),
-                new AnchoredMerge.Scope(target.getMetadata().getComponent(), LAYOUT, excluded));
+                new AnchoredMerge.Scope(target.getMetadata().getComponent(), LAYOUT, excluded, Set.of()));
 
         assertEquals(0, result.anchored());
         assertEquals("pkg:maven/g/a@2", copy.getPurl());
@@ -197,10 +200,23 @@ class AnchoredMergeTest {
     }
 
     @Test
+    void shippedComponentIsKeptWhereTheAnalyzerFoundIt() {
+        Bom target = bom();
+        Component matched = lib("x", "pkg:maven/g/x@1", "xx", "lib/x.jar");
+        Set<Component> shipped = Collections.newSetFromMap(new IdentityHashMap<>());
+        shipped.add(matched);
+
+        AnchoredMerge.merge(target, bom(matched),
+                new AnchoredMerge.Scope(target.getMetadata().getComponent(), LAYOUT, Set.of(), shipped));
+
+        assertEquals(List.of("lib/x.jar"), locations(target.getComponents().get(0)));
+    }
+
+    @Test
     void sourceEdgesConnectTheMappedCopies() {
         Component x = lib("x", "pkg:maven/g/x@1", "xx", "lib/x.jar");
-        Bom target = bom(x, lib("y", "pkg:npm/y@1", "other", "web/y.js"));
-        Bom source = bom(lib("y", "pkg:npm/y@1", "yy", null), lib("x", "pkg:maven/g/x@1", "xx", null));
+        Bom target = bom(x, lib("w", "pkg:maven/g/w@1", "ww", "lib/w.jar", npm("y", "pkg:npm/y@1", "other", null)));
+        Bom source = bom(npm("y", "pkg:npm/y@1", "yy", null), lib("x", "pkg:maven/g/x@1", "xx", null));
         source.addDependency(dependency("pkg:npm/y@1", "pkg:maven/g/x@1"));
 
         AnchoredMerge.merge(target, source, flat(target, LAYOUT));
@@ -211,7 +227,7 @@ class AnchoredMergeTest {
     @Test
     void edgeWithDroppedEndIsDropped() {
         Bom target = bom();
-        Bom source = bom(lib("y", "pkg:npm/y@1", "yy", null), lib("z", "pkg:maven/g/z@1", "zz", "lib/z.jar"));
+        Bom source = bom(npm("y", "pkg:npm/y@1", "yy", null), lib("z", "pkg:maven/g/z@1", "zz", "lib/z.jar"));
         source.addDependency(dependency("pkg:npm/y@1", "pkg:maven/g/z@1"));
 
         AnchoredMerge.merge(target, source, flat(target, LAYOUT));
@@ -227,7 +243,7 @@ class AnchoredMergeTest {
         source.getMetadata().getComponent().setBomRef("pkg:maven/g/a@1?type=jar");
         source.addDependency(dependency("pkg:maven/g/a@1?type=jar", "pkg:maven/g/x@1"));
 
-        AnchoredMerge.merge(target, source, new AnchoredMerge.Scope(jar, LAYOUT, Set.of()));
+        AnchoredMerge.merge(target, source, AnchoredMerge.Scope.of(jar, LAYOUT));
 
         assertEquals("pkg:maven/g/x@1", jar.getComponents().get(0).getBomRef(), "shaded in the jar");
         assertEquals(List.of("pkg:maven/g/x@1"), dependsOn(target, "pkg:maven/g/a@1"));
@@ -265,7 +281,7 @@ class AnchoredMergeTest {
 
     private static Bom sbomOfJar() {
         Bom source = bom(lib("a", "pkg:maven/g/a@1", "aa", null, lib("x", "pkg:maven/g/x@1", null, null)),
-                lib("react", "pkg:npm/react@19", "rr", null));
+                npm("react", "pkg:npm/react@19", "rr", null));
         source.addDependency(dependency("pkg:npm/react@19"));
         source.addDependency(dependency("pkg:maven/g/a@1", "pkg:maven/g/x@1"));
         return source;
@@ -293,7 +309,7 @@ class AnchoredMergeTest {
     }
 
     static AnchoredMerge.Scope flat(Bom target, ArchiveIndex layout) {
-        return new AnchoredMerge.Scope(target.getMetadata().getComponent(), layout, Set.of());
+        return AnchoredMerge.Scope.of(target.getMetadata().getComponent(), layout);
     }
 
     static Bom bom(Component... components) {
@@ -325,6 +341,33 @@ class AnchoredMergeTest {
             c.setComponents(new ArrayList<>(List.of(nested)));
         }
         return c;
+    }
+
+    /** An npm package: its integrity hash is SHA-512, which no layout verifies. */
+    static Component npm(String name, String purl, String sha512, String location) {
+        Component c = lib(name, purl, null, location);
+        c.addHash(new Hash("SHA-512", sha512));
+        return c;
+    }
+
+    @Test
+    void unfindablePackageIsKeptEvenWithASourceTreeLocation() {
+        Bom target = bom();
+
+        AnchoredMerge.merge(target, bom(npm("react", "pkg:npm/react@19", "rr", "node_modules/react/index.js")),
+                flat(target, LAYOUT));
+
+        assertEquals(1, target.getComponents().size());
+    }
+
+    @Test
+    void hashedGenericFileNotInTheLayoutIsDropped() {
+        Bom target = bom();
+
+        AnchoredMerge.Result result = AnchoredMerge.merge(target,
+                bom(lib("tool", "pkg:generic/tool.jar@1", "tt", "lib/tool.jar")), flat(target, LAYOUT));
+
+        assertEquals(1, result.dropped());
     }
 
     static Evidence evidence(String location) {

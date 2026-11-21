@@ -40,17 +40,13 @@ final class EmbeddedSbomMergeTransform {
             if ("link".equalsIgnoreCase(mode)) {
                 BomMerger.addBomReference(bom, parentRef, detected.archivePath());
             } else {
+                // The SBOM describes the copy it was found in; without one it
+                // describes the assembly. The layout drops what does not ship.
                 Component parent = BomMerger.findComponentByBomRef(bom, parentRef);
-                String parentPrefix = parent != null
-                        ? BomMerger.getParentPathPrefix(parent)
-                        : null;
-                Bom filtered = SbomGenerator.filterSbomByArchive(
-                        detected.parsedBom(), archiveIndex, parentPrefix);
-                if (parent != null) {
-                    BomMerger.mergeUnder(bom, parentRef, filtered);
-                } else {
-                    BomMerger.mergeFlat(bom, filtered);
+                if (parent == null) {
+                    parent = bom.getMetadata().getComponent();
                 }
+                AnchoredMerge.merge(bom, detected.parsedBom(), AnchoredMerge.Scope.of(parent, archiveIndex));
             }
         }
     }

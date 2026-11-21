@@ -481,11 +481,21 @@ The claim is cross-checked against the jar's own `pom.properties` (groupId, arti
 
 When several SBOMs list the same hash, agreeing claims keep the highest confidence; claims naming different purls are all discarded (with a warning) and the jar falls through to `pom.properties`. Setting `embeddedSboms` to `ignore` disables this lookup too.
 
+#### How SBOMs Are Merged
+
+A merged SBOM describes part of the distribution — the jar it was found in, an unpacked WAR, or the whole archive — so merging means recognizing which of its components are already in the BOM, not adding everything it lists:
+
+- **Anchoring** — a component matches a component already in the BOM by its location (relative to the SBOM's own root, which is found by matching the SBOM's top component or another hashed component by hash; e.g. a Quarkus application's `lib/main/x.jar` is the distribution's `lib/lib/main/x.jar`), by content hash, or by purl among its parent's components (inside a binary, a purl names one artifact; side by side, a parent never holds two copies of one). A matched component enriches the existing one (licenses, properties, external references, identity evidence, descriptive metadata); a file it describes takes its package identity. Dependency edges are not used for matching.
+- **Unmatched components** — a component without a location nested in the SBOM under a matched jar or native binary is kept under that binary (e.g. a shaded dependency). A component the archive would show if it shipped — a Maven package or a file with a location, or anything with a hash in the BOM's algorithm — is dropped when the archive does not contain it. Anything else, such as npm packages compiled into a JavaScript bundle, is kept under the component the SBOM describes.
+- **Bom-refs and dependencies** — a kept component whose bom-ref is taken gets `#2`, `#3`, ... appended, and the SBOM's own dependency edges are carried over between the matched or kept components; an edge to a dropped component is dropped.
+
+The `merge` goal applies the same rules to finished SBOMs, except that with no archive to check nothing is dropped.
+
 #### Handling Modes
 
 The `embeddedSboms` option controls what happens with detected SBOMs:
 
-- **`merge`** (default) — the SBOM's components are imported as nested sub-components of the containing artifact. Dependency entries are imported into the distribution BOM's dependency section. No cross-ecosystem dependency edges are created — nesting already captures the containment relationship.
+- **`merge`** (default) — the SBOM is merged as described above, as a description of the containing artifact. No cross-ecosystem dependency edges are created — nesting already captures the containment relationship.
 - **`link`** — an `externalReference` of type `bom` is added to the containing artifact, pointing to the SBOM file's location within the archive. The SBOM file remains in the archive.
 - **`ignore`** — embedded SBOMs are not processed.
 

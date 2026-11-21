@@ -44,7 +44,15 @@ import org.slf4j.LoggerFactory;
  * <li>else, for a component without a location whose source parent anchored
  * to a binary (a jar or native binary, not an unpacked directory), by purl
  * among that binary's nested components: inside one binary, a purl names one
- * artifact.</li>
+ * artifact;</li>
+ * <li>else by purl among the direct children of its anchored source parent,
+ * or of the merge parent (the top level, for a flat merge): a component never
+ * holds two copies of one artifact side by side. Differing hashes then mean
+ * another build of the same artifact, and the copy keeps its own;</li>
+ * <li>else, when that parent is an unpacked archive, by purl among the
+ * target's components with a location under the archive's directory (a file
+ * of the archive the target lists elsewhere); such a copy is then placed
+ * inside the archive's component.</li>
  * </ol>
  * <p>
  * The source's own main component stands for the {@link Scope#parent() merge
@@ -54,15 +62,17 @@ import org.slf4j.LoggerFactory;
  *
  * <h2>Components that do not anchor</h2>
  * <ul>
- * <li>a package that cannot exist as a file (not {@code pkg:maven}, no
- * location — e.g. an npm package compiled into a JS bundle) is kept under its
- * anchored source parent, or under the merge parent;</li>
  * <li>a component without a location whose source parent anchored to a binary
  * is attributed to that binary and kept nested under its copy;</li>
- * <li>anything else is dropped when a {@link Scope#layout() layout} is given
- * (the distribution does not ship it), and kept under its anchored source
- * parent or the merge parent when not (the target simply did not list
- * it).</li>
+ * <li>a component the {@link Scope#layout() layout} would show if it shipped
+ * (a Maven package, a file, anything hashed in the layout's algorithm) but
+ * does not show is dropped: the distribution does not ship it. One the
+ * layout shows (at its location after the offset, or by hash) is kept: it
+ * ships, the target just has no component for it;</li>
+ * <li>anything else — a package that cannot be found as a file (e.g. an npm
+ * package compiled into a JS bundle), or any component when there is no
+ * layout (the target simply did not list it) — is kept under its anchored
+ * source parent, or under the merge parent.</li>
  * </ul>
  * <p>
  * A kept component's occurrence locations and {@code file:} bom-ref are
@@ -87,8 +97,42 @@ final class AnchoredMerge {
      *        distribution at hand
      * @param excluded source components that must not anchor, compared by
      *        identity (e.g. an external SBOM's claims the analyzer rejected)
+     * @param shipped source components already known to ship, compared by
+     *        identity: the analyzer matched them to archive files it then left
+     *        out of the model and set their occurrences to those files'
+     *        distribution paths, so they are kept as they are, with no root
+     *        offset applied
+     * @param nestUnderMain {@code true} to nest components kept under the
+     *        target's main component in it (an explicit nested merge under
+     *        it), {@code false} to make them top-level components
      */
-    record Scope(Component parent, ArchiveIndex layout, Set<Component> excluded) {
+    record Scope(Component parent, ArchiveIndex layout, Set<Component> excluded, Set<Component> shipped,
+            boolean nestUnderMain) {
+
+        /**
+         * A scope that keeps the source's top-level components at the top
+         * level when the parent is the target's main component (a flat merge).
+         *
+         * @param parent the target copy the SBOM describes, or the main
+         *        component
+         * @param layout the distribution's files, or {@code null}
+         * @param excluded source components that must not anchor
+         * @param shipped source components already known to ship
+         */
+        Scope(Component parent, ArchiveIndex layout, Set<Component> excluded, Set<Component> shipped) {
+            this(parent, layout, excluded, shipped, false);
+        }
+
+        /**
+         * A scope with nothing excluded and nothing known to ship.
+         *
+         * @param parent the target copy the SBOM describes
+         * @param layout the distribution's files, or {@code null}
+         * @return the scope
+         */
+        static Scope of(Component parent, ArchiveIndex layout) {
+            return new Scope(parent, layout, Set.of(), Set.of());
+        }
     }
 
     /**
@@ -136,7 +180,8 @@ final class AnchoredMerge {
         MergeTarget index = MergeTarget.of(target);
         String offset = rootOffset(source, index);
         if (offset.isEmpty()) {
-            offset = directoryOf(scope.parent());
+            String directory = directoryOf(scope.parent());
+            offset = directory == null ? "" : directory;
         }
         AnchoredMerge merge = new AnchoredMerge(index, scope, offset);
         merge.mergeComponents(source);
@@ -221,7 +266,9 @@ final class AnchoredMerge {
         }
         Component topParent = scope.parent() == target.main() ? null : scope.parent();
         boolean topParentIsBinary = topParent != null && isBinary(topParent);
-        for (Component c : List.copyOf(source.getComponents())) {
+        List<Component> ordered = new java.util.ArrayList<>(source.getComponents());
+        ordered.sort(BomRenderer.COMPONENT_ORDER);
+        for (Component c : ordered) {
             BomMerger.normalizePurls(c);
             walk(c, topParent, topParentIsBinary);
         }
@@ -239,6 +286,10 @@ final class AnchoredMerge {
     private void walk(Component c, Component anchoredParent, boolean parentIsBinary) {
         List<Component> children = c.getComponents() == null ? List.of() : List.copyOf(c.getComponents());
         Component copy = anchor(c, anchoredParent, parentIsBinary);
+        Component placedIn = anchoredParent != null ? anchoredParent : scope.parent();
+        if (copy != null && copy != placedIn && placedIn != target.main() && !target.isWithin(copy, placedIn)) {
+            copy = claimForParent(copy, c, placedIn);
+        }
         if (copy != null) {
             enrich(copy, c);
             map(c, copy.getBomRef());
@@ -260,18 +311,82 @@ final class AnchoredMerge {
             return;
         }
         c.setComponents(null);
-        prefixOccurrences(c);
+        if (!scope.shipped().contains(c)) {
+            prefixOccurrences(c);
+        }
         String base = c.getBomRef() != null ? prefixFileRef(c.getBomRef())
                 : c.getPurl() != null ? c.getPurl() : FILE_REF_PREFIX + offset + c.getName();
         String ref = target.claimRef(base);
         map(c, ref);
         c.setBomRef(ref);
-        target.add(c, keepUnder);
+        target.add(c, keepUnder, !scope.nestUnderMain());
         kept++;
         boolean binary = isBinary(c);
         for (Component child : children) {
             walk(child, c, binary);
         }
+    }
+
+    /**
+     * Places a copy the SBOM puts inside {@code parent} but the target lists
+     * elsewhere (e.g. a file of an unpacked WAR the analyzer could not
+     * identify, listed at the top level). Only a copy whose location is under
+     * the parent's directory is placed: the whole copy moves under the parent
+     * when that is its only location; when it also stands for copies
+     * elsewhere (a top-level component merged from several locations), the
+     * source component becomes the parent's own copy at that location, with
+     * the copy's identity evidence, and the location leaves the other copy.
+     *
+     * @return the copy to enrich, now within {@code parent}; or the original
+     *         copy when it is not under the parent's directory
+     */
+    private Component claimForParent(Component copy, Component c, Component parent) {
+        String directory = directoryOf(parent);
+        if (directory == null || copy.getEvidence() == null || copy.getEvidence().getOccurrences() == null) {
+            return copy;
+        }
+        List<Occurrence> occurrences = copy.getEvidence().getOccurrences();
+        Occurrence inside = null;
+        for (Occurrence o : occurrences) {
+            if (o.getLocation() != null && o.getLocation().startsWith(directory)) {
+                inside = o;
+                break;
+            }
+        }
+        if (inside == null) {
+            return copy;
+        }
+        if (occurrences.size() == 1 || target.parentOf(copy) == parent) {
+            if (target.parentOf(copy) != parent) {
+                target.move(copy, parent);
+            }
+            return copy;
+        }
+        List<Occurrence> remaining = new java.util.ArrayList<>(occurrences.size() - 1);
+        for (Occurrence o : occurrences) {
+            if (o != inside) {
+                remaining.add(o);
+            }
+        }
+        copy.getEvidence().setOccurrences(remaining);
+        List<Component> children = c.getComponents();
+        c.setComponents(null);
+        Evidence evidence = new Evidence();
+        evidence.setOccurrences(new java.util.ArrayList<>(List.of(inside)));
+        if (copy.getEvidence().getIdentities() != null) {
+            evidence.setIdentities(copy.getEvidence().getIdentities());
+        }
+        c.setEvidence(evidence);
+        if (c.getHashes() == null && copy.getHashes() != null) {
+            c.setHashes(copy.getHashes());
+        }
+        if (c.getLicenses() == null) {
+            c.setLicenses(copy.getLicenses());
+        }
+        c.setBomRef(target.claimRef(copy.getBomRef()));
+        target.add(c, parent);
+        c.setComponents(children);
+        return c;
     }
 
     /** Finds the copy {@code c} describes, or {@code null} (see "Anchoring"). */
@@ -303,10 +418,24 @@ final class AnchoredMerge {
                 }
             }
         }
-        if (!located && parentIsBinary && anchoredParent != null && c.getPurl() != null) {
-            return target.byPurlWithin(anchoredParent, c.getPurl());
+        if (c.getPurl() == null) {
+            return null;
         }
-        return null;
+        if (!located && parentIsBinary && anchoredParent != null) {
+            Component copy = target.byPurlWithin(anchoredParent, c.getPurl());
+            if (copy != null) {
+                return copy;
+            }
+        }
+        Component sibling = target.byPurlAmongChildren(anchoredParent != null ? anchoredParent : scope.parent(),
+                c.getPurl());
+        // a hash conflict here means the source describes another build of
+        // the same artifact; mergeHashes then keeps the copy's own hashes
+        if (sibling != null) {
+            return sibling;
+        }
+        String directory = directoryOf(anchoredParent != null ? anchoredParent : scope.parent());
+        return directory == null ? null : target.byPurlUnderDirectory(c.getPurl(), directory);
     }
 
     /**
@@ -318,21 +447,75 @@ final class AnchoredMerge {
      */
     private Component placeOf(Component c, Component anchoredParent, boolean parentIsBinary) {
         Component fallback = anchoredParent != null ? anchoredParent : scope.parent();
-        boolean located = firstLocation(c) != null;
-        boolean maven = c.getPurl() != null && c.getPurl().startsWith(MAVEN_PURL_PREFIX);
-        if (!located && c.getType() != Component.Type.FILE && !maven) {
+        if (scope.shipped().contains(c)) {
             return fallback;
         }
-        if (!located && parentIsBinary && anchoredParent != null) {
+        if (firstLocation(c) == null && parentIsBinary && anchoredParent != null) {
             return anchoredParent;
         }
-        return scope.layout() != null ? null : fallback;
+        ArchiveIndex layout = scope.layout();
+        return layout != null && couldBeFound(c, layout) && !inLayout(c, layout) ? null : fallback;
+    }
+
+    /** Whether the layout has a file at one of the component's locations (after the offset), or with its hash. */
+    private boolean inLayout(Component c, ArchiveIndex layout) {
+        Evidence evidence = c.getEvidence();
+        if (evidence != null && evidence.getOccurrences() != null) {
+            for (Occurrence o : evidence.getOccurrences()) {
+                String loc = o.getLocation();
+                if (loc == null) {
+                    continue;
+                }
+                // an empty location is the SBOM's root, an archive unpacked at the offset
+                String path = offset + loc;
+                boolean directory = loc.isEmpty() || loc.endsWith("/");
+                if (directory ? path.isEmpty() || layout.containsDirectory(path) : layout.containsPath(path)) {
+                    return true;
+                }
+            }
+        }
+        String refPath = fileRefPath(c);
+        if (refPath != null && layout.containsPath(offset + refPath)) {
+            return true;
+        }
+        String hash = SbomUtils.extractHash(c, layout.normalizedAlg());
+        return hash != null && layout.containsHash(hash);
+    }
+
+    /**
+     * Whether the layout would show a component if the distribution shipped
+     * it: one carrying a hash in the layout's algorithm, or a Maven package or
+     * a file with a location (an occurrence, or the path of a {@code file:}
+     * bom-ref). Other packages (e.g. npm packages compiled into a JS bundle,
+     * whose locations, if any, point into the source tree) cannot be found as
+     * files, and a component with no location or hash cannot be looked up,
+     * so not finding them proves nothing.
+     */
+    private static boolean couldBeFound(Component c, ArchiveIndex layout) {
+        if (SbomUtils.extractHash(c, layout.normalizedAlg()) != null) {
+            return true;
+        }
+        boolean fileOrMaven = c.getType() == Component.Type.FILE
+                || (c.getPurl() != null && c.getPurl().startsWith(MAVEN_PURL_PREFIX));
+        return fileOrMaven && (hasOccurrence(c) || fileRefPath(c) != null);
+    }
+
+    private static boolean hasOccurrence(Component c) {
+        return c.getEvidence() != null && c.getEvidence().getOccurrences() != null
+                && !c.getEvidence().getOccurrences().isEmpty();
+    }
+
+    /** The path a {@code file:} bom-ref names, or {@code null}. */
+    private static String fileRefPath(Component c) {
+        String ref = c.getBomRef();
+        return ref != null && ref.startsWith(FILE_REF_PREFIX) ? ref.substring(FILE_REF_PREFIX.length()) : null;
     }
 
     /**
      * Adds what the source says about a copy: hashes it lacks (unless they
      * conflict), licenses if it has none, properties, external references and
-     * identity evidence if it has none. A file copy described by a package
+     * identity evidence if it has none, and a description, publisher,
+     * supplier or copyright it lacks. A file copy described by a package
      * takes the package's identity and keeps its location. The copy's
      * occurrences are its own and stay as they are.
      */
@@ -340,6 +523,18 @@ final class AnchoredMerge {
         BomMerger.mergeHashes(copy, c);
         if (copy.getLicenses() == null && c.getLicenses() != null) {
             copy.setLicenses(c.getLicenses());
+        }
+        if (copy.getDescription() == null) {
+            copy.setDescription(c.getDescription());
+        }
+        if (copy.getPublisher() == null) {
+            copy.setPublisher(c.getPublisher());
+        }
+        if (copy.getSupplier() == null) {
+            copy.setSupplier(c.getSupplier());
+        }
+        if (copy.getCopyright() == null) {
+            copy.setCopyright(c.getCopyright());
         }
         BomMerger.mergeProperties(copy, c);
         BomMerger.mergeExternalReferences(copy, c);
@@ -505,38 +700,36 @@ final class AnchoredMerge {
      * components are files of their own.
      */
     private static boolean isBinary(Component copy) {
-        Evidence evidence = copy.getEvidence();
-        if (evidence != null && evidence.getOccurrences() != null) {
-            for (Occurrence o : evidence.getOccurrences()) {
-                if (o.getLocation() != null && o.getLocation().endsWith("/")) {
-                    return false;
-                }
-            }
-        }
-        return copy.getType() != Component.Type.APPLICATION;
+        return directoryOf(copy) == null && copy.getType() != Component.Type.APPLICATION;
     }
 
-    /** The directory occurrence of an unpacked parent, or "". */
+    /**
+     * The directory an unpacked parent occupies: its directory occurrence, or
+     * {@code ""} for an archive unpacked at the assembly root (marked by an
+     * empty occurrence); {@code null} when the parent is not unpacked.
+     */
     private static String directoryOf(Component parent) {
         Evidence evidence = parent.getEvidence();
         if (evidence != null && evidence.getOccurrences() != null) {
             for (Occurrence o : evidence.getOccurrences()) {
-                if (o.getLocation() != null && o.getLocation().endsWith("/")) {
-                    return o.getLocation();
+                String loc = o.getLocation();
+                if (loc != null && (loc.isEmpty() || loc.endsWith("/"))) {
+                    return loc;
                 }
             }
         }
-        return "";
+        return null;
     }
 
     private void prefixOccurrences(Component c) {
         if (offset.isEmpty() || c.getEvidence() == null || c.getEvidence().getOccurrences() == null) {
             return;
         }
+        // an empty location marks the SBOM's root (an archive unpacked
+        // there), which sits at the offset
         for (Occurrence o : c.getEvidence().getOccurrences()) {
-            String loc = o.getLocation();
-            if (loc != null && !loc.isEmpty()) {
-                o.setLocation(offset + loc);
+            if (o.getLocation() != null) {
+                o.setLocation(offset + o.getLocation());
             }
         }
     }
