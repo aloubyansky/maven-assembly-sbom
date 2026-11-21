@@ -18,8 +18,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Integration-style tests that model the Artemis SBOM pipeline:
- * npm SBOM → WAR SBOM → distribution SBOM with merging, filtering,
- * file replacement, and deduplication.
+ * npm SBOM → WAR SBOM → distribution SBOM, merging each SBOM into the
+ * next by anchoring its components to the copies already there.
  */
 class SbomPipelineTest {
 
@@ -142,7 +142,7 @@ class SbomPipelineTest {
         // Note: uses ?type=jar convention from cyclonedx-maven-plugin
         Bom embeddedSbom = new Bom();
         embeddedSbom.setComponents(new ArrayList<>(List.of(
-                // Maven lib that matches top-level (jspecify) — should dedup
+                // the WAR's copy of the top-level jspecify: split out under the WAR
                 library("jspecify", "pkg:maven/org.jspecify/jspecify@1.0.0?type=jar",
                         "WEB-INF/lib/jspecify-1.0.0.jar", "hash-jspecify"),
                 // Maven lib only in WAR
@@ -178,7 +178,7 @@ class SbomPipelineTest {
                 new FileEntry("web/console.war/hawtconfig.json", "hash-hawtconfig")),
                 null, "sha256");
 
-        // Filter then merge
+        // Merge
         AnchoredMerge.merge(distBom, embeddedSbom, AnchoredMerge.Scope.of(BomMerger.findComponentByBomRef(distBom,
                 "pkg:maven/org.example/artemis-console@1.0?type=war"), archiveIndex));
 
@@ -193,10 +193,10 @@ class SbomPipelineTest {
         // Console WAR should have nested components
         assertNotNull(consoleWar.getComponents());
 
-        // npm components should survive filtering and be nested
+        // npm components should be kept and nested
         assertTrue(consoleWar.getComponents().stream()
                 .anyMatch(c -> "react".equals(c.getName())),
-                "npm components should survive filtering");
+                "npm components should be kept");
         assertTrue(consoleWar.getComponents().stream()
                 .anyMatch(c -> "lodash".equals(c.getName())));
 
@@ -218,7 +218,7 @@ class SbomPipelineTest {
                 nestedHawt.getBomRef(),
                 "file bomRef should be prefixed with parent path");
 
-        // jspecify should also appear as nested (dedup merges data)
+        // jspecify should also appear as the WAR's own nested copy
         assertTrue(consoleWar.getComponents().stream()
                 .anyMatch(c -> "jspecify".equals(c.getName())));
 
@@ -231,10 +231,6 @@ class SbomPipelineTest {
         // No duplicate dependency refs
         assertNoDuplicateDepRefs(distBom);
     }
-
-    // ── Test C: Post-merge cleanup pipeline ─────────────────────────
-
-    // ── Test D: bomRef dedup after large merge ──────────────────────
 
     // ── Helpers ──────────────────────────────────────────────────────
 
@@ -351,7 +347,7 @@ class SbomPipelineTest {
         }
     }
 
-    // ── Test E: Merge external SBOM with ?type=jar bom-refs ────────
+    // ── Test C: Merge external SBOM with ?type=jar bom-refs ────────
 
     @Test
     void mergeFlatWithTypeJarBomRefsProducesNoOrphanDeps() {
@@ -417,7 +413,7 @@ class SbomPipelineTest {
         assertNoDuplicateDepRefs(distBom);
     }
 
-    // ── Test F: External SBOM with transitive deps not in archive ──
+    // ── Test D: External SBOM with transitive deps not in archive ──
 
     @Test
     void mergeFlatExternalSbomDoesNotCreateOrphanTransitiveDeps() {

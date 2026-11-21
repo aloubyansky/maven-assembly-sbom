@@ -82,6 +82,7 @@ class MergeTargetTest {
         assertEquals("pkg:maven/g/x@1#2", target.claimRef("pkg:maven/g/x@1"));
     }
 
+    /** A BOM whose main component is {@code app}, with the given top-level components. */
     private static Bom bomOf(Component... components) {
         Bom bom = new Bom();
         Metadata metadata = new Metadata();
@@ -95,6 +96,7 @@ class MergeTargetTest {
         return bom;
     }
 
+    /** A library whose bom-ref is its purl, with an optional SHA-256 hash, location and nested copies. */
     private static Component library(String name, String purl, String sha256, String location, Component... nested) {
         Component c = new Component();
         c.setType(Component.Type.LIBRARY);

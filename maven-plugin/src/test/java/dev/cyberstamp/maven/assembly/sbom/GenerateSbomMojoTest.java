@@ -10,6 +10,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -219,7 +220,7 @@ class GenerateSbomMojoTest {
     /** Every occurrence location in the BOM, at any depth, sorted. */
     private static List<String> locations(Bom bom) {
         List<String> result = new ArrayList<>();
-        java.util.ArrayDeque<Component> queue = new java.util.ArrayDeque<>(
+        ArrayDeque<Component> queue = new ArrayDeque<>(
                 bom.getComponents() == null ? List.of() : bom.getComponents());
         while (!queue.isEmpty()) {
             Component c = queue.poll();

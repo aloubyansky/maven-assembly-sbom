@@ -14,6 +14,7 @@ import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
 import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.Hash;
+import org.cyclonedx.model.Metadata;
 import org.cyclonedx.model.component.evidence.Identity;
 import org.cyclonedx.model.component.evidence.Method;
 import org.cyclonedx.model.component.evidence.Occurrence;
@@ -150,9 +151,13 @@ class ExternalSbomMergeEvidenceTest {
         return merge(external, index, shipped);
     }
 
+    /**
+     * Merges into an empty distribution BOM, treating {@code shipped} as the components the
+     * analyzer matched to archive files.
+     */
     private static Bom merge(Bom external, ArchiveIndex index, Set<Component> shipped) {
         Bom target = new Bom();
-        org.cyclonedx.model.Metadata metadata = new org.cyclonedx.model.Metadata();
+        Metadata metadata = new Metadata();
         Component main = new Component();
         main.setType(Component.Type.APPLICATION);
         main.setName("dist");

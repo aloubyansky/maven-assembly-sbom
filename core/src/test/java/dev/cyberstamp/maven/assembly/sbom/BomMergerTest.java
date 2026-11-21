@@ -535,11 +535,11 @@ class BomMergerTest {
         assertNotNull(result.getEvidence(),
                 "evidence should be preserved when merging duplicate");
         assertNotNull(result.getEvidence().getOccurrences(),
-                "occurrences should survive dedup merge");
+                "occurrences should survive the merge");
         assertEquals("WEB-INF/lib/jspecify-1.0.0.jar",
                 result.getEvidence().getOccurrences().get(0).getLocation());
         assertNotNull(result.getEvidence().getIdentities(),
-                "identities should survive dedup merge");
+                "identities should survive the merge");
     }
 
     @Test

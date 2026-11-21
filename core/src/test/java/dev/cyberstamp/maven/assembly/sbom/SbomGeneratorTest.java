@@ -203,12 +203,6 @@ class SbomGeneratorTest {
         assertEquals("ref-a", bom.getDependencies().get(0).getRef());
     }
 
-    // ── removeTopLevelFilesDuplicatedByNested with unmodifiable lists ──
-
-    // ── replaceFileComponentsWithLibraries with unmodifiable lists ─────
-
-    // ── replaceFileComponentsWithLibraries ───────────────────────────────
-
     @Test
     void parseExternalBomsNullReturnsEmpty() {
         List<Bom> result = SbomGenerator.parseExternalBoms(null, tempDir);

@@ -12,10 +12,12 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.jar.JarEntry;
@@ -390,7 +392,7 @@ class SbomContainerDescriptorHandlerTest {
     void embeddedSbomContentNestsUnderItsJarWithUniqueRefs() throws Exception {
         // a's own SBOM says a bundles b (shaded, no file); b also ships at the top level
         Bom embedded = new Bom();
-        org.cyclonedx.model.Metadata metadata = new org.cyclonedx.model.Metadata();
+        Metadata metadata = new Metadata();
         Component aMain = new Component();
         aMain.setType(Component.Type.LIBRARY);
         aMain.setName("a");
@@ -469,10 +471,11 @@ class SbomContainerDescriptorHandlerTest {
         return calls;
     }
 
+    /** Writes a WAR with the given files, by entry path. */
     private Path createWar(String name, Map<String, Path> entries) throws Exception {
         Path war = tempDir.resolve(name);
         try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(war))) {
-            for (Map.Entry<String, Path> e : new java.util.TreeMap<>(entries).entrySet()) {
+            for (Map.Entry<String, Path> e : new TreeMap<>(entries).entrySet()) {
                 jos.putNextEntry(new JarEntry(e.getKey()));
                 jos.write(Files.readAllBytes(e.getValue()));
                 jos.closeEntry();
@@ -492,12 +495,14 @@ class SbomContainerDescriptorHandlerTest {
         when(session.getProjects()).thenReturn(List.of(module));
     }
 
+    /** The bom-ref of the {@code app} WAR component. */
     private static String warRef(Bom bom) {
         return findComponent(bom, Component.Type.LIBRARY, "app").getBomRef();
     }
 
+    /** Every dependency entry's sorted children, by the entry's ref. */
     private static Map<String, List<String>> dependencyMap(Bom bom) {
-        Map<String, List<String>> map = new java.util.HashMap<>();
+        Map<String, List<String>> map = new HashMap<>();
         for (org.cyclonedx.model.Dependency d : bom.getDependencies()) {
             map.put(d.getRef(), d.getDependencies() == null ? List.of()
                     : d.getDependencies().stream().map(org.cyclonedx.model.Dependency::getRef).sorted().toList());
@@ -1258,7 +1263,7 @@ class SbomContainerDescriptorHandlerTest {
         assertTrue(allComponentsRecursive(bom).stream()
                 .anyMatch(c -> "react".equals(c.getName())),
                 "npm component with non-matching source-code occurrence"
-                        + " should survive filtering");
+                        + " should be kept");
     }
 
     @Test
@@ -1552,13 +1557,13 @@ class SbomContainerDescriptorHandlerTest {
     }
 
     @Test
-    void unpackedWarEmbeddedSbomComponentsSurviveFiltering() throws Exception {
+    void unpackedWarEmbeddedSbomComponentsAreKept() throws Exception {
         // Models the real pipeline: an embedded SBOM inside an unpacked WAR
         // has flat top-level components — the upstream WAR component (with
         // empty occurrence meaning "the root"), npm components (no hashes,
         // no occurrences), a file component with a file: bom-ref, and a
-        // Maven library matched by occurrence path. All must survive
-        // filterSbomByArchive and get merged under the unpacked WAR.
+        // Maven library matched by occurrence path. All must be kept and
+        // merged under the unpacked WAR.
         Path nestedJar = createTestJar("hawtio-1.0.jar", "hawtio-content");
         Path jsFile = createTestFile("main.js", "console.log('hello')");
 
@@ -1678,25 +1683,25 @@ class SbomContainerDescriptorHandlerTest {
         assertNotNull(war, "unpacked WAR should be detected as LIBRARY");
         assertNotNull(war.getComponents(), "WAR should have nested components");
 
-        // Empty-occurrence component survives filterSbomByArchive
+        // Empty-occurrence component is kept
         assertTrue(war.getComponents().stream()
                 .anyMatch(c -> "upstream-war".equals(c.getName())),
-                "component with empty occurrence should survive filtering");
+                "component with empty occurrence should be kept");
 
-        // Flat npm components (no hashes) survive via can't-verify path
+        // Flat npm components (no hashes) cannot be found as files, so they are kept
         assertTrue(war.getComponents().stream()
                 .anyMatch(c -> "react".equals(c.getName())),
-                "npm component without hashes should survive filtering");
+                "npm component without hashes should be kept");
         assertTrue(war.getComponents().stream()
                 .anyMatch(c -> "react-dom".equals(c.getName())),
-                "npm component without hashes should survive filtering");
+                "npm component without hashes should be kept");
 
         // Maven library matched by occurrence survives
         assertTrue(war.getComponents().stream()
                 .anyMatch(c -> "hawtio".equals(c.getName())),
-                "Maven library matched by occurrence should survive filtering");
+                "Maven library matched by occurrence should be kept");
 
-        // npm dependency entries survive (not pruned by filterSbomByArchive)
+        // npm dependency entries are carried across
         var reactDomDepEntry = bom.getDependencies().stream()
                 .filter(d -> d.getRef().equals("pkg:npm/react-dom@18.0.0"))
                 .findFirst().orElse(null);

@@ -189,12 +189,29 @@ public class SbomGenerator {
         return lastAnalyzer.analyze(entries, baseDirPrefix);
     }
 
+    /**
+     * Merges or links the SBOMs found inside the scanned archives, each under
+     * the component copy it describes.
+     *
+     * @param rendered the rendered BOM, with the bom-ref of every model copy
+     * @param model the analyzed components, carrying the discovered SBOMs
+     * @param archiveIndex the scanned layout the merged components are checked against
+     */
     private void processDiscoveredSboms(RenderedBom rendered, AssemblyComponents model, ArchiveIndex archiveIndex) {
         EmbeddedSbomMergeTransform transform = new EmbeddedSbomMergeTransform(
                 embeddedSboms, archiveIndex);
         transform.apply(rendered.bom(), model, owner -> resolveParentBomRef(owner, rendered));
     }
 
+    /**
+     * Merges the configured external SBOMs into the BOM as descriptions of
+     * the whole distribution. Components the analyzer rejected are dropped,
+     * and those it found in the layout are kept where it found them.
+     *
+     * @param bom the BOM to merge into
+     * @param externalBomList the external SBOMs, possibly empty
+     * @param archiveIndex the scanned layout the merged components are checked against
+     */
     private void processExternalBoms(Bom bom, List<Bom> externalBomList, ArchiveIndex archiveIndex) {
         if (externalBomList.isEmpty()) {
             return;

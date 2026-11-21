@@ -1536,6 +1536,9 @@ class ArchiveAnalyzer {
          * An archive entry identified as a Maven artifact.
          *
          * @param id the id of this copy
+         * @param artifactId the artifact's coordinates
+         * @param archivePath the copy's path in the archive
+         * @param hash the copy's content hash
          * @param identification how the entry was identified, or {@code null}
          * @param dependenciesKnown whether the artifact's dependencies are
          *        resolved: {@code true} for a project dependency matched by
@@ -1552,6 +1555,10 @@ class ArchiveAnalyzer {
          *
          * @param id the id of this copy
          * @param parent the id of the copy this one is nested in
+         * @param artifactId the artifact's coordinates
+         * @param archivePath the copy's path in the archive, or {@code null}
+         *        for a copy bundled in a shaded jar
+         * @param hash the copy's content hash, or {@code null} if unknown
          * @param identification how the entry was identified, or {@code null}
          * @param dependenciesKnown whether the artifact's dependencies are
          *        resolved; always {@code false} today: a copy nested in another
@@ -1577,14 +1584,30 @@ class ArchiveAnalyzer {
             this.identityEvidence = identityEvidence;
         }
 
+        /**
+         * Returns the top-level Maven copies, in registration order.
+         *
+         * @return the live list of top-level entries
+         */
         List<MavenEntry> mavenEntries() {
             return mavenEntries;
         }
 
+        /**
+         * Returns the nested Maven copies, in registration order.
+         *
+         * @return the live list of nested entries
+         */
         List<NestedMavenEntry> nestedEntries() {
             return nestedEntries;
         }
 
+        /**
+         * Returns the files no artifact was identified for; they become file
+         * components.
+         *
+         * @return the live list of unmatched files
+         */
         List<FileEntry> unmatchedFiles() {
             return unmatchedFiles;
         }
@@ -1607,6 +1630,12 @@ class ArchiveAnalyzer {
             return copies;
         }
 
+        /**
+         * Returns the artifacts bundled in unidentified files (e.g. shaded
+         * into a jar no Maven artifact matched), by the file's archive path.
+         *
+         * @return the live map of bundled artifacts by file path
+         */
         Map<String, List<ArtifactCoords>> fileNestedByPath() {
             return fileNestedByPath;
         }
@@ -1614,6 +1643,11 @@ class ArchiveAnalyzer {
         /**
          * Registers a top-level copy under a newly generated id.
          *
+         * @param artifactId the artifact's coordinates
+         * @param archivePath the copy's path in the archive
+         * @param hash the copy's content hash
+         * @param identification how the copy was identified, or {@code null}
+         * @param dependenciesKnown whether the artifact's dependencies are resolved
          * @return the registered entry
          */
         MavenEntry addMavenEntry(ArtifactCoords artifactId, String archivePath, String hash,
@@ -1628,6 +1662,13 @@ class ArchiveAnalyzer {
          * Registers a copy nested under the copy with id {@code parent}, under
          * a newly generated id.
          *
+         * @param parent the id of the copy it is nested in
+         * @param artifactId the artifact's coordinates
+         * @param archivePath the copy's path in the archive, or {@code null}
+         *        for a copy bundled in a shaded jar
+         * @param hash the copy's content hash, or {@code null} if unknown
+         * @param identification how the copy was identified, or {@code null}
+         * @param dependenciesKnown whether the artifact's dependencies are resolved
          * @return the registered entry
          */
         NestedMavenEntry addNestedEntry(ComponentId parent, ArtifactCoords artifactId, String archivePath,
@@ -1640,6 +1681,7 @@ class ArchiveAnalyzer {
          * Registers a nested copy whose id is already chosen, e.g. a top-level
          * entry moved under the unpacked archive it sits in.
          *
+         * @param entry the entry to register
          * @return the registered entry
          */
         NestedMavenEntry addNestedEntry(NestedMavenEntry entry) {
@@ -1689,6 +1731,7 @@ class ArchiveAnalyzer {
          *
          * <p>
          * Assembly rules:
+         * </p>
          * <ul>
          * <li>each {@code MavenEntry} → a top-level {@link PackageComponent}</li>
          * <li>each {@code NestedMavenEntry} → a {@link PackageComponent} nested
@@ -1700,7 +1743,6 @@ class ArchiveAnalyzer {
          * <li>each unmatched file → a top-level {@link FileComponent}</li>
          * <li>each discovered embedded SBOM → carried over verbatim</li>
          * </ul>
-         * </p>
          *
          * <p>
          * The {@link #moduleCopies() module's copies} are not placed on the

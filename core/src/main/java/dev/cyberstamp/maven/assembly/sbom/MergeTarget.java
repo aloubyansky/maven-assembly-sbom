@@ -57,6 +57,11 @@ final class MergeTarget {
     // canonical purl -> components, built on first use
     private Map<String, List<Component>> byPurl;
 
+    /**
+     * Creates an empty index of {@code bom}; {@link #of(Bom)} fills it.
+     *
+     * @param bom the BOM to index
+     */
     private MergeTarget(Bom bom) {
         this.bom = bom;
         this.main = bom.getMetadata() == null ? null : bom.getMetadata().getComponent();
@@ -289,6 +294,11 @@ final class MergeTarget {
         return null;
     }
 
+    /**
+     * Adds a component to the purl index under its canonical purl, once.
+     *
+     * @param c the component; one without a purl is not indexed
+     */
     private void indexPurl(Component c) {
         String key = canonicalPurl(c);
         if (key != null) {
@@ -366,6 +376,9 @@ final class MergeTarget {
      * Like {@link #add(Component, Component)}, choosing what a component kept
      * under the main component becomes.
      *
+     * @param component the component to attach
+     * @param parent the component to nest it in, or {@code null} or the main
+     *        component for the top level
      * @param mainChildrenAtTopLevel {@code true} to make a child of the main
      *        component a top-level component, {@code false} to nest it in the
      *        main component (an explicit nested merge under it)
@@ -394,6 +407,11 @@ final class MergeTarget {
         }
     }
 
+    /**
+     * Adds a component and all its descendants to the purl index.
+     *
+     * @param c the root of the subtree
+     */
     private void indexSubtreePurls(Component c) {
         indexPurl(c);
         if (c.getComponents() != null) {
@@ -447,7 +465,13 @@ final class MergeTarget {
         }
     }
 
-    /** Whether {@code component} is {@code ancestor} or nested in it at any depth. */
+    /**
+     * Whether {@code component} is {@code ancestor} or nested in it at any depth.
+     *
+     * @param component an indexed component
+     * @param ancestor the possible ancestor
+     * @return {@code true} if {@code component} is within {@code ancestor}
+     */
     boolean isWithin(Component component, Component ancestor) {
         for (Component c = component; c != null; c = parents.get(c)) {
             if (c == ancestor) {
@@ -521,6 +545,9 @@ final class MergeTarget {
     /**
      * Returns the index key of a hash: its normalized algorithm and its
      * lower-cased value, or {@code null} if either is missing.
+     *
+     * @param hash the hash, possibly {@code null}
+     * @return the key, or {@code null}
      */
     static String hashKey(Hash hash) {
         if (hash == null || hash.getAlgorithm() == null || hash.getValue() == null) {

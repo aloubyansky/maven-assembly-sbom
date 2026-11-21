@@ -31,6 +31,7 @@ class BomFinalizerTest {
                 bom.getDependencies().get(2).getDependencies().stream().map(Dependency::getRef).toList());
     }
 
+    /** A library with the given name and bom-ref. */
     private static Component createLibrary(String name, String bomRef) {
         Component comp = new Component();
         comp.setType(Component.Type.LIBRARY);

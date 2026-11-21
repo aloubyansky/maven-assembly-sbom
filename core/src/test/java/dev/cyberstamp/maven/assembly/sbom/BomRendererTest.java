@@ -642,6 +642,7 @@ class BomRendererTest {
                 "nothing depends on the bundled copy");
     }
 
+    /** A model of {@code org.example:my-app:1.0.0} with the given top-level components. */
     private static AssemblyComponents modelOf(List<AssemblyComponent> components) {
         AssemblyComponents model = new AssemblyComponents();
         AssemblyMetadata metadata = new AssemblyMetadata();
@@ -654,10 +655,12 @@ class BomRendererTest {
         return model;
     }
 
+    /** The top-level component named {@code name}; fails if there is none. */
     private static Component topLevel(Bom bom, String name) {
         return bom.getComponents().stream().filter(c -> name.equals(c.getName())).findFirst().orElseThrow();
     }
 
+    /** Every dependency entry's sorted children, by the entry's ref. */
     private static Map<String, List<String>> dependencyMap(Bom bom) {
         Map<String, List<String>> map = new HashMap<>();
         for (Dependency d : bom.getDependencies()) {
@@ -699,7 +702,7 @@ class BomRendererTest {
 
     @Test
     void handBuiltModelWithoutEdgesKeepsPlainRefsAtTopLevel() {
-        // galleon's shape: x top-level; a shaded jar bundling x (dependencies unknown)
+        // x top-level; a shaded jar bundling x (dependencies unknown)
         PackageComponent shaded = new PackageComponent(SHADED, "lib/shaded.jar", "hs", List.of(),
                 List.of(PackageComponent.of(X, null, null, false)), false);
         AssemblyComponents model = modelOf(List.of(shaded, PackageComponent.of(X, "lib/x.jar", "hx", false)));

@@ -13,13 +13,16 @@ import org.cyclonedx.model.Dependency;
  */
 final class BomFinalizer {
 
+    /** Not instantiable: a holder of static steps. */
     private BomFinalizer() {
     }
 
     /**
      * Sorts the dependency entries, and each entry's children, by ref. The
-     * renderer emits them sorted, but merging SBOMs and making bom-refs unique
-     * append entries and children afterwards.
+     * renderer emits them sorted, but merging SBOMs appends entries and
+     * children afterwards.
+     *
+     * @param bom the BOM to modify in place
      */
     static void sortDependencies(Bom bom) {
         if (bom.getDependencies() == null) {

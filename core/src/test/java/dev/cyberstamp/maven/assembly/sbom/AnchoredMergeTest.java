@@ -14,6 +14,7 @@ import java.util.Set;
 
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
+import org.cyclonedx.model.Dependency;
 import org.cyclonedx.model.Evidence;
 import org.cyclonedx.model.Hash;
 import org.cyclonedx.model.License;
@@ -51,7 +52,7 @@ class AnchoredMergeTest {
 
     @Test
     void locationAnchorUsesTheDerivedRootOffset() {
-        // Keycloak: the Quarkus SBOM's root is the dist's lib/
+        // a Quarkus application's SBOM, whose root is the distribution's lib/
         Component run = lib("quarkus-run.jar", "pkg:generic/quarkus-run.jar@1", "r1", "lib/quarkus-run.jar");
         Component core = lib("core", "pkg:maven/io.quarkus/core@1", null, "lib/lib/main/core.jar");
         Bom target = bom(run, core);
@@ -294,6 +295,7 @@ class AnchoredMergeTest {
         assertTrue(target.getDependencies().stream().noneMatch(d -> d.getRef().contains("#")));
     }
 
+    /** An SBOM of jar a: a bundles x, and its main component lists react. */
     private static Bom sbomOfJar() {
         Bom source = bom(lib("a", "pkg:maven/g/a@1", "aa", null, lib("x", "pkg:maven/g/x@1", null, null)),
                 npm("react", "pkg:npm/react@19", "rr", null));
@@ -302,30 +304,31 @@ class AnchoredMergeTest {
         return source;
     }
 
-    static org.cyclonedx.model.Dependency dependency(String ref, String... children) {
-        org.cyclonedx.model.Dependency d = new org.cyclonedx.model.Dependency(ref);
+    /** A dependency entry of {@code ref} on {@code children}. */
+    static Dependency dependency(String ref, String... children) {
+        Dependency d = new Dependency(ref);
         for (String child : children) {
-            d.addDependency(new org.cyclonedx.model.Dependency(child));
+            d.addDependency(new Dependency(child));
         }
         return d;
     }
 
     /** The sorted refs an entry lists; fails if the entry is missing. */
     static List<String> dependsOn(Bom bom, String ref) {
-        org.cyclonedx.model.Dependency entry = bom.getDependencies() == null ? null
+        Dependency entry = bom.getDependencies() == null ? null
                 : bom.getDependencies().stream().filter(d -> ref.equals(d.getRef())).findFirst().orElse(null);
         if (entry == null) {
             throw new AssertionError("no entry for " + ref + " in "
                     + (bom.getDependencies() == null ? "[]"
-                            : bom.getDependencies().stream().map(org.cyclonedx.model.Dependency::getRef).toList()));
+                            : bom.getDependencies().stream().map(Dependency::getRef).toList()));
         }
         return entry.getDependencies() == null ? List.of()
-                : entry.getDependencies().stream().map(org.cyclonedx.model.Dependency::getRef).sorted().toList();
+                : entry.getDependencies().stream().map(Dependency::getRef).sorted().toList();
     }
 
     @Test
     void flatSbomTopComponentAnchorsToItsCopy() {
-        // Keycloak: the Quarkus SBOM's top component is quarkus-run.jar, shipped in the dist
+        // a Quarkus application's SBOM, whose top component is the distribution's quarkus-run.jar
         Component run = lib("quarkus-run.jar", "pkg:generic/quarkus-run.jar@1", "r1", "lib/quarkus-run.jar");
         Component core = lib("core", "pkg:maven/io.quarkus/core@1", "c1", "lib/lib/main/core.jar");
         Bom target = bom(run, core);
@@ -338,8 +341,6 @@ class AnchoredMergeTest {
 
         assertEquals(List.of("pkg:maven/io.quarkus/core@1"), dependsOn(target, "pkg:generic/quarkus-run.jar@1"));
     }
-
-    // Final review findings
 
     @Test
     void rejectedComponentIsNotAddedEvenThoughItsHashShips() {
@@ -414,11 +415,9 @@ class AnchoredMergeTest {
         assertEquals(List.of(warX.getBomRef()), dependsOn(target, y.getBomRef()), "y keeps its own ref, " + y.getBomRef());
     }
 
-    // Regression tests from the Artemis comparison
-
+    /** An unpacked WAR at {@code directory}, with the given nested copies. */
     private static Component war(String purl, String directory, Component... nested) {
-        Component war = lib("war", purl, null, directory, nested);
-        return war;
+        return lib("war", purl, null, directory, nested);
     }
 
     @Test
@@ -479,8 +478,6 @@ class AnchoredMergeTest {
         assertEquals("pkg:maven/g/upstream@1?type=war", war.getComponents().get(0).getPurl());
         assertEquals(List.of("web/app.war/"), locations(war.getComponents().get(0)));
     }
-
-    // Follow-up fixes
 
     @Test
     void distributionRelativeLocationsOfAnUnpackedWarAreNotPrefixedTwice() {
@@ -584,10 +581,12 @@ class AnchoredMergeTest {
         assertEquals(1, result.dropped());
     }
 
+    /** A flat merge into {@code target}'s main component, checked against {@code layout}. */
     static AnchoredMerge.Scope flat(Bom target, ArchiveIndex layout) {
         return AnchoredMerge.Scope.of(target.getMetadata().getComponent(), layout);
     }
 
+    /** A BOM whose main component is {@code app}, with the given top-level components. */
     static Bom bom(Component... components) {
         Bom bom = new Bom();
         Metadata metadata = new Metadata();
@@ -601,6 +600,7 @@ class AnchoredMergeTest {
         return bom;
     }
 
+    /** A library whose bom-ref is its purl, with an optional SHA-256 hash, location and nested copies. */
     static Component lib(String name, String purl, String sha256, String location, Component... nested) {
         Component c = new Component();
         c.setType(Component.Type.LIBRARY);
@@ -646,6 +646,7 @@ class AnchoredMergeTest {
         assertEquals(1, result.dropped());
     }
 
+    /** Evidence of one occurrence at {@code location}. */
     static Evidence evidence(String location) {
         Evidence evidence = new Evidence();
         Occurrence occurrence = new Occurrence();
@@ -654,11 +655,13 @@ class AnchoredMergeTest {
         return evidence;
     }
 
+    /** The component's occurrence locations, in order. */
     static List<String> locations(Component c) {
         return c.getEvidence() == null || c.getEvidence().getOccurrences() == null ? List.of()
                 : c.getEvidence().getOccurrences().stream().map(Occurrence::getLocation).toList();
     }
 
+    /** The MIT license. */
     private static LicenseChoice mit() {
         License license = new License();
         license.setId("MIT");

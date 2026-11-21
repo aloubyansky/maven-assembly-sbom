@@ -1,5 +1,6 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -162,6 +163,14 @@ final class AnchoredMerge {
     private int kept;
     private int dropped;
 
+    /**
+     * Creates the state of one merge.
+     *
+     * @param target the indexed BOM to merge into
+     * @param scope where the source is merged
+     * @param offset the prefix that makes the source's locations relative to
+     *        the target's root, possibly empty
+     */
     private AnchoredMerge(MergeTarget target, Scope scope, String offset) {
         this.target = target;
         this.scope = scope;
@@ -275,7 +284,7 @@ final class AnchoredMerge {
         }
         Component topParent = scope.parent() == target.main() ? null : scope.parent();
         boolean topParentIsBinary = topParent != null && isBinary(topParent);
-        List<Component> ordered = new java.util.ArrayList<>(source.getComponents());
+        List<Component> ordered = new ArrayList<>(source.getComponents());
         ordered.sort(BomRenderer.COMPONENT_ORDER);
         for (Component c : ordered) {
             BomMerger.normalizePurls(c);
@@ -429,7 +438,7 @@ final class AnchoredMerge {
             }
             return copy;
         }
-        List<Occurrence> remaining = new java.util.ArrayList<>(occurrences.size() - 1);
+        List<Occurrence> remaining = new ArrayList<>(occurrences.size() - 1);
         for (Occurrence o : occurrences) {
             if (o != inside) {
                 remaining.add(o);
@@ -439,7 +448,7 @@ final class AnchoredMerge {
         List<Component> children = c.getComponents();
         c.setComponents(null);
         Evidence evidence = new Evidence();
-        evidence.setOccurrences(new java.util.ArrayList<>(List.of(inside)));
+        evidence.setOccurrences(new ArrayList<>(List.of(inside)));
         if (copy.getEvidence().getIdentities() != null) {
             evidence.setIdentities(copy.getEvidence().getIdentities());
         }
@@ -593,6 +602,12 @@ final class AnchoredMerge {
         return fileOrMaven && (hasOccurrence(c) || fileRefPath(c) != null);
     }
 
+    /**
+     * Whether a component lists at least one occurrence.
+     *
+     * @param c the component
+     * @return {@code true} if it has an occurrence
+     */
     private static boolean hasOccurrence(Component c) {
         return c.getEvidence() != null && c.getEvidence().getOccurrences() != null
                 && !c.getEvidence().getOccurrences().isEmpty();
@@ -729,6 +744,13 @@ final class AnchoredMerge {
         return ref == null ? null : renamedTargetRefs.getOrDefault(ref, ref);
     }
 
+    /**
+     * Collects the refs a dependency entry already lists, so that merged
+     * children are not added twice.
+     *
+     * @param entry a target dependency entry
+     * @return a modifiable set of its children's refs
+     */
     private static Set<String> childRefs(Dependency entry) {
         Set<String> refs = new HashSet<>();
         if (entry.getDependencies() != null) {
@@ -839,6 +861,13 @@ final class AnchoredMerge {
         return null;
     }
 
+    /**
+     * Makes a kept component's occurrence locations relative to the target's
+     * root by putting the root offset before each of them. An empty location
+     * (the SBOM's root) becomes the offset itself.
+     *
+     * @param c a source component being added to the target, modified in place
+     */
     private void prefixOccurrences(Component c) {
         if (offset.isEmpty() || c.getEvidence() == null || c.getEvidence().getOccurrences() == null) {
             return;
@@ -852,6 +881,14 @@ final class AnchoredMerge {
         }
     }
 
+    /**
+     * Makes a {@code file:} bom-ref relative to the target's root by putting
+     * the root offset before its path.
+     *
+     * @param ref a source bom-ref
+     * @return the prefixed ref, or {@code ref} itself if it is not a
+     *         {@code file:} ref or the offset is empty
+     */
     private String prefixFileRef(String ref) {
         if (offset.isEmpty() || !ref.startsWith(FILE_REF_PREFIX)) {
             return ref;
@@ -859,6 +896,12 @@ final class AnchoredMerge {
         return FILE_REF_PREFIX + offset + ref.substring(FILE_REF_PREFIX.length());
     }
 
+    /**
+     * The first non-empty occurrence location of a component.
+     *
+     * @param c the component
+     * @return the location, or {@code null} if it has none
+     */
     private static String firstLocation(Component c) {
         Evidence evidence = c.getEvidence();
         if (evidence == null || evidence.getOccurrences() == null) {

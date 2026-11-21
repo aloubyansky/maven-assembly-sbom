@@ -82,7 +82,7 @@ public final class BomMerger {
                             + parentBomRef + "' not found");
         }
         AnchoredMerge.merge(targetBom, sourceBom,
-                new AnchoredMerge.Scope(parent, null, java.util.Set.of(), java.util.Set.of(), true));
+                new AnchoredMerge.Scope(parent, null, Set.of(), Set.of(), true));
     }
 
     /**
@@ -132,6 +132,8 @@ public final class BomMerger {
      * Normalizes a component's PURL and bom-ref in place by stripping
      * the redundant {@code ?type=jar} qualifier (jar is the PURL-spec
      * default for Maven). Recurses into sub-components.
+     *
+     * @param comp the component to normalize in place
      */
     static void normalizePurls(Component comp) {
         String purl = comp.getPurl();
@@ -218,8 +220,12 @@ public final class BomMerger {
      * source hashes are discarded — the mismatch indicates the
      * source may describe a different version of the artifact (e.g.
      * before shading or repackaging), so its hashes cannot be
-     * trusted.
+     * trusted. Algorithms are compared normalized and values
+     * case-insensitively.
      * </p>
+     *
+     * @param target the component to add hashes to
+     * @param source the component whose hashes to add
      */
     static void mergeHashes(Component target, Component source) {
         if (source.getHashes() == null || source.getHashes().isEmpty()) {
