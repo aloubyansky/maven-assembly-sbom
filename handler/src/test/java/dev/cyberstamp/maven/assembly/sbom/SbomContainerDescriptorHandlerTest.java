@@ -387,7 +387,7 @@ class SbomContainerDescriptorHandlerTest {
     }
 
     @Test
-    void embeddedSbomEdgesReachTheCopiesInsideTheJar() throws Exception {
+    void embeddedSbomContentNestsUnderItsJarWithUniqueRefs() throws Exception {
         // a's own SBOM says a bundles b (shaded, no file); b also ships at the top level
         Bom embedded = new Bom();
         org.cyclonedx.model.Metadata metadata = new org.cyclonedx.model.Metadata();
@@ -434,7 +434,8 @@ class SbomContainerDescriptorHandlerTest {
         Bom bom = readBomFromArchiver(archiver);
         Component aCopy = findComponent(bom, Component.Type.LIBRARY, "a");
         assertEquals("pkg:maven/org.ex/b@1.0#2", aCopy.getComponents().get(0).getBomRef(), "a's own copy of b");
-        assertEquals(List.of("pkg:maven/org.ex/b@1.0#2"), dependencyMap(bom).get(aCopy.getBomRef()));
+        assertFalse(dependencyMap(bom).getOrDefault(aCopy.getBomRef(), List.of()).contains("pkg:maven/org.ex/b@1.0#2"),
+                "b is nested in a: containment, not a dependency");
         List<String> refs = allComponentsRecursive(bom).stream().map(Component::getBomRef).toList();
         assertEquals(refs.size(), new HashSet<>(refs).size(), "bom-refs are unique: " + refs);
     }

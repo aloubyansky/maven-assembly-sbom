@@ -236,7 +236,7 @@ class AnchoredMergeTest {
     }
 
     @Test
-    void sourceMainEdgesGoToTheMergeParent() {
+    void sourceMainEdgeToContentIsContainmentNotADependency() {
         Component jar = lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar");
         Bom target = bom(jar);
         Bom source = bom(lib("x", "pkg:maven/g/x@1", null, null));
@@ -246,7 +246,22 @@ class AnchoredMergeTest {
         AnchoredMerge.merge(target, source, AnchoredMerge.Scope.of(jar, LAYOUT));
 
         assertEquals("pkg:maven/g/x@1", jar.getComponents().get(0).getBomRef(), "shaded in the jar");
-        assertEquals(List.of("pkg:maven/g/x@1"), dependsOn(target, "pkg:maven/g/a@1"));
+        assertEquals(List.of(), dependsOn(target, "pkg:maven/g/a@1"), "the source's main entry lands on the jar, "
+                + "but x is nested in it: containment, not a dependency");
+    }
+
+    @Test
+    void sourceMainEdgesGoToTheMergeParent() {
+        Component jar = lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar");
+        Component y = lib("y", "pkg:maven/g/y@1", "yy", "lib/y.jar");
+        Bom target = bom(jar, y);
+        Bom source = bom(lib("y", "pkg:maven/g/y@1", "yy", null));
+        source.getMetadata().getComponent().setBomRef("pkg:maven/g/a@1?type=jar");
+        source.addDependency(dependency("pkg:maven/g/a@1?type=jar", "pkg:maven/g/y@1"));
+
+        AnchoredMerge.merge(target, source, AnchoredMerge.Scope.of(jar, LAYOUT));
+
+        assertEquals(List.of("pkg:maven/g/y@1"), dependsOn(target, "pkg:maven/g/a@1"));
     }
 
     @Test
@@ -306,6 +321,72 @@ class AnchoredMergeTest {
         }
         return entry.getDependencies() == null ? List.of()
                 : entry.getDependencies().stream().map(org.cyclonedx.model.Dependency::getRef).sorted().toList();
+    }
+
+    // Regression tests from the Artemis comparison
+
+    private static Component war(String purl, String directory, Component... nested) {
+        Component war = lib("war", purl, null, directory, nested);
+        return war;
+    }
+
+    @Test
+    void fileWithAnotherHashAtAShippedPathIsNotShipped() {
+        // the WAR's SBOM lists its original web.xml; the distribution ships a replaced one
+        Component shipped = new Component();
+        shipped.setType(Component.Type.FILE);
+        shipped.setName("web.xml");
+        shipped.setBomRef("file:web/app.war/WEB-INF/web.xml");
+        shipped.addHash(new Hash("SHA-256", "new"));
+        shipped.setEvidence(evidence("web/app.war/WEB-INF/web.xml"));
+        Component war = war("pkg:maven/g/app@1?type=war", "web/app.war/");
+        Bom target = bom(war, shipped);
+        ArchiveIndex layout = ArchiveIndex.of(List.of(new FileEntry("web/app.war/WEB-INF/web.xml", "new")), null,
+                "SHA-256");
+        Component original = new Component();
+        original.setType(Component.Type.FILE);
+        original.setName("web.xml");
+        original.setBomRef("file:WEB-INF/web.xml");
+        original.addHash(new Hash("SHA-256", "old"));
+
+        AnchoredMerge.Result result = AnchoredMerge.merge(target, bom(original), AnchoredMerge.Scope.of(war, layout));
+
+        assertEquals(1, result.dropped());
+        assertEquals(2, target.getComponents().size());
+    }
+
+    @Test
+    void jarExcludedFromAnUnpackedWarIsNotTheTopLevelCopy() {
+        // guava ships at lib/ and is excluded from the unpacked WAR its SBOM lists it in
+        Component guava = lib("guava", "pkg:maven/g/guava@1", "gg", "lib/guava.jar");
+        Component war = war("pkg:maven/g/app@1?type=war", "web/app.war/");
+        Bom target = bom(war, guava);
+        ArchiveIndex layout = ArchiveIndex.of(List.of(new FileEntry("lib/guava.jar", "gg"),
+                new FileEntry("web/app.war/index.html", "ii")), null, "SHA-256");
+        Bom source = bom(lib("guava", "pkg:maven/g/guava@1", "gg", "WEB-INF/lib/guava.jar"),
+                lib("ep", "pkg:maven/g/ep@1", "ee", "WEB-INF/lib/ep.jar"));
+        source.addDependency(dependency("pkg:maven/g/guava@1", "pkg:maven/g/ep@1"));
+
+        AnchoredMerge.Result result = AnchoredMerge.merge(target, source, AnchoredMerge.Scope.of(war, layout));
+
+        assertEquals(2, result.dropped(), "neither ships inside the WAR");
+        assertTrue(target.getDependencies() == null || target.getDependencies().stream()
+                .noneMatch(d -> d.getRef().equals("pkg:maven/g/guava@1")), "no edge reaches the top-level guava");
+    }
+
+    @Test
+    void upstreamWarUnpackedAtTheSbomRootShipsAsItsDirectory() {
+        // the overlay's SBOM lists the upstream WAR at its root, with the packed WAR's hash
+        Component war = war("pkg:maven/g/app@1?type=war", "web/app.war/");
+        Bom target = bom(war);
+        ArchiveIndex layout = ArchiveIndex.of(List.of(new FileEntry("web/app.war/index.html", "ii")), null, "SHA-256");
+        Component upstream = lib("upstream", "pkg:maven/g/upstream@1?type=war", "packed-war-hash", null);
+        upstream.setEvidence(evidence(""));
+
+        AnchoredMerge.merge(target, bom(upstream), AnchoredMerge.Scope.of(war, layout));
+
+        assertEquals("pkg:maven/g/upstream@1?type=war", war.getComponents().get(0).getPurl());
+        assertEquals(List.of("web/app.war/"), locations(war.getComponents().get(0)));
     }
 
     static AnchoredMerge.Scope flat(Bom target, ArchiveIndex layout) {

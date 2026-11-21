@@ -150,7 +150,12 @@ final class AnchoredMerge {
     private final MergeTarget target;
     private final Scope scope;
     private final String offset;
+    // the layout's view for hash checks: the merge parent's directory when it
+    // is unpacked, so the same file shipped elsewhere does not count
+    private final ArchiveIndex hashLayout;
     private final Map<String, String> refMap = new HashMap<>();
+    // the target copy of every mapped target ref
+    private final Map<String, Component> copiesByRef = new HashMap<>();
     // target refs a FILE copy gave up when it took a library's identity
     private final Map<String, String> renamedTargetRefs = new HashMap<>();
     private int anchored;
@@ -161,6 +166,9 @@ final class AnchoredMerge {
         this.target = target;
         this.scope = scope;
         this.offset = offset;
+        String directory = directoryOf(scope.parent());
+        this.hashLayout = scope.layout() == null || directory == null || directory.isEmpty() ? scope.layout()
+                : scope.layout().scopedTo(directory);
     }
 
     /**
@@ -257,6 +265,7 @@ final class AnchoredMerge {
         Component sourceMain = source.getMetadata() == null ? null : source.getMetadata().getComponent();
         if (sourceMain != null && sourceMain.getBomRef() != null) {
             refMap.put(sourceMain.getBomRef(), scope.parent().getBomRef());
+            copiesByRef.put(scope.parent().getBomRef(), scope.parent());
             if (scope.parent() != target.main()) {
                 enrich(scope.parent(), sourceMain);
             }
@@ -289,10 +298,18 @@ final class AnchoredMerge {
         Component placedIn = anchoredParent != null ? anchoredParent : scope.parent();
         if (copy != null && copy != placedIn && placedIn != target.main() && !target.isWithin(copy, placedIn)) {
             copy = claimForParent(copy, c, placedIn);
+            if (directoryOf(placedIn) != null && !target.isWithin(copy, placedIn)) {
+                // an unpacked archive's content is its files: another copy of
+                // the same artifact outside it (e.g. the same jar at the top
+                // level, while the archive's own copy was excluded) is not this
+                // one. A binary's SBOM may well name such a copy: identical
+                // bytes elsewhere are that artifact.
+                copy = null;
+            }
         }
         if (copy != null) {
             enrich(copy, c);
-            map(c, copy.getBomRef());
+            map(c, copy, copy.getBomRef());
             anchored++;
             boolean binary = isBinary(copy);
             for (Component child : children) {
@@ -317,7 +334,7 @@ final class AnchoredMerge {
         String base = c.getBomRef() != null ? prefixFileRef(c.getBomRef())
                 : c.getPurl() != null ? c.getPurl() : FILE_REF_PREFIX + offset + c.getName();
         String ref = target.claimRef(base);
-        map(c, ref);
+        map(c, c, ref);
         c.setBomRef(ref);
         target.add(c, keepUnder, !scope.nestUnderMain());
         kept++;
@@ -457,29 +474,39 @@ final class AnchoredMerge {
         return layout != null && couldBeFound(c, layout) && !inLayout(c, layout) ? null : fallback;
     }
 
-    /** Whether the layout has a file at one of the component's locations (after the offset), or with its hash. */
+    /**
+     * Whether the layout ships the component. An archive unpacked into the
+     * distribution (a directory location, or the empty location marking the
+     * SBOM's root) ships as its directory, never as the packed file its hash
+     * describes. Otherwise its hash decides, when it has one in the layout's
+     * algorithm (a file at its path with other content is another build);
+     * else a file at one of its locations (after the offset).
+     */
     private boolean inLayout(Component c, ArchiveIndex layout) {
         Evidence evidence = c.getEvidence();
         if (evidence != null && evidence.getOccurrences() != null) {
             for (Occurrence o : evidence.getOccurrences()) {
                 String loc = o.getLocation();
-                if (loc == null) {
-                    continue;
+                if (loc != null && (loc.isEmpty() || loc.endsWith("/"))) {
+                    String path = offset + loc;
+                    return path.isEmpty() || layout.containsDirectory(path);
                 }
-                // an empty location is the SBOM's root, an archive unpacked at the offset
-                String path = offset + loc;
-                boolean directory = loc.isEmpty() || loc.endsWith("/");
-                if (directory ? path.isEmpty() || layout.containsDirectory(path) : layout.containsPath(path)) {
+            }
+        }
+        String hash = SbomUtils.extractHash(c, layout.normalizedAlg());
+        if (hash != null) {
+            return hashLayout.containsHash(hash);
+        }
+        if (evidence != null && evidence.getOccurrences() != null) {
+            for (Occurrence o : evidence.getOccurrences()) {
+                String loc = o.getLocation();
+                if (loc != null && layout.containsPath(offset + loc)) {
                     return true;
                 }
             }
         }
         String refPath = fileRefPath(c);
-        if (refPath != null && layout.containsPath(offset + refPath)) {
-            return true;
-        }
-        String hash = SbomUtils.extractHash(c, layout.normalizedAlg());
-        return hash != null && layout.containsHash(hash);
+        return refPath != null && layout.containsPath(offset + refPath);
     }
 
     /**
@@ -571,7 +598,8 @@ final class AnchoredMerge {
      * copy whose dependencies were unknown learns them from the source) gains
      * every mapped child it does not list yet. A child that was dropped is
      * left out, and so is a self-reference two source components anchoring
-     * to one copy would create.
+     * to one copy would create, and a child whose copy is nested in the
+     * parent's copy: containment is not a dependency.
      */
     private void mergeDependencies(Bom bom, Bom source) {
         if (source.getDependencies() == null || source.getDependencies().isEmpty()) {
@@ -599,9 +627,19 @@ final class AnchoredMerge {
                 continue;
             }
             Set<String> children = listed.computeIfAbsent(entry, AnchoredMerge::childRefs);
+            Component parentCopy = copiesByRef.get(parent);
             for (Dependency child : d.getDependencies()) {
                 String ref = mapped(child.getRef());
-                if (ref != null && !ref.equals(parent) && children.add(ref)) {
+                if (ref == null || ref.equals(parent)) {
+                    continue;
+                }
+                // containment is not a dependency: e.g. an SBOM listing what its
+                // main component ships as its dependencies
+                Component childCopy = copiesByRef.get(ref);
+                if (parentCopy != null && childCopy != null && target.isWithin(childCopy, parentCopy)) {
+                    continue;
+                }
+                if (children.add(ref)) {
                     entry.addDependency(new Dependency(ref));
                 }
             }
@@ -627,8 +665,13 @@ final class AnchoredMerge {
         return refs;
     }
 
-    /** Records the target ref of a source component; a ref seen twice keeps its first copy. */
-    private void map(Component c, String targetRef) {
+    /**
+     * Records the target copy of a source component, under the copy's ref
+     * ({@code targetRef}; for a kept component, the ref it is about to get);
+     * a source ref seen twice keeps its first copy.
+     */
+    private void map(Component c, Component copy, String targetRef) {
+        copiesByRef.putIfAbsent(targetRef, copy);
         if (c.getBomRef() != null) {
             refMap.putIfAbsent(c.getBomRef(), targetRef);
         }
