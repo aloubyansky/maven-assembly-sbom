@@ -136,6 +136,30 @@ class ArchiveAnalyzerTest {
     }
 
     @Test
+    void eachCopyOfAShadedJarNestsOnlyItsOwnBundledCopies() throws Exception {
+        // the same shaded jar ships twice: each copy bundles its own jcip copy,
+        // not one per copy of the jar
+        Path shadedJar = createShadedJarWithMultiplePomProperties("nimbus-jose-jwt-10.9.1.jar",
+                "com.nimbusds", "nimbus-jose-jwt", "10.9.1",
+                "com.github.stephenc.jcip", "jcip-annotations", "1.0-1",
+                "nimbus-content");
+        when(project.getArtifacts()).thenReturn(Set.of(
+                createArtifact("com.nimbusds", "nimbus-jose-jwt", "10.9.1", "jar", shadedJar.toFile())));
+        String hash = SbomUtils.computeHash(digest, shadedJar);
+        List<FileEntry> entries = List.of(
+                new FileEntry("lib/nimbus-jose-jwt-10.9.1.jar", hash),
+                new FileEntry("ext/nimbus-jose-jwt-10.9.1.jar", hash));
+
+        List<PackageComponent> topLevel = extractPackageComponents(createAnalyzer().analyze(entries, null));
+
+        assertEquals(2, topLevel.size());
+        assertNotEquals(topLevel.get(0).id(), topLevel.get(1).id());
+        assertEquals(1, topLevel.get(0).nested().size());
+        assertEquals(1, topLevel.get(1).nested().size());
+        assertNotEquals(topLevel.get(0).nested().get(0).id(), topLevel.get(1).nested().get(0).id());
+    }
+
+    @Test
     void unmatchedFileClassifiedCorrectly() throws Exception {
         when(project.getArtifacts()).thenReturn(Set.of());
 
