@@ -21,9 +21,11 @@ import org.cyclonedx.model.component.evidence.Occurrence;
  * Merging recognizes which of an incoming SBOM's components are copies
  * already in the target, so it looks components up by content hash, by
  * occurrence location and, inside a binary, by purl. This index answers those
- * lookups in constant time and is built once per merge, in one breadth-first
+ * lookups and is built once per merge, in one breadth-first
  * pass over the target (the main component, then the top-level components,
- * then nested ones level by level). Where several components share a hash or
+ * then nested ones level by level). Hash and location lookups are hash-map
+ * reads; purl lookups among a parent's children use an index built on first
+ * use per parent, and canonical purls are computed once per component. Where several components share a hash or
  * a location, the first one in that order wins, so a top-level copy is
  * preferred over a nested one.
  * </p>
@@ -41,6 +43,14 @@ final class MergeTarget {
     private final Bom bom;
     private final Component main;
     private final Map<String, Component> byHash = new HashMap<>();
+    // further components with a hash already in byHash, in index order (rare:
+    // the same file shipped in several places)
+    private final Map<String, List<Component>> moreByHash = new HashMap<>();
+    // canonical purl of each component, computed once
+    private final Map<Component, String> canonicalPurls = new IdentityHashMap<>();
+    // children by canonical purl, per parent (TOP for the top level), built on first use
+    private final Map<Object, Map<String, Component>> childrenByPurl = new IdentityHashMap<>();
+    private static final Object TOP = new Object();
     private final Map<String, Component> byLocation = new HashMap<>();
     private final Map<Component, Component> parents = new IdentityHashMap<>();
     private final Set<String> takenRefs = new HashSet<>();
@@ -92,6 +102,34 @@ final class MergeTarget {
     }
 
     /**
+     * Returns the component carrying the given hash, preferring one within
+     * the given context (e.g. the unpacked WAR an SBOM describes): the same
+     * file may ship in several places, and each archive's own copy belongs
+     * to it.
+     *
+     * @param hash a hash of an incoming component
+     * @param context the component whose subtree to prefer, or {@code null}
+     * @return the first such component within {@code context}, else the
+     *         first in index order, or {@code null}
+     */
+    Component byHash(Hash hash, Component context) {
+        String key = hashKey(hash);
+        if (key == null) {
+            return null;
+        }
+        Component first = byHash.get(key);
+        if (first == null || context == null || isWithin(first, context)) {
+            return first;
+        }
+        for (Component c : moreByHash.getOrDefault(key, List.of())) {
+            if (isWithin(c, context)) {
+                return c;
+            }
+        }
+        return first;
+    }
+
+    /**
      * Returns the component with the given occurrence location.
      *
      * @param location a location relative to the target's root
@@ -127,7 +165,7 @@ final class MergeTarget {
         while (!level.isEmpty()) {
             List<Component> next = null;
             for (Component c : level) {
-                if (wanted.equals(BomMerger.canonicalPurl(c.getPurl()))) {
+                if (wanted.equals(canonicalPurl(c))) {
                     return c;
                 }
                 if (c.getComponents() != null && !c.getComponents().isEmpty()) {
@@ -160,16 +198,51 @@ final class MergeTarget {
      */
     Component byPurlAmongChildren(Component parent, String purl) {
         String wanted = BomMerger.canonicalPurl(purl);
-        List<Component> children = parent == null || parent == main ? bom.getComponents() : parent.getComponents();
-        if (wanted == null || children == null) {
+        if (wanted == null) {
             return null;
         }
-        for (Component c : children) {
-            if (wanted.equals(BomMerger.canonicalPurl(c.getPurl()))) {
-                return c;
+        Object key = parent == null || parent == main ? TOP : parent;
+        Map<String, Component> index = childrenByPurl.get(key);
+        if (index == null) {
+            List<Component> children = key == TOP ? bom.getComponents() : parent.getComponents();
+            index = new HashMap<>();
+            if (children != null) {
+                for (Component c : children) {
+                    String p = canonicalPurl(c);
+                    if (p != null) {
+                        index.putIfAbsent(p, c);
+                    }
+                }
             }
+            childrenByPurl.put(key, index);
         }
-        return null;
+        return index.get(wanted);
+    }
+
+    /** The canonical purl of a component, computed once per component. */
+    private String canonicalPurl(Component c) {
+        if (c.getPurl() == null) {
+            return null;
+        }
+        return canonicalPurls.computeIfAbsent(c, k -> BomMerger.canonicalPurl(k.getPurl()));
+    }
+
+    /** Keeps a parent's child purl index current when a child is attached to it. */
+    private void indexChild(Component child, Component parent) {
+        Map<String, Component> index = childrenByPurl.get(parent == null || parent == main ? TOP : parent);
+        String p = canonicalPurl(child);
+        if (index != null && p != null) {
+            index.putIfAbsent(p, child);
+        }
+    }
+
+    /** Removes a child from its parent's child purl index when it is moved away. */
+    private void unindexChild(Component child, Component parent) {
+        Map<String, Component> index = childrenByPurl.get(parent == null || parent == main ? TOP : parent);
+        String p = canonicalPurl(child);
+        if (index != null && p != null && index.get(p) == child) {
+            index.remove(p);
+        }
     }
 
     /**
@@ -217,7 +290,7 @@ final class MergeTarget {
     }
 
     private void indexPurl(Component c) {
-        String key = BomMerger.canonicalPurl(c.getPurl());
+        String key = canonicalPurl(c);
         if (key != null) {
             List<Component> list = byPurl.computeIfAbsent(key, k -> new ArrayList<>(1));
             for (Component existing : list) {
@@ -298,6 +371,7 @@ final class MergeTarget {
      *        main component (an explicit nested merge under it)
      */
     void add(Component component, Component parent, boolean mainChildrenAtTopLevel) {
+        indexChild(component, parent == null || (parent == main && mainChildrenAtTopLevel) ? null : parent);
         if (parent == null || (parent == main && mainChildrenAtTopLevel)) {
             if (bom.getComponents() == null) {
                 bom.setComponents(new ArrayList<>());
@@ -337,6 +411,11 @@ final class MergeTarget {
      */
     void move(Component component, Component newParent) {
         Component oldParent = parents.get(component);
+        unindexChild(component, oldParent);
+        indexChild(component, newParent);
+        if (newParent.getComponents() != null && !(newParent.getComponents() instanceof ArrayList)) {
+            newParent.setComponents(new ArrayList<>(newParent.getComponents()));
+        }
         List<Component> siblings = oldParent == null ? bom.getComponents() : oldParent.getComponents();
         if (siblings != null) {
             for (int i = 0; i < siblings.size(); i++) {
@@ -408,7 +487,10 @@ final class MergeTarget {
             for (Hash h : c.getHashes()) {
                 String key = hashKey(h);
                 if (key != null) {
-                    byHash.putIfAbsent(key, c);
+                    Component existing = byHash.putIfAbsent(key, c);
+                    if (existing != null && existing != c) {
+                        moreByHash.computeIfAbsent(key, k -> new ArrayList<>(1)).add(c);
+                    }
                 }
             }
         }

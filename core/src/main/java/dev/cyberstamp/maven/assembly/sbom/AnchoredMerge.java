@@ -272,7 +272,7 @@ final class AnchoredMerge {
         ordered.sort(BomRenderer.COMPONENT_ORDER);
         for (Component c : ordered) {
             BomMerger.normalizePurls(c);
-            walk(c, topParent, topParentIsBinary);
+            walk(c, topParent, topParentIsBinary, false);
         }
     }
 
@@ -319,9 +319,24 @@ final class AnchoredMerge {
      *        {@code null} at the source's top level of a flat merge
      * @param parentIsBinary whether {@code anchoredParent} is a binary whose
      *        nested components are shaded in it
+     * @param nestedInSource whether {@code c} is nested in the source under a
+     *        component (only such a component is attributed to a binary; an
+     *        SBOM of a jar may list the jar's dependencies at its top level)
      */
-    private void walk(Component c, Component anchoredParent, boolean parentIsBinary) {
+    private void walk(Component c, Component anchoredParent, boolean parentIsBinary, boolean nestedInSource) {
         List<Component> children = c.getComponents() == null ? List.of() : List.copyOf(c.getComponents());
+        if (scope.excluded().contains(c)) {
+            // a claim the analyzer rejected: dropped, even when its hash ships
+            // (it is the hash of the file it misnamed); its children are judged
+            // on their own, in its place
+            dropped++;
+            for (Component child : children) {
+                walk(child, anchoredParent, parentIsBinary, nestedInSource);
+            }
+            return;
+        }
+        String sourceRef = c.getBomRef();
+        String sourcePurl = c.getPurl();
         Component copy = anchor(c, anchoredParent, parentIsBinary);
         Component placedIn = anchoredParent != null ? anchoredParent : scope.parent();
         if (copy != null && copy != placedIn && placedIn != target.main() && !target.isWithin(copy, placedIn)) {
@@ -337,21 +352,21 @@ final class AnchoredMerge {
         }
         if (copy != null) {
             enrich(copy, c);
-            map(c, copy, copy.getBomRef());
+            map(sourceRef, sourcePurl, copy, copy.getBomRef());
             anchored++;
             boolean binary = isBinary(copy);
             for (Component child : children) {
-                walk(child, copy, binary);
+                walk(child, copy, binary, true);
             }
             return;
         }
-        Component keepUnder = placeOf(c, anchoredParent, parentIsBinary);
+        Component keepUnder = placeOf(c, anchoredParent, parentIsBinary && nestedInSource);
         if (keepUnder == null) {
             dropped++;
             log.debug("Not merging {}: the distribution has no matching file", c.getPurl());
             // its children are judged on their own, as children of its parent
             for (Component child : children) {
-                walk(child, anchoredParent, parentIsBinary);
+                walk(child, anchoredParent, parentIsBinary, nestedInSource);
             }
             return;
         }
@@ -362,13 +377,13 @@ final class AnchoredMerge {
         String base = c.getBomRef() != null ? prefixFileRef(c.getBomRef())
                 : c.getPurl() != null ? c.getPurl() : FILE_REF_PREFIX + offset + c.getName();
         String ref = target.claimRef(base);
-        map(c, c, ref);
+        map(sourceRef, sourcePurl, c, ref);
         c.setBomRef(ref);
         target.add(c, keepUnder, !scope.nestUnderMain());
         kept++;
         boolean binary = isBinary(c);
         for (Component child : children) {
-            walk(child, c, binary);
+            walk(child, c, binary, true);
         }
     }
 
@@ -434,6 +449,20 @@ final class AnchoredMerge {
         return c;
     }
 
+    /**
+     * The nearest unpacked archive enclosing {@code component} (itself
+     * included): the context whose own copy of an artifact a hash match
+     * prefers, or {@code null} at the top level.
+     */
+    private Component contextOf(Component component) {
+        for (Component c = component; c != null && c != target.main(); c = target.parentOf(c)) {
+            if (directoryOf(c) != null) {
+                return c;
+            }
+        }
+        return null;
+    }
+
     /** Finds the copy {@code c} describes, or {@code null} (see "Anchoring"). */
     private Component anchor(Component c, Component anchoredParent, boolean parentIsBinary) {
         if (scope.excluded().contains(c)) {
@@ -456,8 +485,9 @@ final class AnchoredMerge {
             }
         }
         if (c.getHashes() != null) {
+            Component context = contextOf(anchoredParent != null ? anchoredParent : scope.parent());
             for (Hash h : c.getHashes()) {
-                Component copy = target.byHash(h);
+                Component copy = target.byHash(h, context);
                 if (copy != null) {
                     return copy;
                 }
@@ -694,17 +724,18 @@ final class AnchoredMerge {
     }
 
     /**
-     * Records the target copy of a source component, under the copy's ref
-     * ({@code targetRef}; for a kept component, the ref it is about to get);
-     * a source ref seen twice keeps its first copy.
+     * Records the target copy of a source component, by the source's own
+     * bom-ref and purl as they were before the merge changed them, under the
+     * copy's ref ({@code targetRef}); a source ref seen twice keeps its first
+     * copy.
      */
-    private void map(Component c, Component copy, String targetRef) {
+    private void map(String sourceRef, String sourcePurl, Component copy, String targetRef) {
         copiesByRef.putIfAbsent(targetRef, copy);
-        if (c.getBomRef() != null) {
-            refMap.putIfAbsent(c.getBomRef(), targetRef);
+        if (sourceRef != null) {
+            refMap.putIfAbsent(sourceRef, targetRef);
         }
-        if (c.getPurl() != null && !c.getPurl().equals(c.getBomRef())) {
-            refMap.putIfAbsent(c.getPurl(), targetRef);
+        if (sourcePurl != null && !sourcePurl.equals(sourceRef)) {
+            refMap.putIfAbsent(sourcePurl, targetRef);
         }
     }
 

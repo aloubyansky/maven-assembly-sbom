@@ -339,6 +339,81 @@ class AnchoredMergeTest {
         assertEquals(List.of("pkg:maven/io.quarkus/core@1"), dependsOn(target, "pkg:generic/quarkus-run.jar@1"));
     }
 
+    // Final review findings
+
+    @Test
+    void rejectedComponentIsNotAddedEvenThoughItsHashShips() {
+        // the external SBOM claims g:a:1 for lib/a.jar; its pom.properties say 2
+        Component copy = lib("a", "pkg:maven/g/a@2", "aa", "lib/a.jar");
+        Bom target = bom(copy);
+        ArchiveIndex layout = ArchiveIndex.of(List.of(new FileEntry("lib/a.jar", "aa"),
+                new FileEntry("lib/x.jar", "xx")), null, "SHA-256");
+        Component matchedChild = lib("x", "pkg:maven/g/x@1", "xx", "lib/x.jar");
+        Component rejected = lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar", matchedChild);
+        Set<Component> excluded = Collections.newSetFromMap(new IdentityHashMap<>());
+        excluded.add(rejected);
+        Set<Component> shipped = Collections.newSetFromMap(new IdentityHashMap<>());
+        shipped.add(matchedChild);
+
+        AnchoredMerge.merge(target, bom(rejected),
+                new AnchoredMerge.Scope(target.getMetadata().getComponent(), layout, excluded, shipped));
+
+        assertEquals(List.of("pkg:maven/g/a@2", "pkg:maven/g/x@1"),
+                target.getComponents().stream().map(Component::getPurl).toList(),
+                "the rejected claim is dropped; its matched child is lifted to its place");
+    }
+
+    @Test
+    void thinJarsUnshippedDependencyIsNotRecordedAsShaded() {
+        // a cyclonedx-maven-plugin SBOM inside a.jar lists its dependencies flat, hashed, unlocated
+        Component jar = lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar");
+        Bom target = bom(jar);
+        ArchiveIndex layout = ArchiveIndex.of(List.of(new FileEntry("lib/a.jar", "aa")), null, "SHA-256");
+
+        AnchoredMerge.Result result = AnchoredMerge.merge(target, bom(lib("y", "pkg:maven/g/y@1", "yy", null)),
+                AnchoredMerge.Scope.of(jar, layout));
+
+        assertEquals(1, result.dropped());
+        assertNull(jar.getComponents());
+    }
+
+    @Test
+    void hashMatchPrefersTheCopyInTheParentsContext() {
+        // guava ships in war1's WEB-INF/lib and at lib/; a.jar in war1 names guava
+        Component warGuava = lib("guava", "pkg:maven/g/guava@1", "gg", "web/war1/WEB-INF/lib/guava.jar");
+        warGuava.setBomRef("pkg:maven/g/guava@1#2");
+        Component jar = lib("a", "pkg:maven/g/a@1", "aa", "web/war1/WEB-INF/lib/a.jar");
+        Component war1 = war("pkg:maven/g/war1@1?type=war", "web/war1/", jar, warGuava);
+        Bom target = bom(lib("guava", "pkg:maven/g/guava@1", "gg", "lib/guava.jar"), war1);
+        Bom source = bom(lib("guava", "pkg:maven/g/guava@1", "gg", null));
+        source.getMetadata().getComponent().setBomRef("a");
+        source.addDependency(dependency("a", "pkg:maven/g/guava@1"));
+
+        AnchoredMerge.merge(target, source, AnchoredMerge.Scope.of(jar, LAYOUT));
+
+        assertEquals(List.of("pkg:maven/g/guava@1#2"), dependsOn(target, "pkg:maven/g/a@1"));
+    }
+
+    @Test
+    void splitOutCopyKeepsItsSourceRefForEdges() {
+        // syft-style UUID bom-refs; x is merged at the top level from lib/ and the war
+        Component x = lib("x", "pkg:maven/g/x@1", null, "lib/x.jar");
+        x.getEvidence().addOccurrence(evidence("web/war/WEB-INF/lib/x.jar").getOccurrences().get(0));
+        Component war = war("pkg:maven/g/war@1?type=war", "web/war/");
+        Bom target = bom(war, x);
+        Component y = npm("y", "pkg:npm/y@1", "y1", null);
+        y.setBomRef("uuid-y");
+        Component sx = lib("x", "pkg:maven/g/x@1", null, "WEB-INF/lib/x.jar");
+        sx.setBomRef("uuid-x");
+        Bom source = bom(y, sx);
+        source.addDependency(dependency("uuid-y", "uuid-x"));
+
+        AnchoredMerge.merge(target, source, AnchoredMerge.Scope.of(war, null));
+
+        Component warX = war.getComponents().stream().filter(c -> "x".equals(c.getName())).findFirst().orElseThrow();
+        assertEquals(List.of(warX.getBomRef()), dependsOn(target, y.getBomRef()), "y keeps its own ref, " + y.getBomRef());
+    }
+
     // Regression tests from the Artemis comparison
 
     private static Component war(String purl, String directory, Component... nested) {
