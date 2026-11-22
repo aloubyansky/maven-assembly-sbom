@@ -53,7 +53,7 @@ The project includes two SBOM generators:
         <dependency>
             <groupId>dev.cyberstamp.maven.assembly.sbom</groupId>
             <artifactId>assembly-sbom-handler</artifactId>
-            <version>0.1.10</version>
+            <version>0.1.11</version>
         </dependency>
     </dependencies>
     <!-- executions... -->
@@ -325,7 +325,7 @@ The goal runs before the archive is packaged. For a `war` module, it leaves out 
 <plugin>
     <groupId>dev.cyberstamp.maven.assembly.sbom</groupId>
     <artifactId>assembly-sbom-maven-plugin</artifactId>
-    <version>0.1.10</version>
+    <version>0.1.11</version>
     <executions>
         <execution>
             <goals>
@@ -365,7 +365,7 @@ Combines multiple CycloneDX SBOMs into a single BOM. This is useful when a proje
 <plugin>
     <groupId>dev.cyberstamp.maven.assembly.sbom</groupId>
     <artifactId>assembly-sbom-maven-plugin</artifactId>
-    <version>0.1.10</version>
+    <version>0.1.11</version>
     <executions>
         <execution>
             <goals>
