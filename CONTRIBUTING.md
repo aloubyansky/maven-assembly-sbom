@@ -62,6 +62,16 @@ All submissions need to be reviewed before being merged.
 - **Tests**: Don't forget to include tests in your pull requests. Bug fixes and new features should be accompanied by automated tests.
 - **Documentation**: If your change modifies user-facing behavior, configuration options, or adds a feature, keep the documentation up to date.
 
+#### Changing SBOM merging
+
+Merging an SBOM is fragile: a wrong assumption still produces a plausible SBOM. A change to the anchoring or keep/drop rules in `AnchoredMerge` must, in the same commit, update:
+
+- the rule's `MergeReport.Anchor` or `MergeReport.Outcome` value, how it is counted and whether it confirms an SBOM by hash (`MergeReport.isLocation`, `MergeReport.confirms`, `MergeReport.verdict`), and the case detection (`AnchoredMerge.caseOf`, `MergeCase`);
+- the README sections [Supported merges](README.md#supported-merges) and [How SBOMs Are Merged](README.md#how-sboms-are-merged);
+- the per-value tests in `AnchoredMergeTest` and `MergeReportTest`, and the per-case end-to-end tests in `SbomContainerDescriptorHandlerTest`.
+
+The exhaustive `switch` expressions over these enums do not compile until a new value is classified, and `ReadmeMergeCasesTest` fails when a merge case has no README subsection. They catch part of a missed update, not all of it.
+
 ## Setup
 
 ### Prerequisites

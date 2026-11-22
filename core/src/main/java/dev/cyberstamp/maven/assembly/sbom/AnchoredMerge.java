@@ -1,12 +1,15 @@
 package dev.cyberstamp.maven.assembly.sbom;
 
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
 
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
@@ -80,6 +83,18 @@ import org.slf4j.LoggerFactory;
  * prefixed with the root offset, and its bom-ref is made unique with
  * {@code #n} if taken.
  * </p>
+ *
+ * <h2>Reporting</h2>
+ * <p>
+ * Every anchoring rule above is a {@link MergeReport.Anchor} and every fate of
+ * a component that does not anchor is a {@link MergeReport.Outcome}; the
+ * {@link Result#report() report} counts them and says whether the
+ * distribution confirmed the SBOM by hash, by {@link MergeCase}
+ * ({@link #caseOf}).
+ * Changing a rule means updating {@link MergeReport}, the README sections
+ * "Supported merges" and "How SBOMs Are Merged", and the per-value tests in
+ * {@code AnchoredMergeTest} and {@code MergeReportTest}.
+ * </p>
  */
 final class AnchoredMerge {
 
@@ -106,9 +121,30 @@ final class AnchoredMerge {
      * @param nestUnderMain {@code true} to nest components kept under the
      *        target's main component in it (an explicit nested merge under
      *        it), {@code false} to make them top-level components
+     * @param embedded {@code true} for an SBOM found inside a distributed
+     *        artifact, which makes it an {@link MergeCase#EMBEDDED embedded}
+     *        SBOM (see
+     *        {@link AnchoredMerge#caseOf})
      */
     record Scope(Component parent, ArchiveIndex layout, Set<Component> excluded, Set<Component> shipped,
-            boolean nestUnderMain) {
+            boolean nestUnderMain, boolean embedded) {
+
+        /**
+         * A scope for an SBOM that was not found inside a distributed
+         * artifact.
+         *
+         * @param parent the target copy the SBOM describes, or the main
+         *        component
+         * @param layout the distribution's files, or {@code null}
+         * @param excluded source components that must not anchor
+         * @param shipped source components already known to ship
+         * @param nestUnderMain whether components kept under the main
+         *        component are nested in it
+         */
+        Scope(Component parent, ArchiveIndex layout, Set<Component> excluded, Set<Component> shipped,
+                boolean nestUnderMain) {
+            this(parent, layout, excluded, shipped, nestUnderMain, false);
+        }
 
         /**
          * A scope that keeps the source's top-level components at the top
@@ -134,6 +170,19 @@ final class AnchoredMerge {
         static Scope of(Component parent, ArchiveIndex layout) {
             return new Scope(parent, layout, Set.of(), Set.of());
         }
+
+        /**
+         * A scope for an SBOM found inside a distributed artifact, merged
+         * under that artifact's copy.
+         *
+         * @param parent the copy the SBOM was found in, or the target's main
+         *        component when that artifact has no copy
+         * @param layout the distribution's files
+         * @return the scope
+         */
+        static Scope embedded(Component parent, ArchiveIndex layout) {
+            return new Scope(parent, layout, Set.of(), Set.of(), false, true);
+        }
     }
 
     /**
@@ -144,8 +193,19 @@ final class AnchoredMerge {
      * @param anchored the number of source components anchored to a copy
      * @param kept the number of source components added to the target
      * @param dropped the number of source components dropped
+     * @param report how each component was anchored, kept or dropped, and
+     *        whether the distribution confirmed the SBOM
      */
-    record Result(Map<String, String> refMap, int anchored, int kept, int dropped) {
+    record Result(Map<String, String> refMap, int anchored, int kept, int dropped, MergeReport report) {
+    }
+
+    /**
+     * A copy a source component anchored to, and the rule it anchored by.
+     *
+     * @param copy the target copy
+     * @param how the anchoring rule
+     */
+    private record Anchored(Component copy, MergeReport.Anchor how) {
     }
 
     private final MergeTarget target;
@@ -162,6 +222,13 @@ final class AnchoredMerge {
     private int anchored;
     private int kept;
     private int dropped;
+    private final MergeCase mergeCase;
+    private final Map<MergeReport.Anchor, Integer> anchorCounts = new EnumMap<>(MergeReport.Anchor.class);
+    private final Map<MergeReport.Outcome, Integer> outcomeCounts = new EnumMap<>(MergeReport.Outcome.class);
+    private final SortedSet<String> uncheckedTypes = new TreeSet<>();
+    private int hashCheckable;
+    private int hashVerified;
+    private int locationOnly;
 
     /**
      * Creates the state of one merge.
@@ -175,6 +242,7 @@ final class AnchoredMerge {
         this.target = target;
         this.scope = scope;
         this.offset = offset;
+        this.mergeCase = caseOf(scope, target.main());
         String directory = directoryOf(scope.parent());
         this.hashLayout = scope.layout() == null || directory == null || directory.isEmpty() ? scope.layout()
                 : scope.layout().scopedTo(directory);
@@ -196,6 +264,7 @@ final class AnchoredMerge {
     static Result merge(Bom target, Bom source, Scope scope) {
         MergeTarget index = MergeTarget.of(target);
         String offset = rootOffset(source, index);
+        boolean rootConfirmed = offset != null;
         if (offset == null) {
             // no hashed copy shows where the root sits: an unpacked parent's
             // SBOM is relative to its directory, any other one to the root
@@ -203,6 +272,14 @@ final class AnchoredMerge {
             offset = directory == null ? "" : directory;
         }
         AnchoredMerge merge = new AnchoredMerge(index, scope, offset);
+        // compared before the merge enriches the jar with the SBOM's top component
+        Component sourceMain = source.getMetadata() == null ? null : source.getMetadata().getComponent();
+        MergeReport.TopComponent top = merge.mergeCase != MergeCase.EMBEDDED
+                ? MergeReport.TopComponent.NOT_APPLICABLE
+                : scope.parent() == index.main() ? MergeReport.TopComponent.NO_COPY
+                        : MergeReport.compareTop(sourceMain, scope.parent());
+        String topPurl = sourceMain == null ? null : sourceMain.getPurl();
+        String parentPurl = scope.parent().getPurl();
         merge.mergeComponents(source);
         merge.mergeSourceMain(source);
         merge.renameTargetRefs(target);
@@ -210,7 +287,31 @@ final class AnchoredMerge {
         if (!merge.renamedTargetRefs.isEmpty()) {
             merge.refMap.replaceAll((sourceRef, ref) -> merge.renamedTargetRefs.getOrDefault(ref, ref));
         }
-        return new Result(merge.refMap, merge.anchored, merge.kept, merge.dropped);
+        boolean unpacked = merge.mergeCase == MergeCase.EMBEDDED && scope.parent() != index.main()
+                && directoryOf(scope.parent()) != null;
+        MergeReport report = new MergeReport(merge.mergeCase, unpacked, merge.anchorCounts, merge.outcomeCounts,
+                merge.hashCheckable, merge.hashVerified, merge.locationOnly, rootConfirmed, offset, top,
+                top == MergeReport.TopComponent.NOT_APPLICABLE ? null : topPurl,
+                top == MergeReport.TopComponent.NOT_APPLICABLE ? null : parentPurl, merge.uncheckedTypes);
+        return new Result(merge.refMap, merge.anchored, merge.kept, merge.dropped, report);
+    }
+
+    /**
+     * Classifies a merge into its {@link MergeCase}, from where it is merged.
+     *
+     * @param scope where the SBOM is merged
+     * @param targetMain the target's main component
+     * @return {@link MergeCase#FINISHED} without a layout; else
+     *         {@link MergeCase#EMBEDDED} for an SBOM found inside a shipped
+     *         artifact, packed or unpacked, including one whose artifact has
+     *         no copy (merged under {@code targetMain}); else
+     *         {@link MergeCase#EXTERNAL}
+     */
+    static MergeCase caseOf(Scope scope, Component targetMain) {
+        if (scope.layout() == null) {
+            return MergeCase.FINISHED;
+        }
+        return scope.embedded() ? MergeCase.EMBEDDED : MergeCase.EXTERNAL;
     }
 
     /**
@@ -315,9 +416,9 @@ final class AnchoredMerge {
         // in the target (e.g. a Quarkus application's quarkus-run.jar).
         Component copy = scope.parent();
         if (copy == target.main()) {
-            Component anchoredMain = anchor(sourceMain, null, false);
-            if (anchoredMain != null && anchoredMain != target.main()) {
-                copy = anchoredMain;
+            Anchored anchoredMain = anchor(sourceMain, null, false);
+            if (anchoredMain != null && anchoredMain.copy() != target.main()) {
+                copy = anchoredMain.copy();
             }
         }
         refMap.put(sourceMain.getBomRef(), copy.getBomRef());
@@ -346,6 +447,7 @@ final class AnchoredMerge {
             // (it is the hash of the file it misnamed); its children are judged
             // on their own, in its place
             dropped++;
+            count(MergeReport.Outcome.EXCLUDED);
             for (Component child : children) {
                 walk(child, anchoredParent, parentIsBinary, nestedInSource);
             }
@@ -353,7 +455,13 @@ final class AnchoredMerge {
         }
         String sourceRef = c.getBomRef();
         String sourcePurl = c.getPurl();
-        Component copy = anchor(c, anchoredParent, parentIsBinary);
+        if (scope.layout() != null && SbomUtils.extractHash(c, scope.layout().normalizedAlg()) != null) {
+            hashCheckable++;
+        }
+        Anchored anchoredBy = anchor(c, anchoredParent, parentIsBinary);
+        Component copy = anchoredBy == null ? null : anchoredBy.copy();
+        // compared before the merge gives the copy the source's hashes
+        boolean hashAgrees = copy != null && MergeReport.sharesHash(copy, c);
         Component placedIn = anchoredParent != null ? anchoredParent : scope.parent();
         if (copy != null && copy != placedIn && placedIn != target.main() && !target.isWithin(copy, placedIn)) {
             copy = claimForParent(copy, c, placedIn);
@@ -370,13 +478,25 @@ final class AnchoredMerge {
             enrich(copy, c);
             map(sourceRef, sourcePurl, copy, copy.getBomRef());
             anchored++;
+            anchorCounts.merge(anchoredBy.how(), 1, Integer::sum);
+            if (hashAgrees) {
+                hashVerified++;
+            } else if (MergeReport.isLocation(anchoredBy.how())) {
+                locationOnly++;
+            }
             boolean binary = isBinary(copy);
             for (Component child : children) {
                 walk(child, copy, binary, true);
             }
             return;
         }
-        Component keepUnder = placeOf(c, anchoredParent, parentIsBinary && nestedInSource);
+        boolean attributable = parentIsBinary && nestedInSource;
+        MergeReport.Outcome outcome = outcomeOf(c, anchoredParent, attributable);
+        count(outcome);
+        if (outcome == MergeReport.Outcome.KEPT_UNCHECKED) {
+            uncheckedTypes.add(typeOf(c));
+        }
+        Component keepUnder = placeOf(outcome, anchoredParent);
         if (keepUnder == null) {
             dropped++;
             log.debug("Not merging {}: the distribution has no matching file", c.getPurl());
@@ -480,8 +600,15 @@ final class AnchoredMerge {
         return null;
     }
 
-    /** Finds the copy {@code c} describes, or {@code null} (see "Anchoring"). */
-    private Component anchor(Component c, Component anchoredParent, boolean parentIsBinary) {
+    /**
+     * Finds the copy {@code c} describes (see "Anchoring").
+     *
+     * @param c the source component
+     * @param anchoredParent the target copy of its source parent, or {@code null}
+     * @param parentIsBinary whether {@code anchoredParent} is a binary
+     * @return the copy and the rule it anchored by, or {@code null}
+     */
+    private Anchored anchor(Component c, Component anchoredParent, boolean parentIsBinary) {
         if (scope.excluded().contains(c)) {
             return null;
         }
@@ -497,7 +624,8 @@ final class AnchoredMerge {
                 // locations are relative to the SBOM's root, which sits at the offset
                 Component copy = target.byLocation(offset + loc);
                 if (copy != null && !hashesConflict(copy, c)) {
-                    return copy;
+                    return new Anchored(copy,
+                            loc.endsWith("/") ? MergeReport.Anchor.DIRECTORY : MergeReport.Anchor.LOCATION);
                 }
             }
         }
@@ -506,7 +634,7 @@ final class AnchoredMerge {
             for (Hash h : c.getHashes()) {
                 Component copy = target.byHash(h, context);
                 if (copy != null) {
-                    return copy;
+                    return new Anchored(copy, MergeReport.Anchor.HASH);
                 }
             }
         }
@@ -516,7 +644,7 @@ final class AnchoredMerge {
         if (!located && parentIsBinary && anchoredParent != null) {
             Component copy = target.byPurlWithin(anchoredParent, c.getPurl());
             if (copy != null) {
-                return copy;
+                return new Anchored(copy, MergeReport.Anchor.PURL_IN_BINARY);
             }
         }
         Component sibling = target.byPurlAmongChildren(anchoredParent != null ? anchoredParent : scope.parent(),
@@ -524,64 +652,129 @@ final class AnchoredMerge {
         // a hash conflict here means the source describes another build of
         // the same artifact; mergeHashes then keeps the copy's own hashes
         if (sibling != null) {
-            return sibling;
+            return new Anchored(sibling, MergeReport.Anchor.PURL_AMONG_CHILDREN);
         }
         String directory = directoryOf(anchoredParent != null ? anchoredParent : scope.parent());
-        return directory == null ? null : target.byPurlUnderDirectory(c.getPurl(), directory);
+        Component underDirectory = directory == null ? null : target.byPurlUnderDirectory(c.getPurl(), directory);
+        return underDirectory == null ? null : new Anchored(underDirectory, MergeReport.Anchor.PURL_UNDER_DIRECTORY);
     }
 
     /**
-     * Decides where an unanchored component is kept (see "Components that do
-     * not anchor").
+     * Decides what becomes of a component that did not anchor (see
+     * "Components that do not anchor").
      *
+     * @param c the source component
+     * @param anchoredParent the target copy of its source parent, or {@code null}
+     * @param attributable whether it is nested in the source under a component
+     *        that anchored to a binary
+     * @return the outcome; never {@link MergeReport.Outcome#EXCLUDED}, which
+     *         is decided before anchoring
+     */
+    private MergeReport.Outcome outcomeOf(Component c, Component anchoredParent, boolean attributable) {
+        if (scope.shipped().contains(c)) {
+            return MergeReport.Outcome.KEPT_SHIPPED;
+        }
+        if (firstLocation(c) == null && attributable && anchoredParent != null) {
+            return MergeReport.Outcome.KEPT_ATTRIBUTED;
+        }
+        ArchiveIndex layout = scope.layout();
+        if (layout == null || !couldBeFound(c, layout)) {
+            return MergeReport.Outcome.KEPT_UNCHECKED;
+        }
+        MergeReport.Outcome shown = shownBy(c, layout);
+        return shown == null ? MergeReport.Outcome.DROPPED : shown;
+    }
+
+    /**
+     * Where a component that did not anchor is kept.
+     *
+     * @param outcome what becomes of it
+     * @param anchoredParent the target copy of its source parent, or {@code null}
      * @return the component to nest it in (the target's main component for
      *         the top level), or {@code null} to drop it
      */
-    private Component placeOf(Component c, Component anchoredParent, boolean parentIsBinary) {
-        Component fallback = anchoredParent != null ? anchoredParent : scope.parent();
-        if (scope.shipped().contains(c)) {
-            return fallback;
-        }
-        if (firstLocation(c) == null && parentIsBinary && anchoredParent != null) {
-            return anchoredParent;
-        }
-        ArchiveIndex layout = scope.layout();
-        return layout != null && couldBeFound(c, layout) && !inLayout(c, layout) ? null : fallback;
+    private Component placeOf(MergeReport.Outcome outcome, Component anchoredParent) {
+        return switch (outcome) {
+            case EXCLUDED, DROPPED -> null;
+            case KEPT_ATTRIBUTED -> anchoredParent;
+            case KEPT_SHIPPED, KEPT_HASH_IN_LAYOUT, KEPT_PATH_IN_LAYOUT, KEPT_DIRECTORY_IN_LAYOUT, KEPT_UNCHECKED ->
+                anchoredParent != null ? anchoredParent : scope.parent();
+        };
     }
 
     /**
-     * Whether the layout ships the component. An archive unpacked into the
-     * distribution (a directory location, or the empty location marking the
-     * SBOM's root) ships as its directory, never as the packed file its hash
-     * describes. Otherwise its hash decides, when it has one in the layout's
-     * algorithm (a file at its path with other content is another build);
-     * else a file at one of its locations (after the offset).
+     * Whether, and how, the layout ships the component. An archive unpacked
+     * into the distribution (a directory location, or the empty location
+     * marking the SBOM's root) ships as its directory, never as the packed
+     * file its hash describes. Otherwise its hash decides, when it has one in
+     * the layout's algorithm (a file at its path with other content is
+     * another build); else a file at one of its locations (after the offset).
+     *
+     * @param c the source component
+     * @param layout the distribution's files
+     * @return {@link MergeReport.Outcome#KEPT_DIRECTORY_IN_LAYOUT},
+     *         {@link MergeReport.Outcome#KEPT_HASH_IN_LAYOUT} or
+     *         {@link MergeReport.Outcome#KEPT_PATH_IN_LAYOUT} when the layout
+     *         shows it, {@code null} when it does not
      */
-    private boolean inLayout(Component c, ArchiveIndex layout) {
+    private MergeReport.Outcome shownBy(Component c, ArchiveIndex layout) {
         Evidence evidence = c.getEvidence();
         if (evidence != null && evidence.getOccurrences() != null) {
             for (Occurrence o : evidence.getOccurrences()) {
                 String loc = o.getLocation();
                 if (loc != null && (loc.isEmpty() || loc.endsWith("/"))) {
                     String path = offset + loc;
-                    return path.isEmpty() || layout.containsDirectory(path);
+                    return path.isEmpty() || layout.containsDirectory(path)
+                            ? MergeReport.Outcome.KEPT_DIRECTORY_IN_LAYOUT
+                            : null;
                 }
             }
         }
         String hash = SbomUtils.extractHash(c, layout.normalizedAlg());
         if (hash != null) {
-            return hashLayout.containsHash(hash);
+            return hashLayout.containsHash(hash) ? MergeReport.Outcome.KEPT_HASH_IN_LAYOUT : null;
         }
         if (evidence != null && evidence.getOccurrences() != null) {
             for (Occurrence o : evidence.getOccurrences()) {
                 String loc = o.getLocation();
                 if (loc != null && layout.containsPath(offset + loc)) {
-                    return true;
+                    return MergeReport.Outcome.KEPT_PATH_IN_LAYOUT;
                 }
             }
         }
         String refPath = fileRefPath(c);
-        return refPath != null && layout.containsPath(offset + refPath);
+        return refPath != null && layout.containsPath(offset + refPath) ? MergeReport.Outcome.KEPT_PATH_IN_LAYOUT
+                : null;
+    }
+
+    /**
+     * Counts a component's outcome, and whether it confirms the SBOM.
+     *
+     * @param outcome what became of the component
+     */
+    private void count(MergeReport.Outcome outcome) {
+        outcomeCounts.merge(outcome, 1, Integer::sum);
+        if (MergeReport.confirms(outcome, mergeCase)) {
+            hashVerified++;
+        }
+    }
+
+    /**
+     * The ecosystem of a component kept unchecked, for the report: its purl
+     * type, {@code file} for a file without a purl, else {@code unknown}.
+     *
+     * @param c the component
+     * @return the type
+     */
+    private static String typeOf(Component c) {
+        String purl = c.getPurl();
+        if (purl != null && purl.startsWith("pkg:")) {
+            int slash = purl.indexOf('/', 4);
+            if (slash > 4) {
+                return purl.substring(4, slash);
+            }
+        }
+        return c.getType() == Component.Type.FILE ? "file" : "unknown";
     }
 
     /**

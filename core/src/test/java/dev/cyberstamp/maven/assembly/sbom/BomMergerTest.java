@@ -1465,6 +1465,25 @@ class BomMergerTest {
         return occ;
     }
 
+    @Test
+    void finishedMergeReportsCountsWithoutWarning() {
+        Bom target = buildTargetBom("app", createLibrary("org.a", "a", "1", "pkg:maven/org.a/a@1"));
+        Component unrelated = createLibrary("org.b", "b", "1", "pkg:maven/org.b/b@1");
+        unrelated.addHash(new Hash("SHA-256", "bb"));
+        unrelated.setEvidence(evidenceWithOccurrence("lib/b.jar"));
+
+        MergeReport flat = BomMerger.mergeFlatReporting(target, buildSourceBom(unrelated));
+        MergeReport nested = BomMerger.mergeUnderReporting(target, "app",
+                buildSourceBom(createLibrary("org.c", "c", "1", "pkg:maven/org.c/c@1")));
+
+        assertEquals(MergeCase.FINISHED, flat.mergeCase());
+        assertNull(flat.warning());
+        assertEquals(1, flat.outcomes().get(MergeReport.Outcome.KEPT_UNCHECKED));
+        assertEquals("1 kept unchecked (maven)", flat.describe());
+        assertEquals(MergeCase.FINISHED, nested.mergeCase());
+        assertNull(nested.warning());
+    }
+
     private static Bom buildTargetBom(String mainBomRef, Component... components) {
         Bom bom = new Bom();
         Metadata metadata = new Metadata();

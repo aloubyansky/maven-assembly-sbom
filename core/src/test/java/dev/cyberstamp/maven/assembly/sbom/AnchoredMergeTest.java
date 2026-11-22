@@ -24,6 +24,11 @@ import org.cyclonedx.model.Property;
 import org.cyclonedx.model.component.evidence.Occurrence;
 import org.junit.jupiter.api.Test;
 
+import dev.cyberstamp.maven.assembly.sbom.MergeReport.Anchor;
+import dev.cyberstamp.maven.assembly.sbom.MergeReport.Outcome;
+import dev.cyberstamp.maven.assembly.sbom.MergeReport.TopComponent;
+import dev.cyberstamp.maven.assembly.sbom.MergeReport.Verdict;
+
 class AnchoredMergeTest {
 
     private static final ArchiveIndex LAYOUT = ArchiveIndex.of(List.of(), null, "SHA-256");
@@ -644,6 +649,349 @@ class AnchoredMergeTest {
                 bom(lib("tool", "pkg:generic/tool.jar@1", "tt", "lib/tool.jar")), flat(target, LAYOUT));
 
         assertEquals(1, result.dropped());
+    }
+
+    @Test
+    void reportsAnchorByLocation() {
+        Bom target = bom(lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar"));
+
+        MergeReport report = AnchoredMerge.merge(target, bom(lib("a", "pkg:maven/g/other@1", "aa", "lib/a.jar")),
+                flat(target, LAYOUT)).report();
+
+        assertEquals(1, report.anchors().get(Anchor.LOCATION));
+        assertEquals(1, report.hashVerified(), "the location match shares the copy's hash");
+        assertEquals(0, report.locationOnly());
+    }
+
+    @Test
+    void locationMatchWithoutACommonHashIsUnverified() {
+        Bom target = bom(lib("a", "pkg:maven/g/a@1", null, "lib/a.jar"));
+
+        MergeReport report = AnchoredMerge.merge(target, bom(lib("a", "pkg:maven/g/other@1", null, "lib/a.jar")),
+                flat(target, LAYOUT)).report();
+
+        assertEquals(1, report.anchors().get(Anchor.LOCATION));
+        assertEquals(0, report.hashVerified());
+        assertEquals(1, report.locationOnly());
+    }
+
+    @Test
+    void hashAddedByTheMergeIsNotAgreement() {
+        // the copy has no hash; the merge gives it the source's, which proves nothing
+        Component copy = lib("a", "pkg:maven/g/a@1", null, "lib/a.jar");
+        Bom target = bom(copy);
+
+        MergeReport report = AnchoredMerge.merge(target, bom(lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar")),
+                flat(target, LAYOUT)).report();
+
+        assertEquals("aa", copy.getHashes().get(0).getValue(), "precondition: the merge enriched the copy");
+        assertEquals(0, report.hashVerified());
+        assertEquals(1, report.locationOnly());
+    }
+
+    @Test
+    void reportsAnchorByDirectoryLocation() {
+        Bom target = bom(war("pkg:maven/g/app@1?type=war", "web/app.war/"));
+
+        MergeReport report = AnchoredMerge.merge(target,
+                bom(lib("app", "pkg:maven/g/app@1?type=war", null, "web/app.war/")), flat(target, LAYOUT)).report();
+
+        assertEquals(1, report.anchors().get(Anchor.DIRECTORY));
+        assertEquals(0, report.hashVerified(), "any unpacked parent shows its own directory");
+        assertEquals(1, report.locationOnly());
+    }
+
+    @Test
+    void reportsAnchorByHash() {
+        Bom target = bom(lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar"));
+
+        MergeReport report = AnchoredMerge.merge(target, bom(lib("a", "pkg:maven/g/a@1", "aa", "x/a.jar")),
+                flat(target, LAYOUT)).report();
+
+        assertEquals(1, report.anchors().get(Anchor.HASH));
+        assertEquals(1, report.hashVerified());
+    }
+
+    @Test
+    void reportsAnchorByPurlInBinary() {
+        Bom target = bom(lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar", lib("x", "pkg:maven/g/x@1", null, null)));
+
+        MergeReport report = AnchoredMerge.merge(target,
+                bom(lib("a", "pkg:maven/g/a@1", "aa", null, lib("x", "pkg:maven/g/x@1", null, null))),
+                flat(target, LAYOUT)).report();
+
+        assertEquals(1, report.anchors().get(Anchor.HASH));
+        assertEquals(1, report.anchors().get(Anchor.PURL_IN_BINARY));
+        assertEquals(1, report.hashVerified(), "only the hash confirms");
+    }
+
+    @Test
+    void reportsAnchorByPurlAmongChildren() {
+        Bom target = bom(lib("a", "pkg:maven/g/a@1", null, null));
+
+        MergeReport report = AnchoredMerge.merge(target, bom(lib("a", "pkg:maven/g/a@1", null, null)),
+                flat(target, LAYOUT)).report();
+
+        assertEquals(1, report.anchors().get(Anchor.PURL_AMONG_CHILDREN));
+        assertEquals(0, report.hashVerified());
+        assertEquals(0, report.hashCheckable());
+    }
+
+    @Test
+    void reportsAnchorByPurlUnderDirectory() {
+        Component war = war("pkg:maven/g/app@1?type=war", "web/app.war/");
+        Bom target = bom(war, lib("x", "pkg:maven/g/x@1", null, "web/app.war/WEB-INF/lib/x.jar"));
+
+        MergeReport report = AnchoredMerge.merge(target, bom(lib("x", "pkg:maven/g/x@1", null, null)),
+                AnchoredMerge.Scope.embedded(war, LAYOUT)).report();
+
+        assertEquals(1, report.anchors().get(Anchor.PURL_UNDER_DIRECTORY));
+        assertEquals(0, report.hashVerified());
+    }
+
+    @Test
+    void reportsExcluded() {
+        Bom target = bom(lib("a", "pkg:maven/g/a@2", "aa", "lib/a.jar"));
+        Component rejected = lib("a", "pkg:maven/g/a@1", "aa", null);
+        Set<Component> excluded = Collections.newSetFromMap(new IdentityHashMap<>());
+        excluded.add(rejected);
+
+        MergeReport report = AnchoredMerge.merge(target, bom(rejected),
+                new AnchoredMerge.Scope(target.getMetadata().getComponent(), LAYOUT, excluded, Set.of())).report();
+
+        assertEquals(1, report.outcomes().get(Outcome.EXCLUDED));
+        assertEquals(0, report.hashCheckable(), "a rejected claim is not checked");
+    }
+
+    @Test
+    void reportsKeptShipped() {
+        Bom target = bom();
+        Component matched = lib("x", "pkg:maven/g/x@1", "xx", "lib/x.jar");
+        Set<Component> shipped = Collections.newSetFromMap(new IdentityHashMap<>());
+        shipped.add(matched);
+
+        MergeReport report = AnchoredMerge.merge(target, bom(matched),
+                new AnchoredMerge.Scope(target.getMetadata().getComponent(), LAYOUT, Set.of(), shipped)).report();
+
+        assertEquals(1, report.outcomes().get(Outcome.KEPT_SHIPPED));
+        assertEquals(1, report.hashVerified());
+        assertEquals(Verdict.CONFIRMED, report.verdict());
+    }
+
+    @Test
+    void reportsKeptHashInLayout() {
+        Bom target = bom();
+        ArchiveIndex layout = ArchiveIndex.of(List.of(new FileEntry("lib/x.jar", "xx")), null, "SHA-256");
+
+        MergeReport report = AnchoredMerge.merge(target, bom(lib("x", "pkg:maven/g/x@1", "xx", "lib/x.jar")),
+                flat(target, layout)).report();
+
+        assertEquals(1, report.outcomes().get(Outcome.KEPT_HASH_IN_LAYOUT));
+        assertEquals(1, report.hashVerified());
+    }
+
+    @Test
+    void reportsKeptByPathInLayout() {
+        Bom target = bom();
+        ArchiveIndex layout = ArchiveIndex.of(List.of(new FileEntry("lib/x.jar", "xx")), null, "SHA-256");
+
+        MergeReport report = AnchoredMerge.merge(target, bom(lib("x", "pkg:maven/g/x@1", null, "lib/x.jar")),
+                flat(target, layout)).report();
+
+        assertEquals(1, report.outcomes().get(Outcome.KEPT_PATH_IN_LAYOUT));
+        assertEquals(0, report.hashVerified(), "a file at the path is not the same file");
+        assertEquals(Verdict.NOTHING_TO_CHECK, report.verdict());
+    }
+
+    @Test
+    void reportsKeptDirectoryInLayout() {
+        Component war = war("pkg:maven/g/app@1?type=war", "web/app.war/");
+        Bom target = bom(war);
+        ArchiveIndex layout = ArchiveIndex.of(List.of(new FileEntry("web/app.war/index.html", "ii")), null, "SHA-256");
+        Component upstream = lib("upstream", "pkg:maven/g/upstream@1?type=war", "packed-war-hash", null);
+        upstream.setEvidence(evidence(""));
+
+        MergeReport report = AnchoredMerge.merge(target, bom(upstream), AnchoredMerge.Scope.embedded(war, layout))
+                .report();
+
+        assertEquals(1, report.outcomes().get(Outcome.KEPT_DIRECTORY_IN_LAYOUT));
+        assertEquals(0, report.hashVerified(), "the WAR's directory exists whatever the SBOM describes");
+    }
+
+    @Test
+    void reportsKeptAttributed() {
+        Bom target = bom(lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar"));
+
+        MergeReport report = AnchoredMerge.merge(target,
+                bom(lib("a", "pkg:maven/g/a@1", "aa", null, lib("x", "pkg:maven/g/x@1", null, null))),
+                flat(target, LAYOUT)).report();
+
+        assertEquals(1, report.outcomes().get(Outcome.KEPT_ATTRIBUTED));
+    }
+
+    @Test
+    void reportsKeptUnchecked() {
+        Bom target = bom();
+
+        MergeReport report = AnchoredMerge.merge(target,
+                bom(npm("react", "pkg:npm/react@19", "sha", "node_modules/react/index.js")), flat(target, LAYOUT))
+                .report();
+
+        assertEquals(1, report.outcomes().get(Outcome.KEPT_UNCHECKED));
+        assertEquals(List.of("npm"), List.copyOf(report.uncheckedTypes()));
+        assertEquals(0, report.hashCheckable(), "an SHA-512 integrity hash is not in the layout's algorithm");
+        assertEquals(Verdict.NOTHING_TO_CHECK, report.verdict());
+        assertNull(report.warning());
+    }
+
+    @Test
+    void reportsDropped() {
+        Bom target = bom();
+
+        MergeReport report = AnchoredMerge.merge(target, bom(lib("x", "pkg:maven/g/x@1", "xx", "lib/x.jar")),
+                flat(target, LAYOUT)).report();
+
+        assertEquals(1, report.outcomes().get(Outcome.DROPPED));
+        assertEquals(1, report.hashCheckable());
+        assertEquals("none of its content hashes was found in the distribution: "
+                + "it may not describe what it was merged into", report.warning());
+    }
+
+    @Test
+    void droppedWithoutAHashIsNoReasonToWarn() {
+        Bom target = bom();
+
+        MergeReport report = AnchoredMerge.merge(target, bom(lib("x", "pkg:maven/g/x@1", null, "lib/x.jar")),
+                flat(target, LAYOUT)).report();
+
+        assertEquals(1, report.outcomes().get(Outcome.DROPPED));
+        assertEquals(0, report.hashCheckable());
+        assertNull(report.warning());
+    }
+
+    @Test
+    void caseOfAFlatMergeWithALayoutIsExternal() {
+        Bom target = bom();
+
+        assertEquals(MergeCase.EXTERNAL, AnchoredMerge.merge(target, bom(), flat(target, LAYOUT)).report().mergeCase());
+    }
+
+    @Test
+    void caseOfAMergeWithoutALayoutIsFinished() {
+        Bom target = bom();
+
+        assertEquals(MergeCase.FINISHED, AnchoredMerge.merge(target, bom(), flat(target, null)).report().mergeCase());
+    }
+
+    @Test
+    void caseOfAnEmbeddedSbomUnderAWarDirectoryIsEmbeddedAndUnpacked() {
+        Component war = war("pkg:maven/g/app@1?type=war", "web/app.war/");
+        Bom target = bom(war);
+
+        MergeReport report = AnchoredMerge.merge(target, bom(), AnchoredMerge.Scope.embedded(war, LAYOUT)).report();
+
+        assertEquals(MergeCase.EMBEDDED, report.mergeCase());
+        assertTrue(report.unpacked());
+    }
+
+    @Test
+    void caseOfAnEmbeddedSbomUnderAJarIsEmbeddedAndPacked() {
+        Component jar = lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar");
+        Bom target = bom(jar);
+        Bom source = bom();
+        source.getMetadata().setComponent(lib("a", "pkg:maven/g/a@1", null, null));
+
+        MergeReport report = AnchoredMerge.merge(target, source, AnchoredMerge.Scope.embedded(jar, LAYOUT)).report();
+
+        assertEquals(MergeCase.EMBEDDED, report.mergeCase());
+        assertFalse(report.unpacked());
+        assertEquals(TopComponent.MATCHES, report.top());
+        assertEquals(Verdict.CONSISTENT, report.verdict());
+    }
+
+    @Test
+    void embeddedSbomWithoutACopyHasNothingToCheck() {
+        Bom target = bom();
+        Bom source = bom(lib("x", "pkg:maven/g/x@1", "xx", "lib/x.jar"));
+        source.getMetadata().setComponent(lib("a", "pkg:maven/g/a@1", null, null));
+
+        MergeReport report = AnchoredMerge.merge(target, source,
+                AnchoredMerge.Scope.embedded(target.getMetadata().getComponent(), LAYOUT)).report();
+
+        assertEquals(MergeCase.EMBEDDED, report.mergeCase());
+        assertEquals(TopComponent.NO_COPY, report.top());
+        assertEquals(Verdict.NOTHING_TO_CHECK, report.verdict());
+        assertNull(report.warning());
+    }
+
+    @Test
+    void packedArchiveContentsAreNotChecked() {
+        // a thin jar's SBOM lists a hashed dependency the distribution does not ship
+        Component jar = lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar");
+        Bom target = bom(jar);
+        Bom source = bom(lib("x", "pkg:maven/g/x@1", "xx", null));
+        source.getMetadata().setComponent(lib("a", "pkg:maven/g/a@1", null, null));
+
+        MergeReport report = AnchoredMerge.merge(target, source, AnchoredMerge.Scope.embedded(jar, LAYOUT)).report();
+
+        assertEquals(1, report.hashCheckable());
+        assertEquals(Verdict.CONSISTENT, report.verdict());
+        assertNull(report.warning());
+    }
+
+    @Test
+    void unpackedArchiveSbomNamingAnotherArchiveWarns() {
+        Component x = lib("x", "pkg:maven/g/x@1", "xx", "web/app.war/WEB-INF/lib/x.jar");
+        Component war = war("pkg:maven/g/app@1?type=war", "web/app.war/", x);
+        Bom target = bom(war);
+        Bom source = bom(lib("x", "pkg:maven/g/x@1", "xx", "WEB-INF/lib/x.jar"));
+        source.getMetadata().setComponent(lib("other", "pkg:maven/g/other@1?type=war", null, null));
+
+        MergeReport report = AnchoredMerge.merge(target, source, AnchoredMerge.Scope.embedded(war, LAYOUT)).report();
+
+        assertEquals(1, report.hashVerified(), "its contents do match");
+        assertEquals("its top component pkg:maven/g/other@1?type=war is not this archive (pkg:maven/g/app@1?type=war)",
+                report.warning());
+    }
+
+    @Test
+    void npmPackagesHashedInTheLayoutAlgorithmAreCheckable() {
+        Bom target = bom();
+
+        MergeReport report = AnchoredMerge.merge(target, bom(lib("react", "pkg:npm/react@19", "nn", null)),
+                flat(target, LAYOUT)).report();
+
+        assertEquals(1, report.hashCheckable());
+        assertEquals(1, report.outcomes().get(Outcome.DROPPED));
+        assertEquals(Verdict.UNCONFIRMED, report.verdict());
+    }
+
+    @Test
+    void rootConfirmedByTheMainComponentAloneConfirmsTheSbom() {
+        Bom target = bom(lib("quarkus-run.jar", "pkg:generic/quarkus-run.jar@1", "r1", "lib/quarkus-run.jar"));
+        Bom source = bom(lib("x", "pkg:maven/g/x@1", "xx", "lib/main/x.jar"));
+        source.getMetadata().setComponent(lib("quarkus-run.jar", "pkg:generic/quarkus-run.jar@1", "r1",
+                "quarkus-run.jar"));
+
+        MergeReport report = AnchoredMerge.merge(target, source, flat(target, LAYOUT)).report();
+
+        assertTrue(report.rootConfirmed());
+        assertEquals("lib/", report.offset());
+        assertEquals(Verdict.CONFIRMED, report.verdict());
+        assertNull(report.warning());
+    }
+
+    @Test
+    void jarSbomOfAShadedDependencyWarns() {
+        Component jar = lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar");
+        Bom target = bom(jar);
+        Bom source = bom();
+        source.getMetadata().setComponent(lib("bar", "pkg:maven/org.other/bar@1.0", null, null));
+
+        MergeReport report = AnchoredMerge.merge(target, source, AnchoredMerge.Scope.embedded(jar, LAYOUT)).report();
+
+        assertEquals("its top component pkg:maven/org.other/bar@1.0 is not this archive (pkg:maven/g/a@1)",
+                report.warning());
     }
 
     /** Evidence of one occurrence at {@code location}. */

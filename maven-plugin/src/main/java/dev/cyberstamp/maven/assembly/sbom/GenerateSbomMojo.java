@@ -116,6 +116,14 @@ public class GenerateSbomMojo extends AbstractMojo {
     private boolean failOnMissingLicense;
 
     /**
+     * When {@code true}, the build fails if a merged SBOM does not describe
+     * what it was merged into (see the README's "Supported merges").
+     * Otherwise it is logged as a warning.
+     */
+    @Parameter(defaultValue = "false")
+    private boolean failOnUnconfirmedSbom;
+
+    /**
      * When {@code true}, the build fails if two distinct artifacts
      * have identical content hashes.
      */
@@ -201,7 +209,7 @@ public class GenerateSbomMojo extends AbstractMojo {
                     "Unsupported hash algorithm: " + hashAlgorithm, e);
         }
 
-        List<Bom> externalBomList = SbomGenerator.parseExternalBoms(
+        List<SbomGenerator.ExternalSbom> externalBomList = SbomGenerator.readExternalSboms(
                 externalSboms, project.getBasedir().toPath());
 
         // If the output file exists from a previous build, remember its hash
@@ -235,7 +243,7 @@ public class GenerateSbomMojo extends AbstractMojo {
         SbomGenerator generator = new SbomGenerator(
                 project, session, repoSystem, effectiveModelResolver,
                 messageDigest, bomHashAlgorithm,
-                failOnDuplicateHash, failOnMissingLicense, embeddedSboms,
+                failOnDuplicateHash, failOnMissingLicense, failOnUnconfirmedSbom, embeddedSboms,
                 librariesOnly, schemaVersion);
         generator.setProduct(product);
         generator.setIdentityEvidence(identityEvidence);
@@ -244,7 +252,7 @@ public class GenerateSbomMojo extends AbstractMojo {
             generator.setMavenArtifactMatcher(matcher);
             bom = generator.generate(entries, null, externalBomList,
                     null, null, project.getPackaging());
-        } catch (LookupBudgetExceededException e) {
+        } catch (LookupBudgetExceededException | UnconfirmedSbomException e) {
             throw new MojoFailureException(e.getMessage(), e);
         }
 

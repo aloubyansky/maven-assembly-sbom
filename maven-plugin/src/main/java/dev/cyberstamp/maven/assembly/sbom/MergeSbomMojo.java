@@ -155,13 +155,9 @@ public class MergeSbomMojo extends AbstractMojo {
             if (external == null) {
                 throw new MojoExecutionException("Failed to parse merge BOM: " + file);
             }
-            int componentCount = external.getComponents() != null ? external.getComponents().size() : 0;
-            if (nested) {
-                BomMerger.mergeUnder(bom, parentRef, external);
-            } else {
-                BomMerger.mergeFlat(bom, external);
-            }
-            getLog().info("Merged " + componentCount + " components from " + file.getName());
+            MergeReport report = nested ? BomMerger.mergeUnderReporting(bom, parentRef, external)
+                    : BomMerger.mergeFlatReporting(bom, external);
+            getLog().info("Merged " + file.getName() + ": " + report.describe());
         }
 
         if (outputFile.getParentFile() != null) {

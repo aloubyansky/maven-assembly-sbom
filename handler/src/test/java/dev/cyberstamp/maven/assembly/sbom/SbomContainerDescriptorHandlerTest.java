@@ -2116,6 +2116,276 @@ class SbomContainerDescriptorHandlerTest {
         return jarPath;
     }
 
+    @Test
+    void jarSbomNamingTheJarPasses() throws Exception {
+        ZipArchiver archiver = jarWithItsOwnSbom(library("org.ex", "a", "1.0"));
+        handler.setFailOnUnconfirmedSbom(true);
+
+        assertDoesNotThrow(() -> handler.finalizeArchiveCreation(archiver));
+    }
+
+    @Test
+    void jarSbomNamingAnotherArtifactFails() throws Exception {
+        ZipArchiver archiver = jarWithItsOwnSbom(library("org.other", "bar", "1.0"));
+        handler.setFailOnUnconfirmedSbom(true);
+
+        ArchiverException e = assertThrows(ArchiverException.class, () -> handler.finalizeArchiveCreation(archiver));
+
+        assertTrue(e.getMessage().contains("META-INF/sbom/bom.cdx.json"), e.getMessage());
+        assertTrue(e.getMessage().contains("its top component pkg:maven/org.other/bar@1.0 is not this archive"),
+                e.getMessage());
+    }
+
+    @Test
+    void unpackedWarSbomMatchedByLocationPasses() throws Exception {
+        Path hawtio = createTestJar("hawtio-1.0.jar", "hawtio-content");
+        Component lib = library("io.hawt", "hawtio", "1.0");
+        lib.setEvidence(occurrenceAt("WEB-INF/lib/hawtio-1.0.jar"));
+        lib.addHash(new Hash(Hash.Algorithm.SHA_256, SbomUtils.computeHash(MessageDigest.getInstance("SHA-256"),
+                hawtio)));
+        ZipArchiver archiver = unpackedWarWithSbom(hawtio, null, lib);
+        handler.setFailOnUnconfirmedSbom(true);
+
+        assertDoesNotThrow(() -> handler.finalizeArchiveCreation(archiver));
+    }
+
+    @Test
+    void unpackedWarSbomNamingAnotherWarFails() throws Exception {
+        Path hawtio = createTestJar("hawtio-1.0.jar", "hawtio-content");
+        Component lib = library("io.hawt", "hawtio", "1.0");
+        lib.setEvidence(occurrenceAt("WEB-INF/lib/hawtio-1.0.jar"));
+        lib.addHash(new Hash(Hash.Algorithm.SHA_256, SbomUtils.computeHash(MessageDigest.getInstance("SHA-256"),
+                hawtio)));
+        Component otherWar = library("org.example", "other", "1.0");
+        otherWar.setPurl("pkg:maven/org.example/other@1.0?type=war");
+        ZipArchiver archiver = unpackedWarWithSbom(hawtio, otherWar, lib);
+        handler.setFailOnUnconfirmedSbom(true);
+
+        ArchiverException e = assertThrows(ArchiverException.class, () -> handler.finalizeArchiveCreation(archiver));
+
+        assertTrue(e.getMessage().contains("its top component pkg:maven/org.example/other@1.0?type=war is not this "
+                + "archive"), e.getMessage());
+    }
+
+    @Test
+    void unpackedWarSbomOfAnotherWarFails() throws Exception {
+        Path hawtio = createTestJar("hawtio-1.0.jar", "hawtio-content");
+        Component other = library("org.other", "other", "1.0");
+        other.setEvidence(occurrenceAt("WEB-INF/lib/other-1.0.jar"));
+        other.addHash(new Hash("SHA-256", "0000000000000000000000000000000000000000000000000000000000000000"));
+        ZipArchiver archiver = unpackedWarWithSbom(hawtio, null, other);
+        handler.setFailOnUnconfirmedSbom(true);
+
+        ArchiverException e = assertThrows(ArchiverException.class, () -> handler.finalizeArchiveCreation(archiver));
+
+        assertTrue(e.getMessage().contains("none of its content hashes was found in the distribution"),
+                e.getMessage());
+    }
+
+    @Test
+    void unpackedWarJavaScriptOnlySbomPasses() throws Exception {
+        Path hawtio = createTestJar("hawtio-1.0.jar", "hawtio-content");
+        Component react = new Component();
+        react.setType(Component.Type.LIBRARY);
+        react.setName("react");
+        react.setVersion("18.0.0");
+        react.setPurl("pkg:npm/react@18.0.0");
+        react.setBomRef("pkg:npm/react@18.0.0");
+        ZipArchiver archiver = unpackedWarWithSbom(hawtio, null, react);
+        handler.setFailOnUnconfirmedSbom(true);
+
+        assertDoesNotThrow(() -> handler.finalizeArchiveCreation(archiver));
+    }
+
+    @Test
+    void externalSbomMatchedByHashPasses() throws Exception {
+        when(project.getArtifacts()).thenReturn(Set.of());
+        lenient().when(project.getBasedir()).thenReturn(tempDir.toFile());
+        Path widget = createTestFile("widget.js", "npm-pkg-data");
+        Component c = new Component();
+        c.setType(Component.Type.LIBRARY);
+        c.setGroup("@acme");
+        c.setName("widget");
+        c.setVersion("3.2.1");
+        c.addHash(new Hash("SHA-256", SbomUtils.computeHash(MessageDigest.getInstance("SHA-256"), widget)));
+        useExternalSbom(c);
+        handler.setFailOnUnconfirmedSbom(true);
+        ZipArchiver archiver = buildArchiver("base/node_modules/@acme/widget/index.js", widget);
+
+        assertDoesNotThrow(() -> handler.finalizeArchiveCreation(archiver));
+    }
+
+    @Test
+    void externalSbomOfAnotherProjectFails() throws Exception {
+        ZipArchiver archiver = distributionWithAnUnrelatedExternalSbom();
+        handler.setFailOnUnconfirmedSbom(true);
+
+        ArchiverException e = assertThrows(ArchiverException.class, () -> handler.finalizeArchiveCreation(archiver));
+
+        assertTrue(e.getMessage().contains("other-project.cdx.json at the distribution root"), e.getMessage());
+    }
+
+    @Test
+    void unconfirmedSbomOnlyWarnsByDefault() throws Exception {
+        ZipArchiver archiver = distributionWithAnUnrelatedExternalSbom();
+
+        handler.finalizeArchiveCreation(archiver);
+
+        assertNotNull(readBomFromArchiver(archiver));
+    }
+
+    /**
+     * A distribution of one jar, {@code org.ex:a:1.0}, carrying its own SBOM
+     * whose top component is {@code top}.
+     *
+     * @param top the SBOM's metadata component
+     * @return the archiver, ready for {@code finalizeArchiveCreation}
+     */
+    private ZipArchiver jarWithItsOwnSbom(Component top) throws Exception {
+        Bom sbom = new Bom();
+        Metadata metadata = new Metadata();
+        metadata.setComponent(top);
+        sbom.setMetadata(metadata);
+        Path sbomJson = tempDir.resolve("a.cdx.json");
+        BomWriter.writeJson(sbom, sbomJson, false);
+        Path a = tempDir.resolve("a-1.0.jar");
+        try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(a))) {
+            jos.putNextEntry(new JarEntry("data.txt"));
+            jos.write("a".getBytes(StandardCharsets.UTF_8));
+            jos.closeEntry();
+            jos.putNextEntry(new JarEntry("META-INF/sbom/bom.cdx.json"));
+            jos.write(Files.readAllBytes(sbomJson));
+            jos.closeEntry();
+        }
+        when(project.getArtifacts()).thenReturn(Set.of(createArtifact("org.ex", "a", "1.0", "jar", a.toFile())));
+        stubCollectReporting("a", "unshipped");
+        ZipArchiver archiver = new ZipArchiver();
+        archiver.setDestFile(tempDir.resolve("out.zip").toFile());
+        archiver.addFile(a.toFile(), "base/lib/a-1.0.jar");
+        return archiver;
+    }
+
+    /**
+     * A distribution with an overlay WAR, {@code org.example:overlay:1.0},
+     * unpacked at {@code web/app.war/} with {@code hawtio} in its
+     * {@code WEB-INF/lib}, whose embedded SBOM lists {@code components}.
+     *
+     * @param hawtio the jar the WAR ships
+     * @param top the SBOM's metadata component, or {@code null} for none
+     * @param components the SBOM's components
+     * @return the archiver, ready for {@code finalizeArchiveCreation}
+     */
+    private ZipArchiver unpackedWarWithSbom(Path hawtio, Component top, Component... components) throws Exception {
+        Bom sbom = new Bom();
+        if (top != null) {
+            Metadata metadata = new Metadata();
+            metadata.setComponent(top);
+            sbom.setMetadata(metadata);
+        }
+        for (Component c : components) {
+            sbom.addComponent(c);
+        }
+        Path sbomJson = tempDir.resolve("war-bom.cdx.json");
+        BomWriter.writeJson(sbom, sbomJson, false);
+        Path js = createTestFile("main.js", "console.log('hello')");
+        Path warFile = tempDir.resolve("overlay-1.0.war");
+        try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(warFile))) {
+            jos.putNextEntry(new JarEntry("WEB-INF/lib/hawtio-1.0.jar"));
+            jos.write(Files.readAllBytes(hawtio));
+            jos.closeEntry();
+            jos.putNextEntry(new JarEntry("static/js/main.js"));
+            jos.write(Files.readAllBytes(js));
+            jos.closeEntry();
+            jos.putNextEntry(new JarEntry("META-INF/sbom/bom.cdx.json"));
+            jos.write(Files.readAllBytes(sbomJson));
+            jos.closeEntry();
+        }
+        when(project.getArtifacts()).thenReturn(Set.of(createArtifact("org.example", "overlay", "1.0", "war",
+                warFile.toFile())));
+        MavenProject overlayProject = mock(MavenProject.class);
+        when(overlayProject.getGroupId()).thenReturn("org.example");
+        when(overlayProject.getArtifactId()).thenReturn("overlay");
+        when(overlayProject.getVersion()).thenReturn("1.0");
+        when(overlayProject.getPackaging()).thenReturn("war");
+        when(overlayProject.getArtifacts()).thenReturn(Set.of(createArtifact("io.hawt", "hawtio", "1.0", "jar",
+                hawtio.toFile())));
+        when(session.getProjects()).thenReturn(List.of(overlayProject));
+        ZipArchiver archiver = new ZipArchiver();
+        archiver.setDestFile(tempDir.resolve("dist.zip").toFile());
+        archiver.addFile(hawtio.toFile(), "base/web/app.war/WEB-INF/lib/hawtio-1.0.jar");
+        archiver.addFile(js.toFile(), "base/web/app.war/static/js/main.js");
+        return archiver;
+    }
+
+    /**
+     * A distribution of one file with an external SBOM,
+     * {@code other-project.cdx.json}, of a jar the distribution does not ship.
+     *
+     * @return the archiver, ready for {@code finalizeArchiveCreation}
+     */
+    private ZipArchiver distributionWithAnUnrelatedExternalSbom() throws Exception {
+        when(project.getArtifacts()).thenReturn(Set.of());
+        lenient().when(project.getBasedir()).thenReturn(tempDir.toFile());
+        Component c = library("com.google.guava", "failureaccess", "1.0");
+        c.addHash(new Hash("SHA-256", "0000000000000000000000000000000000000000000000000000000000000000"));
+        c.setEvidence(occurrenceAt("lib/failureaccess-1.0.jar"));
+        Bom sbom = new Bom();
+        sbom.addComponent(c);
+        Path file = tempDir.resolve("other-project.cdx.json");
+        BomWriter.writeJson(sbom, file, true);
+        handler.setExternalSboms(file.toString());
+        return buildArchiver("base/other.txt", createTestFile("other.txt", "other-data"));
+    }
+
+    /**
+     * Configures an external SBOM, {@code external.cdx.json}, listing
+     * {@code components}.
+     *
+     * @param components the SBOM's components
+     */
+    private void useExternalSbom(Component... components) throws Exception {
+        Bom sbom = new Bom();
+        for (Component c : components) {
+            sbom.addComponent(c);
+        }
+        Path file = tempDir.resolve("external.cdx.json");
+        BomWriter.writeJson(sbom, file, true);
+        handler.setExternalSboms(file.toString());
+    }
+
+    /**
+     * A Maven library whose bom-ref is its purl.
+     *
+     * @param group the groupId
+     * @param name the artifactId
+     * @param version the version
+     * @return the component
+     */
+    private static Component library(String group, String name, String version) {
+        Component c = new Component();
+        c.setType(Component.Type.LIBRARY);
+        c.setGroup(group);
+        c.setName(name);
+        c.setVersion(version);
+        c.setPurl("pkg:maven/" + group + "/" + name + "@" + version);
+        c.setBomRef(c.getPurl());
+        return c;
+    }
+
+    /**
+     * Evidence of one occurrence at {@code location}.
+     *
+     * @param location the location
+     * @return the evidence
+     */
+    private static Evidence occurrenceAt(String location) {
+        Evidence evidence = new Evidence();
+        Occurrence occurrence = new Occurrence();
+        occurrence.setLocation(location);
+        evidence.addOccurrence(occurrence);
+        return evidence;
+    }
+
     private Path createTestJar(String name, String content) throws Exception {
         Path dir = tempDir.resolve("target");
         Files.createDirectories(dir);

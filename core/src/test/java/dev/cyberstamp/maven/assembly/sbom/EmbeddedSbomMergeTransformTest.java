@@ -30,7 +30,7 @@ class EmbeddedSbomMergeTransformTest {
                 "ignore", index);
 
         int initialSize = targetBom.getComponents() != null ? targetBom.getComponents().size() : 0;
-        transform.apply(targetBom, model, owner -> "pkg:maven/org.a/lib-a@1.0");
+        transform.apply(targetBom, model, owner -> "pkg:maven/org.a/lib-a@1.0", new MergeReports());
 
         int finalSize = targetBom.getComponents() != null ? targetBom.getComponents().size() : 0;
         assertEquals(initialSize, finalSize,
@@ -53,7 +53,7 @@ class EmbeddedSbomMergeTransformTest {
         EmbeddedSbomMergeTransform transform = new EmbeddedSbomMergeTransform(
                 "link", index);
 
-        transform.apply(targetBom, model, owner -> "pkg:maven/org.a/lib-a@1.0");
+        transform.apply(targetBom, model, owner -> "pkg:maven/org.a/lib-a@1.0", new MergeReports());
 
         Component libA = targetBom.getComponents().get(0);
         assertNotNull(libA.getExternalReferences(),
@@ -88,7 +88,7 @@ class EmbeddedSbomMergeTransformTest {
         EmbeddedSbomMergeTransform transform = new EmbeddedSbomMergeTransform(
                 "merge", index);
 
-        transform.apply(targetBom, model, owner -> "pkg:maven/org.a/lib-a@1.0");
+        transform.apply(targetBom, model, owner -> "pkg:maven/org.a/lib-a@1.0", new MergeReports());
 
         Component libA = targetBom.getComponents().get(0);
         assertNotNull(libA.getComponents(), "parent should have nested components");
@@ -118,7 +118,7 @@ class EmbeddedSbomMergeTransformTest {
                 "merge", index);
 
         // Resolver returns parent ref but component not found -> flat merge
-        transform.apply(targetBom, model, owner -> "pkg:maven/org.x/unknown@1.0");
+        transform.apply(targetBom, model, owner -> "pkg:maven/org.x/unknown@1.0", new MergeReports());
 
         assertEquals(2, targetBom.getComponents().size(),
                 "should add component to top-level when parent not found");
@@ -153,7 +153,7 @@ class EmbeddedSbomMergeTransformTest {
             resolverCalled[0] = true;
             assertSame(ownerRef, owner, "resolver should receive the discovered SBOM owner");
             return "pkg:maven/org.a/lib-a@1.0";
-        });
+        }, new MergeReports());
 
         assertTrue(resolverCalled[0], "parent ref resolver should be invoked");
     }

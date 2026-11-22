@@ -78,14 +78,26 @@ public final class BomMerger {
      * @param sourceBom the external BOM whose components to import
      */
     public static void mergeUnder(Bom targetBom, String parentBomRef, Bom sourceBom) {
+        mergeUnderReporting(targetBom, parentBomRef, sourceBom);
+    }
+
+    /**
+     * Merges as {@link #mergeUnder} does, and reports what the merge did.
+     *
+     * @param targetBom the distribution BOM to merge into
+     * @param parentBomRef the {@code bom-ref} of the parent component
+     * @param sourceBom the external BOM whose components to import
+     * @return the merge's report, a {@link MergeCase#FINISHED finished-SBOM merge}
+     */
+    static MergeReport mergeUnderReporting(Bom targetBom, String parentBomRef, Bom sourceBom) {
         Component parent = findComponentByBomRef(targetBom, parentBomRef);
         if (parent == null) {
             throw new IllegalArgumentException(
                     "Cannot merge SBOM: parent component with bom-ref '"
                             + parentBomRef + "' not found");
         }
-        AnchoredMerge.merge(targetBom, sourceBom,
-                new AnchoredMerge.Scope(parent, null, Set.of(), Set.of(), true));
+        return AnchoredMerge.merge(targetBom, sourceBom,
+                new AnchoredMerge.Scope(parent, null, Set.of(), Set.of(), true)).report();
     }
 
     /**
@@ -96,11 +108,22 @@ public final class BomMerger {
      * @param sourceBom the external BOM whose components to import
      */
     public static void mergeFlat(Bom targetBom, Bom sourceBom) {
+        mergeFlatReporting(targetBom, sourceBom);
+    }
+
+    /**
+     * Merges as {@link #mergeFlat} does, and reports what the merge did.
+     *
+     * @param targetBom the BOM to merge into
+     * @param sourceBom the external BOM whose components to import
+     * @return the merge's report, a {@link MergeCase#FINISHED finished-SBOM merge}
+     */
+    static MergeReport mergeFlatReporting(Bom targetBom, Bom sourceBom) {
         Component main = targetBom.getMetadata() == null ? null : targetBom.getMetadata().getComponent();
         if (main == null) {
             throw new IllegalArgumentException("Cannot merge SBOM: the target has no main component");
         }
-        AnchoredMerge.merge(targetBom, sourceBom, AnchoredMerge.Scope.of(main, null));
+        return AnchoredMerge.merge(targetBom, sourceBom, AnchoredMerge.Scope.of(main, null)).report();
     }
 
     /**

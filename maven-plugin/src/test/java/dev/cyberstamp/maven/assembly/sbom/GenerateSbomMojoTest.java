@@ -30,6 +30,7 @@ import org.apache.maven.project.MavenProjectHelper;
 import org.cyclonedx.model.Bom;
 import org.cyclonedx.model.Component;
 import org.cyclonedx.model.ExternalReference;
+import org.cyclonedx.model.Hash;
 import org.cyclonedx.model.component.evidence.Method;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.RepositorySystemSession;
@@ -164,6 +165,31 @@ class GenerateSbomMojoTest {
         assertTrue(bom.getComponents().stream()
                 .anyMatch(c -> "react".equals(c.getName())),
                 "external SBOM components should be flat top-level peers");
+    }
+
+    @Test
+    void generateFailsOnAnUnconfirmedExternalSbom() throws Exception {
+        Files.writeString(inputDir.resolve("index.html"), "<html/>");
+        when(project.getArtifacts()).thenReturn(Set.of());
+        Bom other = new Bom();
+        Component guava = new Component();
+        guava.setType(Component.Type.LIBRARY);
+        guava.setName("guava");
+        guava.setVersion("33.0");
+        guava.setPurl("pkg:maven/com.google.guava/guava@33.0");
+        guava.setBomRef(guava.getPurl());
+        guava.addHash(new Hash("SHA-256",
+                "0000000000000000000000000000000000000000000000000000000000000000"));
+        other.setComponents(new ArrayList<>(List.of(guava)));
+        Path otherFile = tempDir.resolve("other-project.cdx.json");
+        BomWriter.writeJson(other, otherFile, false);
+
+        GenerateSbomMojo mojo = createMojo(tempDir.resolve("output.cdx.json").toFile());
+        setField(mojo, "externalSboms", otherFile.toString());
+        setField(mojo, "failOnUnconfirmedSbom", true);
+
+        MojoFailureException e = assertThrows(MojoFailureException.class, mojo::execute);
+        assertTrue(e.getMessage().contains("other-project.cdx.json"), e.getMessage());
     }
 
     @Test

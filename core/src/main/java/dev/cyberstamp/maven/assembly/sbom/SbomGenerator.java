@@ -50,6 +50,7 @@ public class SbomGenerator {
     private final MessageDigest messageDigest;
     private final Hash.Algorithm bomHashAlgorithm;
     private final boolean failOnDuplicateHash;
+    private final boolean failOnUnconfirmedSbom;
     private final boolean failOnMissingLicense;
     private final String embeddedSboms;
     private final boolean librariesOnly;
@@ -73,6 +74,8 @@ public class SbomGenerator {
      * @param bomHashAlgorithm the algorithm the BOM records hashes under
      * @param failOnDuplicateHash whether two artifacts with one hash fail the generation
      * @param failOnMissingLicense whether a component without a license fails the generation
+     * @param failOnUnconfirmedSbom whether a merged SBOM that does not describe what it was
+     *        merged into fails the generation
      * @param embeddedSboms {@code merge}, {@code link} or {@code ignore}: what to do with SBOMs
      *        found inside the archive entries
      * @param librariesOnly whether to leave file components out of the BOM
@@ -82,7 +85,7 @@ public class SbomGenerator {
             RepositorySystem repoSystem,
             EffectiveModelResolver effectiveModelResolver,
             MessageDigest messageDigest, Hash.Algorithm bomHashAlgorithm,
-            boolean failOnDuplicateHash, boolean failOnMissingLicense,
+            boolean failOnDuplicateHash, boolean failOnMissingLicense, boolean failOnUnconfirmedSbom,
             String embeddedSboms, boolean librariesOnly, String schemaVersion) {
         this.project = project;
         this.session = session;
@@ -92,6 +95,7 @@ public class SbomGenerator {
         this.bomHashAlgorithm = bomHashAlgorithm;
         this.failOnDuplicateHash = failOnDuplicateHash;
         this.failOnMissingLicense = failOnMissingLicense;
+        this.failOnUnconfirmedSbom = failOnUnconfirmedSbom;
         this.embeddedSboms = embeddedSboms;
         this.librariesOnly = librariesOnly;
         this.schemaVersion = SchemaVersions.resolve(schemaVersion);
@@ -141,14 +145,14 @@ public class SbomGenerator {
      *
      * @param entries the file entries to analyze
      * @param baseDirPrefix prefix to strip from entry paths, or {@code null}
-     * @param externalBoms external SBOMs to merge as top-level components
+     * @param externalSboms external SBOMs to merge as descriptions of the whole distribution
      * @param assemblyId the id of the assembly the BOM describes, or {@code null}
      * @param classifier the Maven classifier, or {@code null}
      * @param archiveType the archive type for the main component PURL, or {@code null}
      * @return the assembled BOM
      */
     Bom generate(List<FileEntry> entries, String baseDirPrefix,
-            List<Bom> externalBoms, String assemblyId, String classifier,
+            List<ExternalSbom> externalSboms, String assemblyId, String classifier,
             String archiveType) {
         effectiveModelResolver.init(
                 session.getRepositorySession(),
@@ -158,6 +162,7 @@ public class SbomGenerator {
                 new EffectiveModelLicenseSource(effectiveModelResolver), failOnMissingLicense);
         cachedManagedDeps = null;
 
+        List<Bom> externalBoms = externalSboms.stream().map(ExternalSbom::bom).toList();
         AssemblyComponents model = analyzeEntries(entries, baseDirPrefix, externalBoms);
 
         // Populate AssemblyMetadata
@@ -190,8 +195,13 @@ public class SbomGenerator {
 
         // Post-processing (detected/external SBOMs, filtering, dedup)
         ArchiveIndex archiveIndex = ArchiveIndex.of(entries, baseDirPrefix, bomHashAlgorithm.getSpec());
-        processDiscoveredSboms(rendered, model, archiveIndex);
-        processExternalBoms(bom, externalBoms, archiveIndex);
+        MergeReports mergeReports = new MergeReports();
+        processDiscoveredSboms(rendered, model, archiveIndex, mergeReports);
+        processExternalBoms(bom, externalSboms, archiveIndex, mergeReports);
+        mergeReports.logSummary();
+        if (failOnUnconfirmedSbom) {
+            mergeReports.failIfUnconfirmed();
+        }
 
         if (librariesOnly) {
             removeFileComponents(bom);
@@ -227,11 +237,13 @@ public class SbomGenerator {
      * @param rendered the rendered BOM, with the bom-ref of every model copy
      * @param model the analyzed components, carrying the discovered SBOMs
      * @param archiveIndex the scanned layout the merged components are checked against
+     * @param reports collects the report of each merged SBOM
      */
-    private void processDiscoveredSboms(RenderedBom rendered, AssemblyComponents model, ArchiveIndex archiveIndex) {
+    private void processDiscoveredSboms(RenderedBom rendered, AssemblyComponents model, ArchiveIndex archiveIndex,
+            MergeReports reports) {
         EmbeddedSbomMergeTransform transform = new EmbeddedSbomMergeTransform(
                 embeddedSboms, archiveIndex);
-        transform.apply(rendered.bom(), model, owner -> resolveParentBomRef(owner, rendered));
+        transform.apply(rendered.bom(), model, owner -> resolveParentBomRef(owner, rendered), reports);
     }
 
     /**
@@ -240,19 +252,22 @@ public class SbomGenerator {
      * and those it found in the layout are kept where it found them.
      *
      * @param bom the BOM to merge into
-     * @param externalBomList the external SBOMs, possibly empty
+     * @param externalSbomList the external SBOMs, possibly empty
      * @param archiveIndex the scanned layout the merged components are checked against
+     * @param reports collects the report of each merged SBOM
      */
-    private void processExternalBoms(Bom bom, List<Bom> externalBomList, ArchiveIndex archiveIndex) {
-        if (externalBomList.isEmpty()) {
+    private void processExternalBoms(Bom bom, List<ExternalSbom> externalSbomList, ArchiveIndex archiveIndex,
+            MergeReports reports) {
+        if (externalSbomList.isEmpty()) {
             return;
         }
         Set<Component> rejected = lastAnalyzer.rejectedExternalComponents();
         Set<Component> matched = lastAnalyzer.matchedExternalComponents();
         AnchoredMerge.Scope scope = new AnchoredMerge.Scope(bom.getMetadata().getComponent(), archiveIndex,
                 rejected, matched);
-        for (Bom externalBom : externalBomList) {
-            AnchoredMerge.merge(bom, externalBom, scope);
+        for (ExternalSbom external : externalSbomList) {
+            MergeReport report = AnchoredMerge.merge(bom, external.bom(), scope).report();
+            reports.add(external.path(), MergeReports.where(report, scope.parent()), report);
         }
     }
 
@@ -340,6 +355,15 @@ public class SbomGenerator {
     }
 
     /**
+     * An external SBOM and the path it was configured by.
+     *
+     * @param path the path as configured, for log lines
+     * @param bom the parsed SBOM
+     */
+    record ExternalSbom(String path, Bom bom) {
+    }
+
+    /**
      * Parses external SBOM files from a comma-separated path string,
      * resolving relative paths against the given base directory.
      *
@@ -348,10 +372,23 @@ public class SbomGenerator {
      * @return the parsed BOMs (never {@code null})
      */
     public static List<Bom> parseExternalBoms(String externalSboms, Path baseDir) {
+        return readExternalSboms(externalSboms, baseDir).stream().map(ExternalSbom::bom).toList();
+    }
+
+    /**
+     * Parses external SBOM files from a comma-separated path string,
+     * resolving relative paths against the given base directory, keeping the
+     * path each was configured by.
+     *
+     * @param externalSboms comma-separated SBOM file paths, or {@code null}
+     * @param baseDir the base directory for relative path resolution, or {@code null}
+     * @return the parsed SBOMs with their paths (never {@code null})
+     */
+    static List<ExternalSbom> readExternalSboms(String externalSboms, Path baseDir) {
         if (externalSboms == null || externalSboms.isBlank()) {
             return List.of();
         }
-        List<Bom> result = new ArrayList<>();
+        List<ExternalSbom> result = new ArrayList<>();
         for (String pathStr : externalSboms.split(",")) {
             pathStr = pathStr.trim();
             if (pathStr.isEmpty()) {
@@ -369,7 +406,7 @@ public class SbomGenerator {
             if (bom != null) {
                 log.debug("Loaded external SBOM from {} ({} components)", bomPath,
                         bom.getComponents() != null ? bom.getComponents().size() : 0);
-                result.add(bom);
+                result.add(new ExternalSbom(pathStr, bom));
             }
         }
         return result;

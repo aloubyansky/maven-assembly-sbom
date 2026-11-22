@@ -35,9 +35,10 @@ final class EmbeddedSbomMergeTransform {
      * @param parentRefResolver resolves a {@link DiscoveredSbom#owner()} id
      *        (possibly {@code null}) to the bom-ref of the component to merge
      *        under, e.g. from {@link RenderedBom#bomRefs()}
+     * @param reports collects the report of each merged SBOM
      */
     void apply(Bom bom, AssemblyComponents model,
-            Function<ComponentId, String> parentRefResolver) {
+            Function<ComponentId, String> parentRefResolver, MergeReports reports) {
         if ("ignore".equalsIgnoreCase(mode)) {
             return;
         }
@@ -52,7 +53,9 @@ final class EmbeddedSbomMergeTransform {
                 if (parent == null) {
                     parent = bom.getMetadata().getComponent();
                 }
-                AnchoredMerge.merge(bom, detected.parsedBom(), AnchoredMerge.Scope.of(parent, archiveIndex));
+                MergeReport report = AnchoredMerge.merge(bom, detected.parsedBom(),
+                        AnchoredMerge.Scope.embedded(parent, archiveIndex)).report();
+                reports.add(detected.archivePath(), MergeReports.where(report, parent), report);
             }
         }
     }

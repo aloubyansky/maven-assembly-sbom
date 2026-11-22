@@ -31,6 +31,7 @@ The project includes two SBOM generators:
   - [Shaded / Fat JAR Detection](#shaded--fat-jar-detection)
   - [Dependency Graph](#dependency-graph)
   - [SBOM Merging](#sbom-merging)
+    - [Supported merges](#supported-merges)
   - [Cryptography Bills of Materials (CBOM)](#cryptography-bills-of-materials-cbom)
   - [Reproducible Builds](#reproducible-builds)
   - [CycloneDX Component Types](#cyclonedx-component-types)
@@ -155,6 +156,7 @@ Options are set inside the `<containerDescriptorHandler>` block in the assembly 
 | `failOnMissingLicense` | `false` | When `true`, the build fails if any library component has no license information in its POM |
 | `hashAlgorithm` | `SHA-256` | The hash algorithm used for content hashes. Must be supported by both `java.security.MessageDigest` and the [CycloneDX specification](https://cyclonedx.org/docs/1.6/json/#hash-alg) (MD5, SHA-1, SHA-256, SHA-384, SHA-512, SHA3-256, SHA3-384, SHA3-512, BLAKE2b-256, BLAKE2b-384, BLAKE2b-512, BLAKE3) |
 | `failOnDuplicateHash` | `true` | When `true`, the build fails if two distinct artifacts have identical content hashes. Set to `false` to log a warning instead |
+| `failOnUnconfirmedSbom` | `false` | When `true`, the build fails if a merged SBOM does not describe what it was merged into (see [Supported merges](#supported-merges)). Otherwise a warning is logged |
 | `identityEvidence` | `true` | When `true`, components this tool identifies carry identity evidence (see [Evidence](#evidence)). Set to `false` to emit none of its own; identity from external or embedded SBOMs is preserved |
 | `embeddedSboms` | `merge` | How to handle CycloneDX SBOM files (`.cdx.json`, `.cdx.xml`) found inside the archive: `merge` (import components as nested sub-components of the containing artifact), `link` (add an external reference of type `bom` to the containing artifact), or `ignore` |
 | `externalSboms` | _(none)_ | Comma-separated list of file paths to external CycloneDX SBOMs to merge into the distribution SBOM. Relative paths are resolved against the project base directory. External SBOM component hashes also participate in archive entry matching |
@@ -350,6 +352,7 @@ The goal runs before the archive is packaged. For a `war` module, it leaves out 
 | `externalSboms` | _(none)_ | Comma-separated paths to external SBOMs to merge |
 | `failOnMissingLicense` | `false` | Fail the build if any library has no license info |
 | `failOnDuplicateHash` | `true` | Fail the build on duplicate artifact hashes |
+| `failOnUnconfirmedSbom` | `false` | Fail the build if a merged SBOM does not describe what it was merged into (see [Supported merges](#supported-merges)) |
 | `identityEvidence` | `true` | Emit identity evidence for components this tool identifies (see [Evidence](#evidence)) |
 | `librariesOnly` | `false` | Exclude generic file components from the output |
 | `attach` | `false` | Attach the generated SBOM to the Maven project as an artifact with type `cdx.json` or `cdx.xml` and classifier `cyclonedx` |
@@ -395,7 +398,7 @@ Combines multiple CycloneDX SBOMs into a single BOM. This is useful when a proje
 | `attach` | `false` | Attach the merged SBOM to the Maven project as an artifact with type `cdx.json` or `cdx.xml` and classifier `cyclonedx` |
 | `schemaVersion` | _(latest)_ | CycloneDX schema version to use for the merged SBOM output, e.g. `1.5` or `1.6`. Defaults to the latest version supported by the integrated CycloneDX Java library |
 
-By default, external SBOM components are added as top-level components alongside the base BOM's components (flat merge). This is appropriate when the external components are peers of the base components (e.g., npm dependencies alongside Maven dependencies in a WAR). Set `nested` to `true` to nest them as sub-components of the parent component instead, which is appropriate when the external SBOM describes contents _inside_ a specific artifact. Dependency entries from external SBOMs are always imported into the merged BOM's dependency section.
+By default, external SBOM components are added as top-level components alongside the base BOM's components (flat merge). This is appropriate when the external components are peers of the base components (e.g., npm dependencies alongside Maven dependencies in a WAR). Set `nested` to `true` to nest them as sub-components of the parent component instead, which is appropriate when the external SBOM describes contents _inside_ a specific artifact. Dependency entries from external SBOMs are always imported into the merged BOM's dependency section. Each merge is a [finished-SBOM merge](#finished-sbom-merge): components are matched by hash, location or purl, and with no distribution to check against nothing is dropped or checked. The goal logs the counts of each merge.
 
 ## How It Works
 
@@ -483,6 +486,59 @@ The claim is cross-checked against the jar's own `pom.properties` (groupId, arti
 
 When several SBOMs list the same hash, agreeing claims keep the highest confidence; claims naming different purls are all discarded (with a warning) and the jar falls through to `pom.properties`. Setting `embeddedSboms` to `ignore` disables this lookup too.
 
+#### Supported merges
+
+Merging an SBOM assumes things about it: which part of the distribution it describes, and where its root sits. When an assumption is wrong, the result still looks like a valid SBOM, but it is wrong: components are dropped as "not shipped", or a copy takes another artifact's metadata. Each merge is therefore one of the cases below, fixed by the setting that brings the SBOM in, never guessed from its content. For every merged SBOM, the build reports how its components were matched, kept and dropped, and what the distribution says about it:
+
+```
+[INFO] SBOM META-INF/sbom/bom.cdx.json under web/console.war/ (embedded):
+       78 matched (76 location, 2 purl), 76 hash-verified, 1 kept in the distribution, 5 dropped; root confirmed by hash
+[WARN] SBOM target/quarkus-sbom.json at the distribution root (external):
+       none of its content hashes was found in the distribution: it may not describe what it was merged into; 210 kept unchecked, 37 dropped; root assumed at the distribution root
+[INFO] Merged 3 SBOMs: 1 confirmed, 1 consistent, 1 unconfirmed, 0 with nothing to check
+```
+
+**Only a content hash confirms.** A location says where a file sits, not what it is, and a purl names an artifact any project may use. A component confirms an SBOM when it and the distribution share a hash value in one algorithm: the component matched a copy with that hash, or the distribution holds a file with it, or the analyzer matched it to an archive file by hash. A component matched by location without a hash in common is counted as "by location only" and confirms nothing. Locations still decide where a component is placed.
+
+The verdicts:
+
+| Verdict | Meaning | Logged at |
+|---|---|---|
+| confirmed | the distribution holds its contents, or its root, by hash | INFO |
+| consistent | an embedded SBOM whose top component names its archive, with nothing to check by hash | DEBUG |
+| unconfirmed | its top component names another artifact, or it lists components with hashes in the BOM's algorithm and none of them is in the distribution | WARN |
+| nothing to check | none of the above could be checked | INFO or DEBUG |
+
+An unconfirmed SBOM is still merged. Set `failOnUnconfirmedSbom` to `true` to fail the build instead: the build runs every merge first, and the failure lists every unconfirmed SBOM.
+
+##### Embedded SBOM
+
+An SBOM found inside an artifact the distribution ships, in a `.jar`, `.war`, `.ear`, `.rar` or `.par` (see [Auto-detection](#auto-detection)), merged as a description of that artifact. These are the SBOMs the `embeddedSboms` option controls, not this plugin's own output written into the archive with `outputMode=embedded`.
+
+- **Its top component must name the archive** it was found in: the same purl (a redundant `type=jar` qualifier aside) or a common hash. When it names another artifact, e.g. the SBOM of a dependency shaded into the jar together with its own SBOM, it is unconfirmed. It is still merged into the archive.
+- **When the archive is unpacked** (e.g. the console WAR unpacked to `web/console.war/`), its files are in the distribution, so its contents are checked too. It is confirmed when they, or its root, are found by hash under the archive's directory, and unconfirmed when it lists components with hashes in the BOM's algorithm and none of them is there.
+- **When the archive is packed**, its contents are not files of the distribution, and the SBOM cannot hold the hash of the archive it sits in. So it can never be confirmed: at best it is consistent, its top component naming the archive. Its components with no copy, such as a thin jar's dependencies that do not ship, are not a reason to warn. Packed archives' SBOMs are logged at DEBUG, since a distribution may hold many.
+- **Nothing to check** when the top component has neither a purl nor a hash and nothing can be checked by hash, or when the archive has no copy in the distribution (its SBOM is then merged at the distribution root, as before).
+
+##### External SBOM
+
+An SBOM configured with `externalSboms`, merged as a description of the whole distribution, e.g. a Quarkus application's `quarkus-run-cyclonedx.json` or a JavaScript SBOM generated for the distribution. It is confirmed when its contents, or its root, are found by hash, unconfirmed when it lists components with hashes in the BOM's algorithm and none of them is in the distribution, and has nothing to check otherwise.
+
+##### Finished-SBOM merge
+
+A merge of finished SBOMs with no distribution to check against: the [`merge` goal](#merge-goal), and `BomMerger.mergeFlat` / `mergeUnder` for API users. Components are matched by hash, location or purl, nothing is dropped, nothing is checked, and it never warns. The goal logs the counts of each merge.
+
+##### Limitations
+
+- Packages compiled into a bundle (npm packages in a JavaScript bundle) cannot be found in the distribution. They are kept on the SBOM's word, and an SBOM of only such packages is never confirmed or warned about: a JavaScript SBOM of the wrong project goes unnoticed.
+- A purl match confirms nothing, and neither does a location match without a common hash. An SBOM without hashes can at best be consistent.
+- An SBOM inside a packed archive is consistent at best: its top component's purl is the only thing that can be compared.
+- The `merge` goal has no distribution to check against, so it drops nothing and never warns.
+- The SBOM's root offset is derived from one component matched by hash whose location ends with the component's own. When none matches, the root is assumed: the unpacked archive's directory, or the distribution root.
+- Dependency edges are never used for matching; they are carried over as the SBOM states them.
+- An archive unpacked into the distribution cannot be hash-checked as its packed file.
+- Packages with a content hash in the BOM's algorithm are checked even when they are not files, so an SBOM of npm packages with such hashes is unconfirmed when none of them is found.
+
 #### How SBOMs Are Merged
 
 A merged SBOM describes part of the distribution — the jar it was found in, an unpacked WAR, or the whole archive — so merging means recognizing which of its components are already in the BOM, not adding everything it lists:
@@ -491,7 +547,7 @@ A merged SBOM describes part of the distribution — the jar it was found in, an
 - **Unmatched components** — a component without a location nested in the SBOM under a matched jar or native binary is kept under that binary (e.g. a shaded dependency). A component the archive would show if it shipped — a Maven package or a file with a location, or anything with a hash in the BOM's algorithm — is dropped when the archive does not contain it. Anything else, such as npm packages compiled into a JavaScript bundle, is kept under the component the SBOM describes.
 - **Bom-refs and dependencies** — a kept component whose bom-ref is taken gets `#2`, `#3`, ... appended, and the SBOM's own dependency edges are carried over between the matched or kept components; an edge to a dropped component is dropped.
 
-The `merge` goal applies the same rules to finished SBOMs, except that with no archive to check nothing is dropped.
+The `merge` goal applies the same rules to finished SBOMs, except that with no archive to check nothing is dropped. What each kind of merge is expected to show, and what the build warns about, is in [Supported merges](#supported-merges).
 
 #### Handling Modes
 
@@ -506,7 +562,7 @@ The `embeddedSboms` option controls what happens with detected SBOMs:
 The `externalSboms` option accepts a comma-separated list of file paths to CycloneDX SBOMs generated outside the Maven build (e.g., by `cdxgen`, `@cyclonedx/cyclonedx-npm`, or pnpm). These SBOMs are:
 
 1. **Used for archive entry matching** — component hashes from external SBOMs are checked against unmatched archive entries, before their `pom.properties` and before [detected SBOMs](#identification-from-detected-sboms). If a match is found, the entry is identified from the external SBOM rather than appearing as an unidentified FILE component. A `pkg:maven` claim is first cross-checked against the jar's own `pom.properties`: when a descriptor declares the same groupId and artifactId with another version, the claim is not used and its component is not merged; the jar goes on to the next identification steps ([detected SBOMs](#identification-from-detected-sboms), then its `pom.properties`). For an accepted claim, the jar's other descriptors that the external component does not already list are added under it as bundled dependencies.
-2. **Merged flat as top-level components** — external SBOM components are added as peers of the distribution's own components (not nested under the main component). Their dependency entries are imported into the BOM's dependency section, and the external SBOM's top-level dependencies are linked under the distribution's main component. A component from an external SBOM keeps the identity evidence its SBOM carried. If that evidence has no purl identity and the jar's own `pom.properties` declare exactly its coordinates, this tool records that as `manifest-analysis` at confidence 1.0; the same applies to its nested entries (such as dependencies bundled in a shaded jar) whose coordinates one of the jar's `pom.properties` declares exactly. Otherwise it adds none (see [Evidence](#evidence)).
+2. **Merged as a description of the whole distribution** — an [external SBOM](#external-sbom): its components are anchored to the components already in the BOM as described in [How SBOMs Are Merged](#how-sboms-are-merged), components the analyzer rejected are dropped, and those it matched to archive files are kept where it found them. A component from an external SBOM keeps the identity evidence its SBOM carried. If that evidence has no purl identity and the jar's own `pom.properties` declare exactly its coordinates, this tool records that as `manifest-analysis` at confidence 1.0; the same applies to its nested entries (such as dependencies bundled in a shaded jar) whose coordinates one of the jar's `pom.properties` declares exactly. Otherwise it adds none (see [Evidence](#evidence)).
 
 Example configuration:
 

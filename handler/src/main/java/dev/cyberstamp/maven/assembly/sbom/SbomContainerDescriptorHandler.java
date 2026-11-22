@@ -97,6 +97,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     private String schemaVersion;
     private boolean prettyPrint;
     private boolean failOnMissingLicense;
+    private boolean failOnUnconfirmedSbom;
     private boolean failOnDuplicateHash = true;
     private boolean identityEvidence = true;
     private String embeddedSboms = "merge";
@@ -157,7 +158,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
         try {
             initConfig(archiver);
 
-            List<Bom> externalBomList = SbomGenerator.parseExternalBoms(
+            List<SbomGenerator.ExternalSbom> externalBomList = SbomGenerator.readExternalSboms(
                     externalSboms,
                     project.getBasedir() != null ? project.getBasedir().toPath() : null);
 
@@ -167,7 +168,7 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
             SbomGenerator generator = new SbomGenerator(
                     project, session, repoSystem, effectiveModelResolver,
                     messageDigest, bomHashAlgorithm,
-                    failOnDuplicateHash, failOnMissingLicense, embeddedSboms,
+                    failOnDuplicateHash, failOnMissingLicense, failOnUnconfirmedSbom, embeddedSboms,
                     librariesOnly, schemaVersion);
             generator.setProduct(product);
             generator.setIdentityEvidence(identityEvidence);
@@ -184,6 +185,8 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
             writeBomOutput(bom, baseDirPrefix, archiver);
 
         } catch (LicenseResolutionException e) {
+            throw new ArchiverException(e.getMessage(), e);
+        } catch (UnconfirmedSbomException e) {
             throw new ArchiverException(e.getMessage(), e);
         } catch (LookupBudgetExceededException e) {
             throw new ArchiverException(e.getMessage(), e);
@@ -1036,6 +1039,18 @@ public class SbomContainerDescriptorHandler implements ContainerDescriptorHandle
     @SuppressWarnings("unused")
     public void setFailOnMissingLicense(boolean failOnMissingLicense) {
         this.failOnMissingLicense = failOnMissingLicense;
+    }
+
+    /**
+     * Controls whether a merged SBOM that does not describe what it was
+     * merged into causes a build failure (see the README's "Supported
+     * merges"). Otherwise it is logged as a warning.
+     *
+     * @param failOnUnconfirmedSbom whether to fail on unconfirmed SBOMs
+     */
+    @SuppressWarnings("unused")
+    public void setFailOnUnconfirmedSbom(boolean failOnUnconfirmedSbom) {
+        this.failOnUnconfirmedSbom = failOnUnconfirmedSbom;
     }
 
     /**
