@@ -252,6 +252,25 @@ class AnchoredMergeTest {
     }
 
     @Test
+    void edgeBetweenTwoNestedComponentsIsADependency() {
+        Component jar = lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar");
+        Bom target = bom(jar);
+        Bom source = bom(lib("x", "pkg:maven/g/x@1", null, null), lib("y", "pkg:maven/g/y@1", null, null));
+        source.getMetadata().getComponent().setBomRef("pkg:maven/g/a@1?type=jar");
+        source.addDependency(dependency("pkg:maven/g/a@1?type=jar", "pkg:maven/g/x@1"));
+        source.addDependency(dependency("pkg:maven/g/x@1", "pkg:maven/g/y@1"));
+        source.addDependency(dependency("pkg:maven/g/y@1"));
+
+        AnchoredMerge.merge(target, source, AnchoredMerge.Scope.of(jar, LAYOUT));
+
+        assertEquals(List.of("pkg:maven/g/x@1", "pkg:maven/g/y@1"),
+                jar.getComponents().stream().map(Component::getBomRef).sorted().toList(), "both shaded in the jar");
+        assertEquals(List.of(), dependsOn(target, "pkg:maven/g/a@1"), "the jar contains x");
+        assertEquals(List.of("pkg:maven/g/y@1"), dependsOn(target, "pkg:maven/g/x@1"),
+                "y is nested next to x, not in it: x still depends on it");
+    }
+
+    @Test
     void sourceMainEdgesGoToTheMergeParent() {
         Component jar = lib("a", "pkg:maven/g/a@1", "aa", "lib/a.jar");
         Component y = lib("y", "pkg:maven/g/y@1", "yy", "lib/y.jar");
